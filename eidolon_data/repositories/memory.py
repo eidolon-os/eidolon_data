@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
+
 from eidolon_data.repositories.base import Repository
 from eidolon_data.schema.models import MemoryRealmRow
 
@@ -36,3 +38,12 @@ class MemoryRepository(Repository):
     async def get_realm(self, realm_id: str) -> MemoryRealmRow | None:
         async with self._session_factory() as session:
             return await session.get(MemoryRealmRow, realm_id)
+
+    async def list_realms_for_owner(self, owner_id: str) -> list[MemoryRealmRow]:
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(MemoryRealmRow)
+                .where(MemoryRealmRow.owner_id == owner_id)
+                .order_by(MemoryRealmRow.created_at)
+            )
+            return list(rows)

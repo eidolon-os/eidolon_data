@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from eidolon_data import DataSettings, DataStore
+from eidolon_data.repositories.persona import PersonaGenomeConflict
 from eidolon_data.schema.types import (
     MemoryEngineHealth,
     MemoryIngestResult,
@@ -65,8 +66,11 @@ async def test_repository_workflow_round_trips_core_entities(store: DataStore) -
             "template_revision": 1,
         },
         genome_json={"identity": {"name": "Xiaoyi"}},
+        prompt_markdown="# Xiaoyi\n",
     )
     assert genome.genome_json["identity"]["name"] == "Xiaoyi"
+    assert genome.prompt_markdown == "# Xiaoyi\n"
+    assert genome.status == "committed"
     assert genome.source_json["template_id"] == "warm-companion"
     assert (await store.companions.get(companion.companion_id)).current_genome_id == "genome-1"
 
@@ -153,3 +157,125 @@ async def test_repository_workflow_round_trips_core_entities(store: DataStore) -
     )
     events = await store.events.list_for_subject(subject_type="job", subject_id=job.job_id)
     assert [event.event_type for event in events] == ["job.completed"]
+
+
+async def test_owner_service_creates_owner_without_workspace(store: DataStore) -> None:
+    result = await store.owner_service.create_owner(
+        owner_id="owner-service",
+        display_name="Owner Service",
+    )
+
+    assert result.owner.status == "active"
+    assert await store.companions.list_for_owner("owner-service") == []
+    assert await store.memory_repo.list_realms_for_owner("owner-service") == []
+
+    events = await store.events.list_for_subject(
+        subject_type="owner",
+        subject_id="owner-service",
+    )
+    assert [event.event_type for event in events] == ["owner.created"]
+
+
+async def test_companion_workspace_initialization_is_atomic(store: DataStore) -> None:
+    await store.owner_service.create_owner(owner_id="owner-workspace", display_name="Owner")
+
+    result = await store.companion_workspace.initialize_workspace(
+        owner_id="owner-workspace",
+        companion_display_name="Xiaoyi",
+        genome_json={"identity": {"name": "Xiaoyi"}},
+        memory_policy_json={"scope": "owner"},
+    )
+
+    assert result.companion.companion_id == "c:owner-workspace:default"
+    assert result.persona_genome.genome_id == "g:owner-workspace:default:v1"
+    assert result.persona_genome.status == "committed"
+    assert "# Xiaoyi" in result.persona_genome.prompt_markdown
+    assert result.memory_realm.realm_id == "r:owner-workspace:default"
+
+    companion = await store.companions.get(result.companion.companion_id)
+    assert companion is not None
+    assert companion.current_genome_id == result.persona_genome.genome_id
+    assert companion.default_memory_realm_id == result.memory_realm.realm_id
+
+    events = await store.events.list_for_owner("owner-workspace", limit=10)
+    assert {
+        "owner.created",
+        "companion.created",
+        "persona_genome.created",
+        "memory_realm.created",
+        "companion.workspace.initialized",
+    }.issubset({event.event_type for event in events})
+
+    with pytest.raises(ValueError, match="already"):
+        await store.companion_workspace.initialize_workspace(owner_id="owner-workspace")
+
+
+async def test_persona_genome_proposal_requires_current_base(store: DataStore) -> None:
+    await store.owner_service.create_owner(owner_id="owner-evolve", display_name="Owner")
+    initial = await store.companion_workspace.initialize_workspace(
+        owner_id="owner-evolve",
+        companion_display_name="Evo",
+    )
+
+    proposal = await store.persona.create_genome_proposal(
+        genome_id="g:owner-evolve:proposal:v2",
+        owner_id="owner-evolve",
+        companion_id=initial.companion.companion_id,
+        base_genome_id=initial.persona_genome.genome_id,
+        genome_json={"identity": {"name": "Evo"}},
+        prompt_markdown="# Evo v2\n",
+        change_summary="More concise",
+    )
+    assert proposal.status == "proposed"
+    assert proposal.version == 2
+
+    activated = await store.persona.activate_genome(
+        owner_id="owner-evolve",
+        companion_id=initial.companion.companion_id,
+        genome_id=proposal.genome_id,
+        expected_base_genome_id=initial.persona_genome.genome_id,
+    )
+    assert activated.status == "committed"
+    companion = await store.companions.get(initial.companion.companion_id)
+    assert companion.current_genome_id == proposal.genome_id
+    assert (await store.persona.get_current_genome(initial.companion.companion_id)).genome_id == proposal.genome_id
+
+
+async def test_stale_persona_genome_proposal_does_not_replace_current_genome(store: DataStore) -> None:
+    await store.owner_service.create_owner(owner_id="owner-stale", display_name="Owner")
+    initial = await store.companion_workspace.initialize_workspace(
+        owner_id="owner-stale",
+        companion_display_name="Evo",
+    )
+    companion_id = initial.companion.companion_id
+
+    proposal = await store.persona.create_genome_proposal(
+        genome_id="g:owner-stale:proposal:v2",
+        owner_id="owner-stale",
+        companion_id=companion_id,
+        base_genome_id=initial.persona_genome.genome_id,
+        genome_json={"identity": {"name": "Evo"}},
+        prompt_markdown="# Old proposal\n",
+    )
+    current = await store.persona.create_genome(
+        genome_id="g:owner-stale:current:v3",
+        owner_id="owner-stale",
+        companion_id=companion_id,
+        event_id="event-current-genome",
+        version=3,
+        genome_json={"identity": {"name": "Evo"}},
+        prompt_markdown="# Current genome\n",
+    )
+
+    with pytest.raises(PersonaGenomeConflict):
+        await store.persona.activate_genome(
+            owner_id="owner-stale",
+            companion_id=companion_id,
+            genome_id=proposal.genome_id,
+            expected_base_genome_id=initial.persona_genome.genome_id,
+        )
+
+    stale = await store.persona_repo.get_genome(proposal.genome_id)
+    companion = await store.companions.get(companion_id)
+    assert stale.status == "stale"
+    assert companion.current_genome_id == current.genome_id

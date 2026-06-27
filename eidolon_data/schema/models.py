@@ -19,6 +19,7 @@ class OwnerRow(Base):
     owner_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     display_name: Mapped[str] = mapped_column(String(128), default="")
     kind: Mapped[str] = mapped_column(String(32), default="person", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
     profile_json: Mapped[JsonDict] = mapped_column(default=dict)
     settings_json: Mapped[JsonDict] = mapped_column(default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -54,9 +55,13 @@ class PersonaGenomeRow(Base):
         String(64), ForeignKey("companions.companion_id", ondelete="CASCADE"), index=True
     )
     version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(32), default="committed", index=True)
+    base_genome_id: Mapped[str | None] = mapped_column(String(64), index=True)
     source_json: Mapped[JsonDict] = mapped_column(default=dict)
     genome_json: Mapped[JsonDict] = mapped_column(default=dict)
+    prompt_markdown: Mapped[str] = mapped_column(Text, default="")
     evolution_state_json: Mapped[JsonDict] = mapped_column(default=dict)
+    change_summary: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 

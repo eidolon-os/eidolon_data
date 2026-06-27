@@ -106,3 +106,13 @@ class ConversationsRepository(Repository):
                 .order_by(TurnRow.seq, MessageRow.seq, MessageRow.created_at)
             )
             return list(rows)
+
+    async def list_for_owner(self, owner_id: str, *, limit: int = 100) -> list[ConversationRow]:
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(ConversationRow)
+                .where(ConversationRow.owner_id == owner_id)
+                .order_by(ConversationRow.updated_at.desc())
+                .limit(limit)
+            )
+            return list(rows)

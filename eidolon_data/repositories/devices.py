@@ -6,6 +6,7 @@ from datetime import datetime
 
 from sqlalchemy import delete, select
 
+from eidolon_data.db.base import utc_now
 from eidolon_data.repositories.base import Repository
 from eidolon_data.schema.models import DeviceRow
 
@@ -145,3 +146,87 @@ class DevicesRepository(Repository):
                 raise KeyError(f"device not found: {device_id}")
             row.last_seen_at = at
             await session.commit()
+
+    async def update_device(
+        self,
+        device_id: str,
+        *,
+        name: str | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+        bound_companion_id: str | None = None,
+        interaction_mode: str | None = None,
+        auth_type: str | None = None,
+        secret_ref: str | None = None,
+        capabilities_json: dict | None = None,
+        network_json: dict | None = None,
+        access_policy_json: dict | None = None,
+        metadata_json: dict | None = None,
+    ) -> DeviceRow:
+        async with self._session_factory() as session:
+            row = await session.get(DeviceRow, device_id)
+            if row is None:
+                raise KeyError(f"device not found: {device_id}")
+            if name is not None:
+                row.name = name
+            if kind is not None:
+                row.kind = kind
+            if status is not None:
+                row.status = status
+            if bound_companion_id is not None:
+                row.bound_companion_id = bound_companion_id
+            if interaction_mode is not None:
+                row.interaction_mode = interaction_mode
+            if auth_type is not None:
+                row.auth_type = auth_type
+            if secret_ref is not None:
+                row.secret_ref = secret_ref
+            if capabilities_json is not None:
+                row.capabilities_json = capabilities_json
+            if network_json is not None:
+                row.network_json = network_json
+            if access_policy_json is not None:
+                row.access_policy_json = access_policy_json
+            if metadata_json is not None:
+                row.metadata_json = metadata_json
+            row.updated_at = utc_now()
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def approve(self, device_id: str, *, actor_id: str | None = None) -> DeviceRow:
+        async with self._session_factory() as session:
+            row = await session.get(DeviceRow, device_id)
+            if row is None:
+                raise KeyError(f"device not found: {device_id}")
+            row.status = "approved"
+            row.approved_at = utc_now()
+            row.approved_by = actor_id or "admin"
+            row.revoked_at = None
+            row.updated_at = utc_now()
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def revoke(self, device_id: str) -> DeviceRow:
+        async with self._session_factory() as session:
+            row = await session.get(DeviceRow, device_id)
+            if row is None:
+                raise KeyError(f"device not found: {device_id}")
+            row.status = "revoked"
+            row.revoked_at = utc_now()
+            row.updated_at = utc_now()
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+    async def bind_companion(self, device_id: str, *, companion_id: str | None) -> DeviceRow:
+        async with self._session_factory() as session:
+            row = await session.get(DeviceRow, device_id)
+            if row is None:
+                raise KeyError(f"device not found: {device_id}")
+            row.bound_companion_id = companion_id
+            row.updated_at = utc_now()
+            await session.commit()
+            await session.refresh(row)
+            return row

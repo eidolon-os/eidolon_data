@@ -17,7 +17,12 @@ def test_alembic_upgrade_head_creates_core_schema(tmp_path: Path, monkeypatch) -
 
     engine = create_engine(f"sqlite:///{db_path}")
     try:
-        tables = set(inspect(engine).get_table_names())
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        owner_columns = {column["name"] for column in inspector.get_columns("owners")}
+        persona_columns = {
+            column["name"] for column in inspector.get_columns("persona_genomes")
+        }
     finally:
         engine.dispose()
 
@@ -40,5 +45,12 @@ def test_alembic_upgrade_head_creates_core_schema(tmp_path: Path, monkeypatch) -
     assert "memory_items" not in tables
     assert "memory_projections" not in tables
     assert "storage_objects" not in tables
+    assert "status" in owner_columns
+    assert {
+        "status",
+        "base_genome_id",
+        "prompt_markdown",
+        "change_summary",
+    }.issubset(persona_columns)
 
     assert os.environ["EIDOLON_DATA_SQLITE_PATH"] == str(db_path)

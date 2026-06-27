@@ -11,3 +11,18 @@ __all__ = [
     "PersonaService",
     "UserDataService",
 ]
+from eidolon_data.services.owner_workspace import (
+    CompanionWorkspaceResult,
+    CompanionWorkspaceService,
+    OwnerCreateResult,
+    OwnerService,
+    OwnerWorkspaceError,
+)
+
+__all__ = [
+    "CompanionWorkspaceResult",
+    "CompanionWorkspaceService",
+    "OwnerCreateResult",
+    "OwnerService",
+    "OwnerWorkspaceError",
+]

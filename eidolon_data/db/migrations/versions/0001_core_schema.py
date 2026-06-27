@@ -17,6 +17,7 @@ def upgrade() -> None:
         sa.Column("owner_id", sa.String(length=64), nullable=False),
         sa.Column("display_name", sa.String(length=128), nullable=False),
         sa.Column("kind", sa.String(length=32), nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("profile_json", sa.JSON(), nullable=False),
         sa.Column("settings_json", sa.JSON(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -24,6 +25,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("owner_id", name=op.f("pk_owners")),
     )
     op.create_index(op.f("ix_owners_kind"), "owners", ["kind"], unique=False)
+    op.create_index(op.f("ix_owners_status"), "owners", ["status"], unique=False)
 
     op.create_table(
         "companions",
@@ -206,9 +208,13 @@ def upgrade() -> None:
         sa.Column("genome_id", sa.String(length=64), nullable=False),
         sa.Column("companion_id", sa.String(length=64), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False),
+        sa.Column("base_genome_id", sa.String(length=64), nullable=True),
         sa.Column("source_json", sa.JSON(), nullable=False),
         sa.Column("genome_json", sa.JSON(), nullable=False),
+        sa.Column("prompt_markdown", sa.Text(), nullable=False),
         sa.Column("evolution_state_json", sa.JSON(), nullable=False),
+        sa.Column("change_summary", sa.Text(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
@@ -220,7 +226,9 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("genome_id", name=op.f("pk_persona_genomes")),
         sa.UniqueConstraint("companion_id", "version", name="uq_persona_genomes_companion_version"),
     )
+    op.create_index(op.f("ix_persona_genomes_base_genome_id"), "persona_genomes", ["base_genome_id"], unique=False)
     op.create_index(op.f("ix_persona_genomes_companion_id"), "persona_genomes", ["companion_id"], unique=False)
+    op.create_index(op.f("ix_persona_genomes_status"), "persona_genomes", ["status"], unique=False)
 
     op.create_table(
         "turns",
@@ -283,7 +291,9 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_turns_conversation_id"), table_name="turns")
     op.drop_table("turns")
 
+    op.drop_index(op.f("ix_persona_genomes_status"), table_name="persona_genomes")
     op.drop_index(op.f("ix_persona_genomes_companion_id"), table_name="persona_genomes")
+    op.drop_index(op.f("ix_persona_genomes_base_genome_id"), table_name="persona_genomes")
     op.drop_table("persona_genomes")
 
     op.drop_index(op.f("ix_memory_realms_status"), table_name="memory_realms")
@@ -334,5 +344,6 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_companions_current_genome_id"), table_name="companions")
     op.drop_table("companions")
 
+    op.drop_index(op.f("ix_owners_status"), table_name="owners")
     op.drop_index(op.f("ix_owners_kind"), table_name="owners")
     op.drop_table("owners")

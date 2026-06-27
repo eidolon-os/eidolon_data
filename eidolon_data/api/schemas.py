@@ -19,6 +19,7 @@ class OwnerResponse(BaseModel):
     owner_id: str
     display_name: str
     kind: str
+    status: str
     profile_json: dict[str, Any] = Field(default_factory=dict)
     settings_json: dict[str, Any] = Field(default_factory=dict)
 
@@ -45,4 +46,3 @@ class CompanionResponse(BaseModel):
     profile_json: dict[str, Any] = Field(default_factory=dict)
     runtime_config_json: dict[str, Any] = Field(default_factory=dict)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
-
