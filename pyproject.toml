@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eidolon-data"
+version = "0.1.0"
+description = "Eidolon unified data sovereignty layer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "eidolon-sdk",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.2",
+    "PyYAML>=6.0",
+    "sqlalchemy[asyncio]>=2.0",
+]
+
+[project.scripts]
+eidolon-data = "eidolon_data.cli:main"
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.32",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.4",
+]
+
+[tool.uv.sources]
+eidolon-sdk = { path = "../eidolon_sdk", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["eidolon_data"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]

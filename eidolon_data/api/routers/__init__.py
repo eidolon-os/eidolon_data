@@ -1,0 +1,2 @@
+"""FastAPI router package placeholder."""
+

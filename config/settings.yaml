@@ -1,0 +1,6 @@
+data:
+  # Local-first sovereign data store. Override with EIDOLON_DATA_SQLITE_PATH
+  # in config/.env for machine-specific locations.
+  sqlite_path: "~/eidolon/data/eidolon.sqlite3"
+  echo_sql: false
+

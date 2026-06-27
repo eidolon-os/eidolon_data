@@ -1,0 +1,4 @@
+data:
+  sqlite_path: "~/eidolon/data/eidolon.sqlite3"
+  echo_sql: false
+
