@@ -189,4 +189,4 @@ class PersonaService:
 
 
 def _event_id() -> str:
-    return f"evt-{uuid4().hex}"
+    return f"evt_{uuid4().hex}"

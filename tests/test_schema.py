@@ -158,6 +158,10 @@ async def test_init_schema_repairs_early_sqlite_core_tables(tmp_path) -> None:
                     for index in inspect(sync_conn).get_indexes("conversations")
                 }
             )
+            device_fks = list((await conn.execute(text("PRAGMA foreign_key_list(devices)"))).mappings())
+            conversation_fks = list(
+                (await conn.execute(text("PRAGMA foreign_key_list(conversations)"))).mappings()
+            )
 
         column_names = {table: {column["name"] for column in table_columns} for table, table_columns in columns.items()}
         devices_owner = next(column for column in columns["devices"] if column["name"] == "owner_id")
@@ -175,5 +179,39 @@ async def test_init_schema_repairs_early_sqlite_core_tables(tmp_path) -> None:
         }.issubset(column_names["devices"])
         assert "updated_at" in column_names["conversations"]
         assert "ix_conversations_owner_updated" in indexes
+        assert _has_fk(
+            device_fks,
+            from_columns=("owner_id", "bound_companion_id"),
+            to_table="companions",
+            to_columns=("owner_id", "companion_id"),
+        )
+        assert _has_fk(
+            conversation_fks,
+            from_columns=("owner_id", "device_id", "companion_id"),
+            to_table="devices",
+            to_columns=("owner_id", "device_id", "bound_companion_id"),
+        )
     finally:
         await store.close()
+
+
+def _has_fk(
+    rows: list[dict],
+    *,
+    from_columns: tuple[str, ...],
+    to_table: str,
+    to_columns: tuple[str, ...],
+) -> bool:
+    grouped: dict[int, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(int(row["id"]), []).append(row)
+    for group in grouped.values():
+        ordered = sorted(group, key=lambda row: int(row["seq"]))
+        if str(ordered[0]["table"]) != to_table:
+            continue
+        if tuple(str(row["from"]) for row in ordered) != from_columns:
+            continue
+        if tuple(str(row["to"]) for row in ordered) != to_columns:
+            continue
+        return True
+    return False

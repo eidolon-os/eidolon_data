@@ -110,9 +110,9 @@ class CompanionWorkspaceService:
         actor_id: str | None = None,
     ) -> CompanionWorkspaceResult:
         owner_id = _validate_owner_id(owner_id)
-        companion_id = companion_id or f"c:{owner_id}:default"
-        genome_id = genome_id or f"g:{owner_id}:default:v1"
-        realm_id = realm_id or f"r:{owner_id}:default"
+        companion_id = companion_id or f"c_{owner_id}_default"
+        genome_id = genome_id or f"g_{owner_id}_default_v1"
+        realm_id = realm_id or f"r_{owner_id}_default"
         _validate_generated_id("companion_id", companion_id)
         _validate_generated_id("genome_id", genome_id)
         _validate_generated_id("realm_id", realm_id)
@@ -264,7 +264,7 @@ def _event(
     payload_json: dict,
 ) -> EventRow:
     return EventRow(
-        event_id=f"evt-{uuid4().hex}",
+        event_id=f"evt_{uuid4().hex}",
         owner_id=owner_id,
         subject_type=subject_type,
         subject_id=subject_id,

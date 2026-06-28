@@ -12,6 +12,7 @@ from eidolon_data.schema.types import (
     MemoryItem,
     RecallResult,
 )
+from eidolon_data.services.id_migration import normalize_sqlite_ids
 
 
 class FakeMemoryEngine:
@@ -224,11 +225,11 @@ async def test_companion_workspace_initialization_is_atomic(store: DataStore) ->
         memory_policy_json={"scope": "owner"},
     )
 
-    assert result.companion.companion_id == "c:owner-workspace:default"
-    assert result.persona_genome.genome_id == "g:owner-workspace:default:v1"
+    assert result.companion.companion_id == "c_owner-workspace_default"
+    assert result.persona_genome.genome_id == "g_owner-workspace_default_v1"
     assert result.persona_genome.status == "committed"
     assert "# Xiaoyi" in result.persona_genome.prompt_markdown
-    assert result.memory_realm.realm_id == "r:owner-workspace:default"
+    assert result.memory_realm.realm_id == "r_owner-workspace_default"
 
     companion = await store.companions.get(result.companion.companion_id)
     assert companion is not None
@@ -246,9 +247,9 @@ async def test_companion_workspace_initialization_is_atomic(store: DataStore) ->
 
     second = await store.companion_workspace.initialize_workspace(
         owner_id="owner-workspace",
-        companion_id="c:owner-workspace:study",
-        genome_id="g:owner-workspace:study:v1",
-        realm_id="r:owner-workspace:study",
+        companion_id="c_owner-workspace_study",
+        genome_id="g_owner-workspace_study_v1",
+        realm_id="r_owner-workspace_study",
         companion_display_name="Study Companion",
     )
     assert second.companion.owner_id == "owner-workspace"
@@ -258,9 +259,57 @@ async def test_companion_workspace_initialization_is_atomic(store: DataStore) ->
         await store.companion_workspace.initialize_workspace(
             owner_id="owner-workspace",
             companion_id=result.companion.companion_id,
-            genome_id="g:owner-workspace:duplicate:v1",
-            realm_id="r:owner-workspace:duplicate",
+            genome_id="g_owner-workspace_duplicate_v1",
+            realm_id="r_owner-workspace_duplicate",
         )
+
+
+async def test_id_normalization_migrates_generated_ids_without_touching_device_ids(
+    store: DataStore,
+) -> None:
+    await store.owner_service.create_owner(owner_id="owner-migrate", display_name="Owner")
+    await store.companion_workspace.initialize_workspace(
+        owner_id="owner-migrate",
+        companion_id="c:owner-migrate:default",
+        genome_id="g:owner-migrate:default:v1",
+        realm_id="r:owner-migrate:default",
+    )
+    await store.devices.create_device(
+        device_id="1c:db:d4:7a:ef:0c",
+        owner_id="owner-migrate",
+        bound_companion_id="c:owner-migrate:default",
+    )
+    await store.events.append(
+        event_id="evt-old",
+        owner_id="owner-migrate",
+        subject_type="persona_genome",
+        subject_id="g:owner-migrate:default:v1",
+        event_type="test",
+        payload_json={
+            "companion_id": "c:owner-migrate:default",
+            "realm_id": "r:owner-migrate:default",
+            "device_id": "1c:db:d4:7a:ef:0c",
+        },
+    )
+
+    result = normalize_sqlite_ids(store.settings.sqlite_path)
+
+    assert result.mappings >= 4
+    companion = await store.companions.get("c_owner-migrate_default")
+    assert companion is not None
+    assert companion.current_genome_id == "g_owner-migrate_default_v1"
+    assert companion.default_memory_realm_id == "r_owner-migrate_default"
+    assert await store.persona_repo.get_genome("g_owner-migrate_default_v1") is not None
+    assert await store.memory_repo.get_realm("r_owner-migrate_default") is not None
+    device = await store.devices.get_device("1c:db:d4:7a:ef:0c")
+    assert device is not None
+    assert device.bound_companion_id == "c_owner-migrate_default"
+    events = await store.events.list_for_owner("owner-migrate", limit=20)
+    migrated_event = next(event for event in events if event.event_id == "evt_old")
+    assert migrated_event.subject_id == "g_owner-migrate_default_v1"
+    assert migrated_event.payload_json["companion_id"] == "c_owner-migrate_default"
+    assert migrated_event.payload_json["realm_id"] == "r_owner-migrate_default"
+    assert migrated_event.payload_json["device_id"] == "1c:db:d4:7a:ef:0c"
 
 
 async def test_device_binding_requires_same_owner_active_companion(store: DataStore) -> None:
@@ -335,7 +384,7 @@ async def test_persona_genome_proposal_requires_current_base(store: DataStore) -
     )
 
     proposal = await store.persona.create_genome_proposal(
-        genome_id="g:owner-evolve:proposal:v2",
+        genome_id="g_owner-evolve_proposal_v2",
         owner_id="owner-evolve",
         companion_id=initial.companion.companion_id,
         base_genome_id=initial.persona_genome.genome_id,
@@ -367,7 +416,7 @@ async def test_stale_persona_genome_proposal_does_not_replace_current_genome(sto
     companion_id = initial.companion.companion_id
 
     proposal = await store.persona.create_genome_proposal(
-        genome_id="g:owner-stale:proposal:v2",
+        genome_id="g_owner-stale_proposal_v2",
         owner_id="owner-stale",
         companion_id=companion_id,
         base_genome_id=initial.persona_genome.genome_id,
@@ -375,7 +424,7 @@ async def test_stale_persona_genome_proposal_does_not_replace_current_genome(sto
         prompt_markdown="# Old proposal\n",
     )
     current = await store.persona.create_genome(
-        genome_id="g:owner-stale:current:v3",
+        genome_id="g_owner-stale_current_v3",
         owner_id="owner-stale",
         companion_id=companion_id,
         event_id="event-current-genome",
