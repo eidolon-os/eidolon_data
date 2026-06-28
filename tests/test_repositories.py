@@ -176,6 +176,44 @@ async def test_owner_service_creates_owner_without_workspace(store: DataStore) -
     assert [event.event_type for event in events] == ["owner.created"]
 
 
+async def test_maintenance_deletes_owner_default_tree_only(store: DataStore) -> None:
+    await store.owners.create(owner_id="owner-default", display_name="Default")
+    await store.owners.create(owner_id="owner-keep", display_name="Keep")
+    await store.companions.create(
+        companion_id="companion-default",
+        owner_id="owner-default",
+        display_name="Default Companion",
+    )
+    await store.devices.create_device(
+        device_id="device-default",
+        owner_id="owner-default",
+        kind="esp32",
+    )
+    await store.devices.create_device(
+        device_id="device-keep",
+        owner_id="owner-keep",
+        kind="esp32",
+    )
+    await store.events.append(
+        event_id="event-default",
+        owner_id="owner-default",
+        subject_type="device",
+        subject_id="device-default",
+        event_type="device.discovered",
+    )
+
+    result = await store.maintenance.delete_owner_tree("owner-default")
+
+    assert result.deleted is True
+    assert result.devices == 1
+    assert result.companions == 1
+    assert result.events == 1
+    assert await store.owners.get("owner-default") is None
+    assert await store.devices.get_device("device-default") is None
+    assert await store.owners.get("owner-keep") is not None
+    assert await store.devices.get_device("device-keep") is not None
+
+
 async def test_companion_workspace_initialization_is_atomic(store: DataStore) -> None:
     await store.owner_service.create_owner(owner_id="owner-workspace", display_name="Owner")
 
@@ -206,8 +244,87 @@ async def test_companion_workspace_initialization_is_atomic(store: DataStore) ->
         "companion.workspace.initialized",
     }.issubset({event.event_type for event in events})
 
+    second = await store.companion_workspace.initialize_workspace(
+        owner_id="owner-workspace",
+        companion_id="c:owner-workspace:study",
+        genome_id="g:owner-workspace:study:v1",
+        realm_id="r:owner-workspace:study",
+        companion_display_name="Study Companion",
+    )
+    assert second.companion.owner_id == "owner-workspace"
+    assert len(await store.companions.list_for_owner("owner-workspace")) == 2
+
     with pytest.raises(ValueError, match="already"):
-        await store.companion_workspace.initialize_workspace(owner_id="owner-workspace")
+        await store.companion_workspace.initialize_workspace(
+            owner_id="owner-workspace",
+            companion_id=result.companion.companion_id,
+            genome_id="g:owner-workspace:duplicate:v1",
+            realm_id="r:owner-workspace:duplicate",
+        )
+
+
+async def test_device_binding_requires_same_owner_active_companion(store: DataStore) -> None:
+    await store.owners.create(owner_id="owner-a", display_name="Owner A")
+    await store.owners.create(owner_id="owner-b", display_name="Owner B")
+    await store.companions.create(companion_id="companion-a", owner_id="owner-a")
+    await store.companions.create(companion_id="companion-b", owner_id="owner-b")
+    await store.devices.create_device(device_id="device-1", owner_id=None, kind="voice")
+
+    with pytest.raises(ValueError, match="belongs to owner"):
+        await store.devices.claim_device(
+            "device-1",
+            owner_id="owner-a",
+            companion_id="companion-b",
+        )
+
+    device = await store.devices.claim_device(
+        "device-1",
+        owner_id="owner-a",
+        companion_id="companion-a",
+    )
+    assert device.owner_id == "owner-a"
+    assert device.bound_companion_id == "companion-a"
+
+
+async def test_conversation_requires_device_bound_to_same_companion(store: DataStore) -> None:
+    await store.owners.create(owner_id="owner-conv", display_name="Owner")
+    await store.companions.create(companion_id="companion-a", owner_id="owner-conv")
+    await store.companions.create(companion_id="companion-b", owner_id="owner-conv")
+    await store.devices.create_device(
+        device_id="device-conv",
+        owner_id="owner-conv",
+        bound_companion_id="companion-a",
+    )
+
+    with pytest.raises(ValueError, match="is bound to companion"):
+        await store.conversations.create_conversation(
+            conversation_id="conversation-bad",
+            owner_id="owner-conv",
+            companion_id="companion-b",
+            device_id="device-conv",
+        )
+
+    conversation = await store.conversations.create_conversation(
+        conversation_id="conversation-ok",
+        owner_id="owner-conv",
+        companion_id="companion-a",
+        device_id="device-conv",
+    )
+    assert conversation.companion_id == "companion-a"
+
+
+async def test_default_memory_realm_must_belong_to_companion(store: DataStore) -> None:
+    await store.owners.create(owner_id="owner-realm", display_name="Owner")
+    await store.companions.create(companion_id="companion-a", owner_id="owner-realm")
+    await store.companions.create(companion_id="companion-b", owner_id="owner-realm")
+    realm = await store.memory_repo.create_realm(
+        realm_id="realm-a",
+        owner_id="owner-realm",
+        companion_id="companion-a",
+    )
+
+    with pytest.raises(ValueError, match="belongs to companion"):
+        await store.companions.set_default_memory_realm("companion-b", realm.realm_id)
 
 
 async def test_persona_genome_proposal_requires_current_base(store: DataStore) -> None:

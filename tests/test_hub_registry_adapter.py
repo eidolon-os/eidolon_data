@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-from eidolon_sdk.biz.registry.models import DeviceBindingRecord, DeviceRegistryRecord
+from eidolon_sdk.biz.registry.models import DeviceRegistryRecord
 
 from eidolon_data import DataSettings, DataStore
-from eidolon_data.adapters import (
-    EidolonDataDeviceBindingRepository,
-    EidolonDataDeviceRegistryRepository,
-)
+from eidolon_data.adapters import EidolonDataDeviceRegistryRepository
 
 
 async def test_hub_device_registry_adapter_round_trips_device_record(tmp_path) -> None:
     store = DataStore.open(DataSettings(sqlite_path=str(tmp_path / "eidolon.sqlite3")))
-    repo = EidolonDataDeviceRegistryRepository(store, owner_id="owner-test")
+    repo = EidolonDataDeviceRegistryRepository(store)
     try:
         await repo.put(
             DeviceRegistryRecord(
@@ -45,17 +42,23 @@ async def test_hub_device_registry_adapter_round_trips_device_record(tmp_path) -
 
         row = await store.devices.get_device("device-1")
         assert row is not None
+        assert row.owner_id is None
+        assert row.status == "discovered"
         assert row.auth_type == "psk"
         assert row.secret_ref == "psk_hash:hash-1"
 
-        bindings = EidolonDataDeviceBindingRepository(store, owner_id="owner-test")
-        await bindings.put(
-            DeviceBindingRecord(
-                device_id="device-1",
-                agent_id="companion-1",
-                bound_at="2026-06-27T00:02:00+00:00",
-                interaction_mode="voice",
-            )
+        await store.owners.create(owner_id="owner-test", display_name="Owner")
+        await store.companions.create(
+            companion_id="companion-1",
+            owner_id="owner-test",
+            display_name="Companion",
+        )
+        await store.devices.claim_device(
+            "device-1",
+            owner_id="owner-test",
+            companion_id="companion-1",
+            interaction_mode="voice",
+            metadata_json={"claimed": True},
         )
 
         await repo.put(
@@ -73,9 +76,12 @@ async def test_hub_device_registry_adapter_round_trips_device_record(tmp_path) -
                 metadata={"room": "studio"},
             )
         )
-        binding = await bindings.get("device-1")
-        assert binding is not None
-        assert binding.agent_id == "companion-1"
-        assert binding.interaction_mode == "voice"
+        row = await store.devices.get_device("device-1")
+        assert row is not None
+        assert row.owner_id == "owner-test"
+        assert row.bound_companion_id == "companion-1"
+        assert row.status == "active"
+        assert row.metadata_json["claimed"] is True
+        assert row.interaction_mode == "voice"
     finally:
         await store.close()

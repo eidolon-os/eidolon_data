@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from eidolon_data.db.base import Base, utc_now
@@ -46,6 +46,10 @@ class CompanionRow(Base):
 
     owner: Mapped[OwnerRow] = relationship()
 
+    __table_args__ = (
+        UniqueConstraint("owner_id", "companion_id", name="uq_companions_owner_companion"),
+    )
+
 
 class PersonaGenomeRow(Base):
     __tablename__ = "persona_genomes"
@@ -74,8 +78,8 @@ class DeviceRow(Base):
     __tablename__ = "devices"
 
     device_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    owner_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
+    owner_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(128), default="")
     kind: Mapped[str] = mapped_column(String(64), default="unknown", index=True)
@@ -94,6 +98,21 @@ class DeviceRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_id", "bound_companion_id"],
+            ["companions.owner_id", "companions.companion_id"],
+            name="fk_devices_owner_bound_companion",
+        ),
+        UniqueConstraint("owner_id", "device_id", name="uq_devices_owner_device"),
+        UniqueConstraint(
+            "owner_id",
+            "device_id",
+            "bound_companion_id",
+            name="uq_devices_owner_device_bound_companion",
+        ),
+    )
 
 
 class ConversationRow(Base):
@@ -115,6 +134,17 @@ class ConversationRow(Base):
     metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_id", "companion_id"],
+            ["companions.owner_id", "companions.companion_id"],
+            name="fk_conversations_owner_companion",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["owner_id", "device_id", "companion_id"],
+            ["devices.owner_id", "devices.device_id", "devices.bound_companion_id"],
+            name="fk_conversations_owner_device_companion",
+        ),
         Index("ix_conversations_owner_started", "owner_id", "started_at"),
         Index("ix_conversations_owner_updated", "owner_id", "updated_at"),
     )
@@ -178,6 +208,15 @@ class MemoryRealmRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_id", "companion_id"],
+            ["companions.owner_id", "companions.companion_id"],
+            name="fk_memory_realms_owner_companion",
+            ondelete="CASCADE",
+        ),
+    )
+
 
 class JobRow(Base):
     __tablename__ = "jobs"
@@ -200,6 +239,14 @@ class JobRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_id", "companion_id"],
+            ["companions.owner_id", "companions.companion_id"],
+            name="fk_jobs_owner_companion",
+        ),
+    )
 
 
 class EventRow(Base):

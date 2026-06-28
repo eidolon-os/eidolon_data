@@ -18,8 +18,8 @@ from eidolon_data.schema.models import (
 )
 
 
-class UserDataService:
-    """Data-governance operations scoped to one owner/user."""
+class OwnerDataService:
+    """Data-governance operations scoped to one owner."""
 
     def __init__(self, session_factory: async_sessionmaker) -> None:
         self._session_factory = session_factory
@@ -27,8 +27,8 @@ class UserDataService:
     async def delete_owner_data(self, owner_id: str) -> dict[str, int]:
         """Delete business data owned by ``owner_id`` while keeping owner identity.
 
-        The owner row itself is deliberately retained so admin/account ownership
-        can be managed by its own lifecycle.
+        The owner row itself is deliberately retained so account ownership can
+        be managed by its own lifecycle.
         """
 
         async with self._session_factory() as session, session.begin():
@@ -133,4 +133,4 @@ def _rowcount(result) -> int:
     return int(result.rowcount or 0)
 
 
-__all__ = ["UserDataService"]
+__all__ = ["OwnerDataService"]

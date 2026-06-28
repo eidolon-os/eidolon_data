@@ -6,7 +6,6 @@ import re
 from dataclasses import dataclass
 from uuid import uuid4
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from eidolon_data.schema.models import (
@@ -130,12 +129,6 @@ class CompanionWorkspaceService:
             existing_realm = await session.get(MemoryRealmRow, realm_id)
             if existing_companion or existing_genome or existing_realm:
                 raise OwnerWorkspaceError("workspace already initialized")
-
-            current_companions = await session.scalars(
-                select(CompanionRow.companion_id).where(CompanionRow.owner_id == owner_id)
-            )
-            if list(current_companions):
-                raise OwnerWorkspaceError("owner already has a companion workspace")
 
             companion_name = companion_display_name or f"{owner.display_name or owner_id} Companion"
             companion = CompanionRow(

@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from eidolon_data.db.base import utc_now
 from eidolon_data.repositories.base import Repository
-from eidolon_data.schema.models import JobRow
+from eidolon_data.schema.models import CompanionRow, JobRow
 
 
 class JobsRepository(Repository):
@@ -29,22 +29,30 @@ class JobsRepository(Repository):
         result_json: dict | None = None,
         error_json: dict | None = None,
     ) -> JobRow:
-        row = JobRow(
-            job_id=job_id,
-            owner_id=owner_id,
-            companion_id=companion_id,
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            provider=provider,
-            kind=kind,
-            status=status,
-            input_json=input_json or {},
-            provider_ref_json=provider_ref_json or {},
-            progress_json=progress_json or {},
-            result_json=result_json or {},
-            error_json=error_json or {},
-        )
         async with self._session_factory() as session:
+            if companion_id is not None:
+                companion = await session.get(CompanionRow, companion_id)
+                if companion is None:
+                    raise KeyError(f"companion not found: {companion_id}")
+                if companion.owner_id != owner_id:
+                    raise ValueError(
+                        f"companion {companion_id!r} belongs to owner {companion.owner_id!r}, not {owner_id!r}"
+                    )
+            row = JobRow(
+                job_id=job_id,
+                owner_id=owner_id,
+                companion_id=companion_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                provider=provider,
+                kind=kind,
+                status=status,
+                input_json=input_json or {},
+                provider_ref_json=provider_ref_json or {},
+                progress_json=progress_json or {},
+                result_json=result_json or {},
+                error_json=error_json or {},
+            )
             session.add(row)
             await session.commit()
             await session.refresh(row)

@@ -73,6 +73,7 @@ async def _repair_sqlite_schema(conn) -> None:
                 "ON devices (bound_companion_id)"
             )
         )
+        await _sqlite_make_devices_owner_nullable(conn)
 
     conversations = await _sqlite_columns(conn, "conversations")
     if conversations:
@@ -139,6 +140,68 @@ async def _repair_sqlite_schema(conn) -> None:
 async def _sqlite_columns(conn, table_name: str) -> set[str]:
     rows = (await conn.execute(text(f"PRAGMA table_info({table_name})"))).mappings()
     return {str(row["name"]) for row in rows}
+
+
+async def _sqlite_make_devices_owner_nullable(conn) -> None:
+    rows = list((await conn.execute(text("PRAGMA table_info(devices)"))).mappings())
+    owner = next((row for row in rows if row["name"] == "owner_id"), None)
+    if owner is None or not int(owner["notnull"] or 0):
+        return
+
+    await conn.execute(text("ALTER TABLE devices RENAME TO devices_owner_required"))
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE devices (
+                device_id VARCHAR(128) NOT NULL,
+                owner_id VARCHAR(64),
+                name VARCHAR(128) NOT NULL,
+                kind VARCHAR(64) NOT NULL,
+                status VARCHAR(32) NOT NULL,
+                approved_at DATETIME,
+                approved_by VARCHAR(128),
+                bound_companion_id VARCHAR(64),
+                interaction_mode VARCHAR(64),
+                auth_type VARCHAR(32),
+                secret_ref TEXT,
+                capabilities_json JSON NOT NULL,
+                network_json JSON NOT NULL,
+                access_policy_json JSON NOT NULL,
+                metadata_json JSON NOT NULL,
+                last_seen_at DATETIME,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                revoked_at DATETIME,
+                CONSTRAINT pk_devices PRIMARY KEY (device_id),
+                CONSTRAINT fk_devices_owner_id_owners
+                    FOREIGN KEY(owner_id) REFERENCES owners (owner_id) ON DELETE CASCADE
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            INSERT INTO devices (
+                device_id, owner_id, name, kind, status, approved_at, approved_by,
+                bound_companion_id, interaction_mode, auth_type, secret_ref,
+                capabilities_json, network_json, access_policy_json, metadata_json,
+                last_seen_at, created_at, updated_at, revoked_at
+            )
+            SELECT
+                device_id, owner_id, name, kind, status, approved_at, approved_by,
+                bound_companion_id, interaction_mode, auth_type, secret_ref,
+                capabilities_json, network_json, access_policy_json, metadata_json,
+                last_seen_at, created_at, updated_at, revoked_at
+            FROM devices_owner_required
+            """
+        )
+    )
+    await conn.execute(text("DROP TABLE devices_owner_required"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_devices_bound_companion_id ON devices (bound_companion_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_devices_kind ON devices (kind)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_devices_owner_id ON devices (owner_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_devices_status ON devices (status)"))
 
 
 async def _sqlite_add_column(

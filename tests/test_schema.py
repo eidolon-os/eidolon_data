@@ -14,8 +14,8 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
             table_names = await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names())
             columns = await conn.run_sync(
                 lambda sync_conn: {
-                    table: {column["name"] for column in inspect(sync_conn).get_columns(table)}
-                    for table in ("owners", "conversations", "turns", "messages")
+                    table: inspect(sync_conn).get_columns(table)
+                    for table in ("owners", "devices", "conversations", "turns", "messages")
                 }
             )
             persona_columns = await conn.run_sync(
@@ -46,16 +46,19 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
         assert "memory_items" not in table_names
         assert "memory_projections" not in table_names
         assert "storage_objects" not in table_names
-        assert "status" in columns["owners"]
+        column_names = {table: {column["name"] for column in table_columns} for table, table_columns in columns.items()}
+        devices_owner = next(column for column in columns["devices"] if column["name"] == "owner_id")
+        assert "status" in column_names["owners"]
+        assert devices_owner["nullable"] is True
         assert {
             "status",
             "base_genome_id",
             "prompt_markdown",
             "change_summary",
         }.issubset(persona_columns)
-        assert "updated_at" in columns["conversations"]
-        assert "device_id" in columns["turns"]
-        assert "seq" in columns["messages"]
+        assert "updated_at" in column_names["conversations"]
+        assert "device_id" in column_names["turns"]
+        assert "seq" in column_names["messages"]
         assert any(
             constraint["name"] == "uq_messages_turn_seq"
             for constraint in unique_constraints
@@ -145,7 +148,7 @@ async def test_init_schema_repairs_early_sqlite_core_tables(tmp_path) -> None:
         async with store.engine.connect() as conn:
             columns = await conn.run_sync(
                 lambda sync_conn: {
-                    table: {column["name"] for column in inspect(sync_conn).get_columns(table)}
+                    table: inspect(sync_conn).get_columns(table)
                     for table in ("owners", "devices", "conversations")
                 }
             )
@@ -156,7 +159,10 @@ async def test_init_schema_repairs_early_sqlite_core_tables(tmp_path) -> None:
                 }
             )
 
-        assert "status" in columns["owners"]
+        column_names = {table: {column["name"] for column in table_columns} for table, table_columns in columns.items()}
+        devices_owner = next(column for column in columns["devices"] if column["name"] == "owner_id")
+        assert "status" in column_names["owners"]
+        assert devices_owner["nullable"] is True
         assert {
             "approved_at",
             "approved_by",
@@ -166,8 +172,8 @@ async def test_init_schema_repairs_early_sqlite_core_tables(tmp_path) -> None:
             "secret_ref",
             "access_policy_json",
             "revoked_at",
-        }.issubset(columns["devices"])
-        assert "updated_at" in columns["conversations"]
+        }.issubset(column_names["devices"])
+        assert "updated_at" in column_names["conversations"]
         assert "ix_conversations_owner_updated" in indexes
     finally:
         await store.close()

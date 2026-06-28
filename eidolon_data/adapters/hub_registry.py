@@ -12,7 +12,7 @@ from eidolon_data.services.datastore import DataStore
 class EidolonDataDeviceRegistryRepository:
     """Implement Hub's DeviceStore protocol over the new sovereign schema."""
 
-    def __init__(self, store: DataStore, *, owner_id: str = "owner-default") -> None:
+    def __init__(self, store: DataStore, *, owner_id: str | None = None) -> None:
         self._store = store
         self._owner_id = owner_id
         self._schema_ready = False
@@ -27,7 +27,8 @@ class EidolonDataDeviceRegistryRepository:
     async def put(self, record: DeviceRegistryRecord) -> None:
         await self._ensure_ready()
         existing = await self._store.devices.get_device(record.device_id)
-        metadata = dict(record.metadata or {})
+        metadata = _without_hub_metadata(existing.metadata_json or {}) if existing else {}
+        metadata.update(record.metadata or {})
         metadata["hub_registry"] = {
             "paired": record.paired,
             "approved": record.approved,
@@ -39,11 +40,11 @@ class EidolonDataDeviceRegistryRepository:
         secret_ref = f"psk_hash:{record.psk_hash}" if record.psk_hash else None
         await self._store.devices.put_device(
             device_id=record.device_id,
-            owner_id=self._owner_id,
+            owner_id=existing.owner_id if existing else self._owner_id,
             name=record.name,
             kind=record.kind,
-            status="active" if record.enabled else "disabled",
-            approved_at=_parse_dt(record.approved_at),
+            status=_status_from_record(record, existing),
+            approved_at=existing.approved_at if existing else None,
             approved_by=existing.approved_by if existing else None,
             bound_companion_id=existing.bound_companion_id if existing else None,
             interaction_mode=existing.interaction_mode if existing else None,
@@ -61,7 +62,7 @@ class EidolonDataDeviceRegistryRepository:
 
     async def list_all(self) -> dict[str, DeviceRegistryRecord]:
         await self._ensure_ready()
-        rows = await self._store.devices.list_devices_for_owner(self._owner_id)
+        rows = await self._store.devices.list_all_devices()
         records = [await self._record_from_row(row) for row in rows]
         return {record.device_id: record for record in records}
 
@@ -69,12 +70,6 @@ class EidolonDataDeviceRegistryRepository:
         if self._schema_ready:
             return
         await self._store.init_schema()
-        if await self._store.owners.get(self._owner_id) is None:
-            await self._store.owners.create(
-                owner_id=self._owner_id,
-                display_name="Default Owner",
-                kind="person",
-            )
         self._schema_ready = True
 
     async def _record_from_row(self, row) -> DeviceRegistryRecord:
@@ -86,7 +81,7 @@ class EidolonDataDeviceRegistryRepository:
             device_id=row.device_id,
             name=row.name,
             kind=row.kind,
-            enabled=row.status != "disabled",
+            enabled=row.status not in {"disabled", "revoked"},
             psk_hash=psk_hash,
             paired=bool(hub.get("paired") or psk_hash),
             approved=bool(hub.get("approved")),
@@ -101,6 +96,16 @@ def _without_hub_metadata(metadata: dict) -> dict:
     data = dict(metadata)
     data.pop("hub_registry", None)
     return data
+
+
+def _status_from_record(record: DeviceRegistryRecord, existing) -> str:
+    if existing is not None and existing.status == "revoked":
+        return "revoked"
+    if not record.enabled:
+        return "disabled"
+    if existing is not None and existing.owner_id is not None:
+        return "active"
+    return "discovered"
 
 
 def _now_iso() -> str:

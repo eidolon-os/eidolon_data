@@ -8,7 +8,7 @@ from sqlalchemy import delete, select
 
 from eidolon_data.db.base import utc_now
 from eidolon_data.repositories.base import Repository
-from eidolon_data.schema.models import DeviceRow
+from eidolon_data.schema.models import CompanionRow, DeviceRow
 
 
 class DevicesRepository(Repository):
@@ -16,7 +16,7 @@ class DevicesRepository(Repository):
         self,
         *,
         device_id: str,
-        owner_id: str,
+        owner_id: str | None,
         name: str = "",
         kind: str = "unknown",
         status: str = "active",
@@ -33,26 +33,31 @@ class DevicesRepository(Repository):
         last_seen_at: datetime | None = None,
         revoked_at: datetime | None = None,
     ) -> DeviceRow:
-        row = DeviceRow(
-            device_id=device_id,
-            owner_id=owner_id,
-            name=name,
-            kind=kind,
-            status=status,
-            approved_at=approved_at,
-            approved_by=approved_by,
-            bound_companion_id=bound_companion_id,
-            interaction_mode=interaction_mode,
-            auth_type=auth_type,
-            secret_ref=secret_ref,
-            capabilities_json=capabilities_json or {},
-            network_json=network_json or {},
-            access_policy_json=access_policy_json or {},
-            metadata_json=metadata_json or {},
-            last_seen_at=last_seen_at,
-            revoked_at=revoked_at,
-        )
         async with self._session_factory() as session:
+            await _validate_bound_companion(
+                session,
+                owner_id=owner_id,
+                companion_id=bound_companion_id,
+            )
+            row = DeviceRow(
+                device_id=device_id,
+                owner_id=owner_id,
+                name=name,
+                kind=kind,
+                status=status,
+                approved_at=approved_at,
+                approved_by=approved_by,
+                bound_companion_id=bound_companion_id,
+                interaction_mode=interaction_mode,
+                auth_type=auth_type,
+                secret_ref=secret_ref,
+                capabilities_json=capabilities_json or {},
+                network_json=network_json or {},
+                access_policy_json=access_policy_json or {},
+                metadata_json=metadata_json or {},
+                last_seen_at=last_seen_at,
+                revoked_at=revoked_at,
+            )
             session.add(row)
             await session.commit()
             await session.refresh(row)
@@ -62,7 +67,7 @@ class DevicesRepository(Repository):
         self,
         *,
         device_id: str,
-        owner_id: str,
+        owner_id: str | None,
         name: str = "",
         kind: str = "unknown",
         status: str = "active",
@@ -80,6 +85,11 @@ class DevicesRepository(Repository):
         revoked_at: datetime | None = None,
     ) -> DeviceRow:
         async with self._session_factory() as session:
+            await _validate_bound_companion(
+                session,
+                owner_id=owner_id,
+                companion_id=bound_companion_id,
+            )
             row = await session.get(DeviceRow, device_id)
             if row is None:
                 row = DeviceRow(
@@ -134,6 +144,20 @@ class DevicesRepository(Repository):
             )
             return list(rows)
 
+    async def list_unclaimed_devices(self) -> list[DeviceRow]:
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(DeviceRow)
+                .where(DeviceRow.owner_id.is_(None))
+                .order_by(DeviceRow.last_seen_at.desc().nullslast(), DeviceRow.created_at.desc())
+            )
+            return list(rows)
+
+    async def list_all_devices(self) -> list[DeviceRow]:
+        async with self._session_factory() as session:
+            rows = await session.scalars(select(DeviceRow).order_by(DeviceRow.created_at))
+            return list(rows)
+
     async def delete_device(self, device_id: str) -> None:
         async with self._session_factory() as session:
             await session.execute(delete(DeviceRow).where(DeviceRow.device_id == device_id))
@@ -167,6 +191,12 @@ class DevicesRepository(Repository):
             row = await session.get(DeviceRow, device_id)
             if row is None:
                 raise KeyError(f"device not found: {device_id}")
+            if bound_companion_id is not None:
+                await _validate_bound_companion(
+                    session,
+                    owner_id=row.owner_id,
+                    companion_id=bound_companion_id,
+                )
             if name is not None:
                 row.name = name
             if kind is not None:
@@ -225,8 +255,85 @@ class DevicesRepository(Repository):
             row = await session.get(DeviceRow, device_id)
             if row is None:
                 raise KeyError(f"device not found: {device_id}")
+            await _validate_bound_companion(
+                session,
+                owner_id=row.owner_id,
+                companion_id=companion_id,
+            )
             row.bound_companion_id = companion_id
             row.updated_at = utc_now()
             await session.commit()
             await session.refresh(row)
             return row
+
+    async def claim_device(
+        self,
+        device_id: str,
+        *,
+        owner_id: str,
+        companion_id: str | None,
+        approved_by: str = "admin",
+        name: str | None = None,
+        kind: str | None = None,
+        interaction_mode: str | None = None,
+        access_policy_json: dict | None = None,
+        metadata_json: dict | None = None,
+        network_json: dict | None = None,
+    ) -> DeviceRow:
+        async with self._session_factory() as session:
+            row = await session.get(DeviceRow, device_id)
+            if row is None:
+                raise KeyError(f"device not found: {device_id}")
+            if row.owner_id is not None and row.owner_id != owner_id:
+                raise ValueError(f"device {device_id!r} already belongs to owner {row.owner_id!r}")
+            await _validate_bound_companion(
+                session,
+                owner_id=owner_id,
+                companion_id=companion_id,
+                require_binding=True,
+            )
+            if name is not None:
+                row.name = name
+            if kind is not None:
+                row.kind = kind
+            row.owner_id = owner_id
+            row.status = "active"
+            row.bound_companion_id = companion_id
+            row.interaction_mode = interaction_mode
+            row.approved_at = utc_now()
+            row.approved_by = approved_by
+            row.revoked_at = None
+            if access_policy_json is not None:
+                row.access_policy_json = access_policy_json
+            if metadata_json is not None:
+                row.metadata_json = {**(row.metadata_json or {}), **metadata_json}
+            if network_json is not None:
+                row.network_json = {**(row.network_json or {}), **network_json}
+            row.updated_at = utc_now()
+            await session.commit()
+            await session.refresh(row)
+            return row
+
+
+async def _validate_bound_companion(
+    session,
+    *,
+    owner_id: str | None,
+    companion_id: str | None,
+    require_binding: bool = False,
+) -> None:
+    if not companion_id:
+        if require_binding:
+            raise ValueError("claimed devices must be bound to a companion")
+        return
+    if not owner_id:
+        raise ValueError("bound devices must have an owner_id")
+    companion = await session.get(CompanionRow, companion_id)
+    if companion is None:
+        raise KeyError(f"companion not found: {companion_id}")
+    if companion.owner_id != owner_id:
+        raise ValueError(
+            f"companion {companion_id!r} belongs to owner {companion.owner_id!r}, not {owner_id!r}"
+        )
+    if companion.status != "active":
+        raise ValueError(f"companion {companion_id!r} is not active")

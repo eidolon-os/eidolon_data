@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from eidolon_data.repositories.base import Repository
-from eidolon_data.schema.models import CompanionRow
+from eidolon_data.schema.models import CompanionRow, MemoryRealmRow, PersonaGenomeRow
 
 
 class CompanionsRepository(Repository):
@@ -55,6 +55,13 @@ class CompanionsRepository(Repository):
             row = await session.get(CompanionRow, companion_id)
             if row is None:
                 raise KeyError(f"companion not found: {companion_id}")
+            genome = await session.get(PersonaGenomeRow, genome_id)
+            if genome is None:
+                raise KeyError(f"genome not found: {genome_id}")
+            if genome.companion_id != companion_id:
+                raise ValueError(
+                    f"genome {genome_id!r} belongs to companion {genome.companion_id!r}, not {companion_id!r}"
+                )
             row.current_genome_id = genome_id
             await session.commit()
 
@@ -63,6 +70,16 @@ class CompanionsRepository(Repository):
             row = await session.get(CompanionRow, companion_id)
             if row is None:
                 raise KeyError(f"companion not found: {companion_id}")
+            realm = await session.get(MemoryRealmRow, realm_id)
+            if realm is None:
+                raise KeyError(f"memory realm not found: {realm_id}")
+            if realm.companion_id != companion_id:
+                raise ValueError(
+                    f"memory realm {realm_id!r} belongs to companion {realm.companion_id!r}, not {companion_id!r}"
+                )
+            if realm.owner_id != row.owner_id:
+                raise ValueError(
+                    f"memory realm {realm_id!r} belongs to owner {realm.owner_id!r}, not {row.owner_id!r}"
+                )
             row.default_memory_realm_id = realm_id
             await session.commit()
-

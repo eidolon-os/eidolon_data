@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from eidolon_data.repositories.base import Repository
-from eidolon_data.schema.models import MemoryRealmRow
+from eidolon_data.schema.models import CompanionRow, MemoryRealmRow
 
 
 class MemoryRepository(Repository):
@@ -20,16 +20,23 @@ class MemoryRepository(Repository):
         policy_json: dict | None = None,
         status: str = "active",
     ) -> MemoryRealmRow:
-        row = MemoryRealmRow(
-            realm_id=realm_id,
-            owner_id=owner_id,
-            companion_id=companion_id,
-            engine=engine,
-            engine_config_json=engine_config_json or {},
-            policy_json=policy_json or {},
-            status=status,
-        )
         async with self._session_factory() as session:
+            companion = await session.get(CompanionRow, companion_id)
+            if companion is None:
+                raise KeyError(f"companion not found: {companion_id}")
+            if companion.owner_id != owner_id:
+                raise ValueError(
+                    f"companion {companion_id!r} belongs to owner {companion.owner_id!r}, not {owner_id!r}"
+                )
+            row = MemoryRealmRow(
+                realm_id=realm_id,
+                owner_id=owner_id,
+                companion_id=companion_id,
+                engine=engine,
+                engine_config_json=engine_config_json or {},
+                policy_json=policy_json or {},
+                status=status,
+            )
             session.add(row)
             await session.commit()
             await session.refresh(row)

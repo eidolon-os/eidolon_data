@@ -18,10 +18,11 @@ from eidolon_data.repositories import (
     OwnersRepository,
     PersonaRepository,
 )
+from eidolon_data.services.maintenance import MaintenanceService
 from eidolon_data.services.memory_service import MemoryService
+from eidolon_data.services.owner_data import OwnerDataService
 from eidolon_data.services.owner_workspace import CompanionWorkspaceService, OwnerService
 from eidolon_data.services.persona_service import PersonaService
-from eidolon_data.services.user_data import UserDataService
 from eidolon_data.settings import DataSettings
 
 
@@ -102,8 +103,8 @@ class DataStore:
         return MemoryService(repository=self.memory_repo, engine=self.memory_engine)
 
     @property
-    def user_data(self) -> UserDataService:
-        return UserDataService(self.session_factory)
+    def owner_data(self) -> OwnerDataService:
+        return OwnerDataService(self.session_factory)
 
     @property
     def owner_service(self) -> OwnerService:
@@ -112,3 +113,7 @@ class DataStore:
     @property
     def companion_workspace(self) -> CompanionWorkspaceService:
         return CompanionWorkspaceService(self.session_factory)
+
+    @property
+    def maintenance(self) -> MaintenanceService:
+        return MaintenanceService(self.session_factory)
