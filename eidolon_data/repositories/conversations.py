@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import select
 
 from eidolon_data.repositories.base import Repository
-from eidolon_data.schema.models import CompanionRow, ConversationRow, DeviceRow, MessageRow, TurnRow
+from eidolon_data.schema.models import CompanionRow, ConversationRow, MessageRow, TurnRow
 
 
 class ConversationsRepository(Repository):
@@ -17,7 +17,9 @@ class ConversationsRepository(Repository):
         conversation_id: str,
         owner_id: str,
         companion_id: str,
-        device_id: str | None = None,
+        runtime_caller_id: str | None = None,
+        runtime_session_id: str | None = None,
+        source_device_id: str | None = None,
         title: str | None = None,
         status: str = "active",
         metadata_json: dict | None = None,
@@ -32,25 +34,13 @@ class ConversationsRepository(Repository):
                 )
             if companion.status != "active":
                 raise ValueError(f"companion {companion_id!r} is not active")
-            if device_id is not None:
-                device = await session.get(DeviceRow, device_id)
-                if device is None:
-                    raise KeyError(f"device not found: {device_id}")
-                if device.owner_id != owner_id:
-                    raise ValueError(
-                        f"device {device_id!r} belongs to owner {device.owner_id!r}, not {owner_id!r}"
-                    )
-                if device.bound_companion_id != companion_id:
-                    raise ValueError(
-                        f"device {device_id!r} is bound to companion {device.bound_companion_id!r}, not {companion_id!r}"
-                    )
-                if device.status in {"disabled", "revoked"}:
-                    raise ValueError(f"device {device_id!r} is {device.status}")
             row = ConversationRow(
                 conversation_id=conversation_id,
                 owner_id=owner_id,
                 companion_id=companion_id,
-                device_id=device_id,
+                runtime_caller_id=runtime_caller_id,
+                runtime_session_id=runtime_session_id,
+                source_device_id=source_device_id,
                 title=title,
                 status=status,
                 metadata_json=metadata_json or {},
@@ -66,7 +56,9 @@ class ConversationsRepository(Repository):
         turn_id: str,
         conversation_id: str,
         seq: int,
-        device_id: str | None = None,
+        runtime_caller_id: str | None = None,
+        runtime_session_id: str | None = None,
+        source_device_id: str | None = None,
         trigger: str = "user",
         status: str = "completed",
         finished_at: datetime | None = None,
@@ -78,7 +70,9 @@ class ConversationsRepository(Repository):
             turn_id=turn_id,
             conversation_id=conversation_id,
             seq=seq,
-            device_id=device_id,
+            runtime_caller_id=runtime_caller_id,
+            runtime_session_id=runtime_session_id,
+            source_device_id=source_device_id,
             trigger=trigger,
             status=status,
             finished_at=finished_at,

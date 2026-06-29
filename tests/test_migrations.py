@@ -26,6 +26,19 @@ def test_alembic_upgrade_head_creates_core_schema(tmp_path: Path, monkeypatch) -
         persona_columns = {
             column["name"] for column in inspector.get_columns("persona_genomes")
         }
+        conversation_columns = {
+            column["name"] for column in inspector.get_columns("conversations")
+        }
+        turn_columns = {column["name"] for column in inspector.get_columns("turns")}
+        runtime_caller_columns = {
+            column["name"] for column in inspector.get_columns("runtime_callers")
+        }
+        runtime_session_columns = {
+            column["name"] for column in inspector.get_columns("runtime_sessions")
+        }
+        body_command_columns = {
+            column["name"] for column in inspector.get_columns("body_commands")
+        }
     finally:
         engine.dispose()
 
@@ -40,6 +53,9 @@ def test_alembic_upgrade_head_creates_core_schema(tmp_path: Path, monkeypatch) -
         "memory_realms",
         "jobs",
         "events",
+        "body_commands",
+        "runtime_callers",
+        "runtime_sessions",
         "alembic_version",
     }.issubset(tables)
     assert "persona_presets" not in tables
@@ -56,5 +72,22 @@ def test_alembic_upgrade_head_creates_core_schema(tmp_path: Path, monkeypatch) -
         "prompt_markdown",
         "change_summary",
     }.issubset(persona_columns)
+    assert {"caller_id", "actor_kind", "actor_id", "last_seen_at"}.issubset(
+        runtime_caller_columns
+    )
+    assert {"session_id", "runtime_caller_id", "transport", "last_seen_at"}.issubset(
+        runtime_session_columns
+    )
+    assert {"runtime_caller_id", "runtime_session_id", "source_device_id"}.issubset(
+        body_command_columns
+    )
+    assert "runtime_caller_id" in conversation_columns
+    assert "runtime_session_id" in conversation_columns
+    assert "source_device_id" in conversation_columns
+    assert "device_id" not in conversation_columns
+    assert "runtime_caller_id" in turn_columns
+    assert "runtime_session_id" in turn_columns
+    assert "source_device_id" in turn_columns
+    assert "device_id" not in turn_columns
 
     assert os.environ["EIDOLON_DATA_SQLITE_PATH"] == str(db_path)

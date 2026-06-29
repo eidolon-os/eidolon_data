@@ -43,7 +43,7 @@ async def test_delete_owner_data_removes_owned_rows_and_retires_companions(tmp_p
             conversation_id="conversation-a",
             owner_id="owner-a",
             companion_id="companion-a",
-            device_id="device-a",
+            source_device_id="device-a",
         )
         await store.conversations.append_turn(
             turn_id="turn-a",

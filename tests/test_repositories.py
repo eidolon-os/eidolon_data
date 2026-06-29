@@ -90,21 +90,80 @@ async def test_repository_workflow_round_trips_core_entities(store: DataStore) -
     assert device.secret_ref == "secret://device-1"
     assert device.access_policy_json["capability"] == "speak"
 
+    caller = await store.runtime_callers.upsert_caller(
+        caller_id="rc-test",
+        owner_id=owner.owner_id,
+        companion_id=companion.companion_id,
+        actor_kind="web_chat",
+        actor_id="browser-1",
+        display_name="Browser",
+        source_device_id=device.device_id,
+    )
+    assert caller.actor_kind == "web_chat"
+    session = await store.runtime_sessions.upsert_session(
+        session_id="session-1",
+        owner_id=owner.owner_id,
+        companion_id=companion.companion_id,
+        runtime_caller_id=caller.caller_id,
+        source_device_id=device.device_id,
+        transport="grpc_chat",
+    )
+    assert session.runtime_caller_id == caller.caller_id
+
+    command = await store.body_commands.upsert_command(
+        command_id="command-1",
+        owner_id=owner.owner_id,
+        companion_id=companion.companion_id,
+        runtime_caller_id=caller.caller_id,
+        runtime_session_id=session.session_id,
+        device_id=device.device_id,
+        source_device_id=device.device_id,
+        topic="eidolon.control",
+        op="device.identify",
+        status="sent",
+        payload_json={"prompt": "identify"},
+        envelope_json={"id": "command-1"},
+    )
+    assert command.status == "sent"
+    assert command.runtime_caller_id == caller.caller_id
+    assert command.runtime_session_id == session.session_id
+    updated_command = await store.body_commands.update_status(
+        "command-1",
+        status="accepted",
+        ack_json={"code": "OK"},
+    )
+    assert updated_command is not None
+    assert updated_command.ack_json["code"] == "OK"
+    stored_command = await store.body_commands.get_command("command-1")
+    assert stored_command is not None
+    assert stored_command.status == "accepted"
+    assert [item.command_id for item in await store.body_commands.list_for_device(device.device_id)] == [
+        "command-1"
+    ]
+
     conversation = await store.conversations.create_conversation(
         conversation_id="conversation-1",
         owner_id=owner.owner_id,
         companion_id=companion.companion_id,
-        device_id=device.device_id,
+        runtime_caller_id=caller.caller_id,
+        runtime_session_id=session.session_id,
+        source_device_id=device.device_id,
     )
     turn = await store.conversations.append_turn(
         turn_id="turn-1",
         conversation_id=conversation.conversation_id,
         seq=1,
-        device_id=device.device_id,
+        runtime_caller_id=caller.caller_id,
+        runtime_session_id=session.session_id,
+        source_device_id=device.device_id,
         finished_at=datetime.now(timezone.utc),
         metrics_json={"tokens_in": 3},
     )
-    assert turn.device_id == device.device_id
+    assert conversation.runtime_caller_id == caller.caller_id
+    assert conversation.runtime_session_id == session.session_id
+    assert turn.runtime_caller_id == caller.caller_id
+    assert turn.runtime_session_id == session.session_id
+    assert turn.source_device_id == device.device_id
     await store.conversations.append_message(
         message_id="message-1",
         turn_id=turn.turn_id,
@@ -300,7 +359,7 @@ async def test_device_binding_requires_same_owner_active_companion(store: DataSt
     assert device.bound_companion_id == "companion-a"
 
 
-async def test_conversation_requires_device_bound_to_same_companion(store: DataStore) -> None:
+async def test_conversation_source_device_is_independent_from_body_binding(store: DataStore) -> None:
     await store.owners.create(owner_id="owner-conv", display_name="Owner")
     await store.companions.create(companion_id="companion-a", owner_id="owner-conv")
     await store.companions.create(companion_id="companion-b", owner_id="owner-conv")
@@ -310,21 +369,14 @@ async def test_conversation_requires_device_bound_to_same_companion(store: DataS
         bound_companion_id="companion-a",
     )
 
-    with pytest.raises(ValueError, match="is bound to companion"):
-        await store.conversations.create_conversation(
-            conversation_id="conversation-bad",
-            owner_id="owner-conv",
-            companion_id="companion-b",
-            device_id="device-conv",
-        )
-
     conversation = await store.conversations.create_conversation(
         conversation_id="conversation-ok",
         owner_id="owner-conv",
-        companion_id="companion-a",
-        device_id="device-conv",
+        companion_id="companion-b",
+        source_device_id="device-conv",
     )
-    assert conversation.companion_id == "companion-a"
+    assert conversation.companion_id == "companion-b"
+    assert conversation.source_device_id == "device-conv"
 
 
 async def test_default_memory_realm_must_belong_to_companion(store: DataStore) -> None:

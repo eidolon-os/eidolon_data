@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from eidolon_data.db.engine import create_engine, create_session_factory, init_schema
 from eidolon_data.ports.memory_engine import MemoryEnginePort
 from eidolon_data.repositories import (
+    BodyCommandsRepository,
     CompanionsRepository,
     ConversationsRepository,
     DevicesRepository,
@@ -17,6 +18,8 @@ from eidolon_data.repositories import (
     MemoryRepository,
     OwnersRepository,
     PersonaRepository,
+    RuntimeCallersRepository,
+    RuntimeSessionsRepository,
 )
 from eidolon_data.services.maintenance import MaintenanceService
 from eidolon_data.services.memory_service import MemoryService
@@ -73,6 +76,18 @@ class DataStore:
     @property
     def devices(self) -> DevicesRepository:
         return DevicesRepository(self.session_factory)
+
+    @property
+    def body_commands(self) -> BodyCommandsRepository:
+        return BodyCommandsRepository(self.session_factory)
+
+    @property
+    def runtime_callers(self) -> RuntimeCallersRepository:
+        return RuntimeCallersRepository(self.session_factory)
+
+    @property
+    def runtime_sessions(self) -> RuntimeSessionsRepository:
+        return RuntimeSessionsRepository(self.session_factory)
 
     @property
     def conversations(self) -> ConversationsRepository:

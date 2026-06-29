@@ -15,7 +15,16 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
             columns = await conn.run_sync(
                 lambda sync_conn: {
                     table: inspect(sync_conn).get_columns(table)
-                    for table in ("owners", "devices", "conversations", "turns", "messages")
+                    for table in (
+                        "owners",
+                        "devices",
+                        "runtime_callers",
+                        "runtime_sessions",
+                        "body_commands",
+                        "conversations",
+                        "turns",
+                        "messages",
+                    )
                 }
             )
             persona_columns = await conn.run_sync(
@@ -39,6 +48,9 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
             "memory_realms",
             "jobs",
             "events",
+            "runtime_callers",
+            "runtime_sessions",
+            "body_commands",
         }.issubset(set(table_names))
         assert "persona_presets" not in table_names
         assert "credentials" not in table_names
@@ -57,7 +69,19 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
             "change_summary",
         }.issubset(persona_columns)
         assert "updated_at" in column_names["conversations"]
-        assert "device_id" in column_names["turns"]
+        assert "actor_kind" in column_names["runtime_callers"]
+        assert "actor_id" in column_names["runtime_callers"]
+        assert "runtime_caller_id" in column_names["runtime_sessions"]
+        assert "runtime_session_id" in column_names["body_commands"]
+        assert "runtime_caller_id" in column_names["body_commands"]
+        assert "runtime_caller_id" in column_names["conversations"]
+        assert "runtime_session_id" in column_names["conversations"]
+        assert "source_device_id" in column_names["conversations"]
+        assert "device_id" not in column_names["conversations"]
+        assert "runtime_caller_id" in column_names["turns"]
+        assert "runtime_session_id" in column_names["turns"]
+        assert "source_device_id" in column_names["turns"]
+        assert "device_id" not in column_names["turns"]
         assert "seq" in column_names["messages"]
         assert any(
             constraint["name"] == "uq_messages_turn_seq"
@@ -65,4 +89,3 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
         )
     finally:
         await store.close()
-
