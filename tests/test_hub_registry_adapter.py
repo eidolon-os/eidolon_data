@@ -60,6 +60,10 @@ async def test_hub_device_registry_adapter_round_trips_device_record(tmp_path) -
             interaction_mode="voice",
             metadata_json={"claimed": True},
         )
+        await store.devices.update_device(
+            "device-1",
+            capabilities_json={"ops": ["sound.play"]},
+        )
 
         await repo.put(
             DeviceRegistryRecord(
@@ -82,6 +86,7 @@ async def test_hub_device_registry_adapter_round_trips_device_record(tmp_path) -
         assert row.bound_companion_id == "companion-1"
         assert row.status == "active"
         assert row.metadata_json["claimed"] is True
+        assert row.capabilities_json == {"ops": ["sound.play"]}
         assert row.interaction_mode == "voice"
     finally:
         await store.close()

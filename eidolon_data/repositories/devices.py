@@ -38,6 +38,7 @@ class DevicesRepository(Repository):
                 session,
                 owner_id=owner_id,
                 companion_id=bound_companion_id,
+                current_device_id=device_id,
             )
             row = DeviceRow(
                 device_id=device_id,
@@ -89,6 +90,7 @@ class DevicesRepository(Repository):
                 session,
                 owner_id=owner_id,
                 companion_id=bound_companion_id,
+                current_device_id=device_id,
             )
             row = await session.get(DeviceRow, device_id)
             if row is None:
@@ -196,6 +198,7 @@ class DevicesRepository(Repository):
                     session,
                     owner_id=row.owner_id,
                     companion_id=bound_companion_id,
+                    current_device_id=device_id,
                 )
             if name is not None:
                 row.name = name
@@ -250,6 +253,22 @@ class DevicesRepository(Repository):
             await session.refresh(row)
             return row
 
+    async def release(self, device_id: str) -> DeviceRow:
+        async with self._session_factory() as session:
+            row = await session.get(DeviceRow, device_id)
+            if row is None:
+                raise KeyError(f"device not found: {device_id}")
+            row.owner_id = None
+            row.bound_companion_id = None
+            row.interaction_mode = None
+            row.access_policy_json = {}
+            row.status = "discovered"
+            row.revoked_at = None
+            row.updated_at = utc_now()
+            await session.commit()
+            await session.refresh(row)
+            return row
+
     async def bind_companion(self, device_id: str, *, companion_id: str | None) -> DeviceRow:
         async with self._session_factory() as session:
             row = await session.get(DeviceRow, device_id)
@@ -259,6 +278,7 @@ class DevicesRepository(Repository):
                 session,
                 owner_id=row.owner_id,
                 companion_id=companion_id,
+                current_device_id=device_id,
             )
             row.bound_companion_id = companion_id
             row.updated_at = utc_now()
@@ -291,6 +311,7 @@ class DevicesRepository(Repository):
                 owner_id=owner_id,
                 companion_id=companion_id,
                 require_binding=True,
+                current_device_id=device_id,
             )
             if name is not None:
                 row.name = name
@@ -321,6 +342,7 @@ async def _validate_bound_companion(
     owner_id: str | None,
     companion_id: str | None,
     require_binding: bool = False,
+    current_device_id: str | None = None,
 ) -> None:
     if not companion_id:
         if require_binding:
@@ -337,3 +359,17 @@ async def _validate_bound_companion(
         )
     if companion.status != "active":
         raise ValueError(f"companion {companion_id!r} is not active")
+    existing_rows = await session.scalars(
+        select(DeviceRow).where(
+            DeviceRow.owner_id == owner_id,
+            DeviceRow.bound_companion_id == companion_id,
+            DeviceRow.device_id != current_device_id,
+            DeviceRow.status != "revoked",
+            DeviceRow.revoked_at.is_(None),
+        )
+    )
+    existing = next(iter(existing_rows), None)
+    if existing is not None:
+        raise ValueError(
+            f"companion {companion_id!r} is already bound to device {existing.device_id!r}"
+        )
