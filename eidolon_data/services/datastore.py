@@ -103,7 +103,7 @@ class DataStore:
         return MemoryService(repository=self.memory_repo, engine=self.memory_engine)
 
     @property
-    def owner_data(self) -> OwnerDataService:
+    def owner_data_ops(self) -> OwnerDataService:
         return OwnerDataService(self.session_factory)
 
     @property
@@ -111,9 +111,27 @@ class DataStore:
         return OwnerService(self.session_factory)
 
     @property
-    def companion_workspace(self) -> CompanionWorkspaceService:
+    def workspace_provisioning(self) -> CompanionWorkspaceService:
         return CompanionWorkspaceService(self.session_factory)
 
     @property
-    def maintenance(self) -> MaintenanceService:
+    def dev_maintenance(self) -> MaintenanceService:
         return MaintenanceService(self.session_factory)
+
+    @property
+    def owner_data(self) -> OwnerDataService:
+        """Compatibility alias for owner-scoped data governance operations."""
+
+        return self.owner_data_ops
+
+    @property
+    def companion_workspace(self) -> CompanionWorkspaceService:
+        """Compatibility alias for workspace provisioning operations."""
+
+        return self.workspace_provisioning
+
+    @property
+    def maintenance(self) -> MaintenanceService:
+        """Compatibility alias for local-development maintenance operations."""
+
+        return self.dev_maintenance

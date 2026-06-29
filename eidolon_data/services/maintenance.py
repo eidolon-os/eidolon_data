@@ -33,10 +33,19 @@ class OwnerCleanupResult:
 
 
 class MaintenanceService:
+    """Local-development destructive maintenance operations."""
+
     def __init__(self, session_factory: async_sessionmaker) -> None:
         self._session_factory = session_factory
 
     async def delete_owner_tree(self, owner_id: str) -> OwnerCleanupResult:
+        """Hard-delete one owner and all owned rows.
+
+        This is intentionally broader than privacy/data-governance deletion:
+        it removes the owner identity row itself and is meant for local dev
+        cleanup, fixtures, and operator-confirmed maintenance.
+        """
+
         async with self._session_factory() as session:
             owner = await session.get(OwnerRow, owner_id)
             if owner is None:

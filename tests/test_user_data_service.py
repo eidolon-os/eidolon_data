@@ -79,7 +79,7 @@ async def test_delete_owner_data_removes_owned_rows_and_retires_companions(tmp_p
             event_type="persona.evolution.applied",
         )
 
-        counts = await store.owner_data.delete_owner_data("owner-a")
+        counts = await store.owner_data_ops.delete_owner_data("owner-a")
 
         assert counts == {
             "messages": 1,

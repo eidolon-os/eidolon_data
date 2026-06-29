@@ -12,7 +12,6 @@ from eidolon_data.schema.types import (
     MemoryItem,
     RecallResult,
 )
-from eidolon_data.services.id_migration import normalize_sqlite_ids
 
 
 class FakeMemoryEngine:
@@ -203,7 +202,7 @@ async def test_maintenance_deletes_owner_default_tree_only(store: DataStore) -> 
         event_type="device.discovered",
     )
 
-    result = await store.maintenance.delete_owner_tree("owner-default")
+    result = await store.dev_maintenance.delete_owner_tree("owner-default")
 
     assert result.deleted is True
     assert result.devices == 1
@@ -218,7 +217,7 @@ async def test_maintenance_deletes_owner_default_tree_only(store: DataStore) -> 
 async def test_companion_workspace_initialization_is_atomic(store: DataStore) -> None:
     await store.owner_service.create_owner(owner_id="owner-workspace", display_name="Owner")
 
-    result = await store.companion_workspace.initialize_workspace(
+    result = await store.workspace_provisioning.provision_workspace(
         owner_id="owner-workspace",
         companion_display_name="Xiaoyi",
         genome_json={"identity": {"name": "Xiaoyi"}},
@@ -245,7 +244,7 @@ async def test_companion_workspace_initialization_is_atomic(store: DataStore) ->
         "companion.workspace.initialized",
     }.issubset({event.event_type for event in events})
 
-    second = await store.companion_workspace.initialize_workspace(
+    second = await store.workspace_provisioning.provision_workspace(
         owner_id="owner-workspace",
         companion_id="c_owner-workspace_study",
         genome_id="g_owner-workspace_study_v1",
@@ -256,7 +255,7 @@ async def test_companion_workspace_initialization_is_atomic(store: DataStore) ->
     assert len(await store.companions.list_for_owner("owner-workspace")) == 2
 
     with pytest.raises(ValueError, match="already"):
-        await store.companion_workspace.initialize_workspace(
+        await store.workspace_provisioning.provision_workspace(
             owner_id="owner-workspace",
             companion_id=result.companion.companion_id,
             genome_id="g_owner-workspace_duplicate_v1",
@@ -264,52 +263,18 @@ async def test_companion_workspace_initialization_is_atomic(store: DataStore) ->
         )
 
 
-async def test_id_normalization_migrates_generated_ids_without_touching_device_ids(
+async def test_workspace_provisioning_rejects_legacy_colon_ids(
     store: DataStore,
 ) -> None:
     await store.owner_service.create_owner(owner_id="owner-migrate", display_name="Owner")
-    await store.companion_workspace.initialize_workspace(
-        owner_id="owner-migrate",
-        companion_id="c:owner-migrate:default",
-        genome_id="g:owner-migrate:default:v1",
-        realm_id="r:owner-migrate:default",
-    )
-    await store.devices.create_device(
-        device_id="1c:db:d4:7a:ef:0c",
-        owner_id="owner-migrate",
-        bound_companion_id="c:owner-migrate:default",
-    )
-    await store.events.append(
-        event_id="evt-old",
-        owner_id="owner-migrate",
-        subject_type="persona_genome",
-        subject_id="g:owner-migrate:default:v1",
-        event_type="test",
-        payload_json={
-            "companion_id": "c:owner-migrate:default",
-            "realm_id": "r:owner-migrate:default",
-            "device_id": "1c:db:d4:7a:ef:0c",
-        },
-    )
 
-    result = normalize_sqlite_ids(store.settings.sqlite_path)
-
-    assert result.mappings >= 4
-    companion = await store.companions.get("c_owner-migrate_default")
-    assert companion is not None
-    assert companion.current_genome_id == "g_owner-migrate_default_v1"
-    assert companion.default_memory_realm_id == "r_owner-migrate_default"
-    assert await store.persona_repo.get_genome("g_owner-migrate_default_v1") is not None
-    assert await store.memory_repo.get_realm("r_owner-migrate_default") is not None
-    device = await store.devices.get_device("1c:db:d4:7a:ef:0c")
-    assert device is not None
-    assert device.bound_companion_id == "c_owner-migrate_default"
-    events = await store.events.list_for_owner("owner-migrate", limit=20)
-    migrated_event = next(event for event in events if event.event_id == "evt_old")
-    assert migrated_event.subject_id == "g_owner-migrate_default_v1"
-    assert migrated_event.payload_json["companion_id"] == "c_owner-migrate_default"
-    assert migrated_event.payload_json["realm_id"] == "r_owner-migrate_default"
-    assert migrated_event.payload_json["device_id"] == "1c:db:d4:7a:ef:0c"
+    with pytest.raises(ValueError, match="companion_id"):
+        await store.workspace_provisioning.provision_workspace(
+            owner_id="owner-migrate",
+            companion_id="c:owner-migrate:default",
+            genome_id="g_owner-migrate_default_v1",
+            realm_id="r_owner-migrate_default",
+        )
 
 
 async def test_device_binding_requires_same_owner_active_companion(store: DataStore) -> None:
@@ -378,7 +343,7 @@ async def test_default_memory_realm_must_belong_to_companion(store: DataStore) -
 
 async def test_persona_genome_proposal_requires_current_base(store: DataStore) -> None:
     await store.owner_service.create_owner(owner_id="owner-evolve", display_name="Owner")
-    initial = await store.companion_workspace.initialize_workspace(
+    initial = await store.workspace_provisioning.provision_workspace(
         owner_id="owner-evolve",
         companion_display_name="Evo",
     )
@@ -409,7 +374,7 @@ async def test_persona_genome_proposal_requires_current_base(store: DataStore) -
 
 async def test_stale_persona_genome_proposal_does_not_replace_current_genome(store: DataStore) -> None:
     await store.owner_service.create_owner(owner_id="owner-stale", display_name="Owner")
-    initial = await store.companion_workspace.initialize_workspace(
+    initial = await store.workspace_provisioning.provision_workspace(
         owner_id="owner-stale",
         companion_display_name="Evo",
     )

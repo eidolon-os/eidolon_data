@@ -17,6 +17,7 @@ from eidolon_data.schema.models import (
 )
 
 OWNER_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,47}$")
+GENERATED_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
 
 
 class OwnerWorkspaceError(ValueError):
@@ -88,6 +89,55 @@ class CompanionWorkspaceService:
         self._session_factory = session_factory
 
     async def initialize_workspace(
+        self,
+        *,
+        owner_id: str,
+        companion_id: str | None = None,
+        companion_display_name: str = "",
+        companion_kind: str = "companion",
+        companion_profile_json: dict | None = None,
+        companion_runtime_config_json: dict | None = None,
+        companion_metadata_json: dict | None = None,
+        genome_id: str | None = None,
+        genome_source_json: dict | None = None,
+        genome_json: dict | None = None,
+        prompt_markdown: str = "",
+        evolution_state_json: dict | None = None,
+        realm_id: str | None = None,
+        memory_engine: str = "mempalace",
+        memory_engine_config_json: dict | None = None,
+        memory_policy_json: dict | None = None,
+        actor_type: str = "admin",
+        actor_id: str | None = None,
+    ) -> CompanionWorkspaceResult:
+        """Compatibility wrapper for owner/companion provisioning.
+
+        New call sites should use ``provision_workspace``; this name remains
+        for existing admin/agent tests and callers.
+        """
+
+        return await self.provision_workspace(
+            owner_id=owner_id,
+            companion_id=companion_id,
+            companion_display_name=companion_display_name,
+            companion_kind=companion_kind,
+            companion_profile_json=companion_profile_json,
+            companion_runtime_config_json=companion_runtime_config_json,
+            companion_metadata_json=companion_metadata_json,
+            genome_id=genome_id,
+            genome_source_json=genome_source_json,
+            genome_json=genome_json,
+            prompt_markdown=prompt_markdown,
+            evolution_state_json=evolution_state_json,
+            realm_id=realm_id,
+            memory_engine=memory_engine,
+            memory_engine_config_json=memory_engine_config_json,
+            memory_policy_json=memory_policy_json,
+            actor_type=actor_type,
+            actor_id=actor_id,
+        )
+
+    async def provision_workspace(
         self,
         *,
         owner_id: str,
@@ -214,8 +264,10 @@ def _validate_owner_id(owner_id: str) -> str:
 
 
 def _validate_generated_id(label: str, value: str) -> None:
-    if not value or len(value) > 64:
-        raise OwnerWorkspaceError(f"{label} must be 1-64 chars")
+    if not GENERATED_ID_RE.match(value):
+        raise OwnerWorkspaceError(
+            f"{label} must be 1-64 chars and contain only letters, numbers, _, ., or -"
+        )
 
 
 def _default_genome(display_name: str) -> dict:
