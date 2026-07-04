@@ -281,6 +281,10 @@ class TurnRow(Base):
     status: Mapped[str] = mapped_column(String(32), default="completed", index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Cross-hop correlation id (channel->agent->memory), indexed for querying a
+    # turn by trace. The full trace also lives in trace_json; this promotes the
+    # id to a first-class filterable column.
+    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
     trace_json: Mapped[JsonDict] = mapped_column(default=dict)
     metrics_json: Mapped[JsonDict] = mapped_column(default=dict)
     metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
