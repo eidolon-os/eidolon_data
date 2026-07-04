@@ -6,15 +6,44 @@ import re
 from dataclasses import dataclass
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from eidolon_data.db.base import utc_now
 from eidolon_data.schema.models import (
     CompanionRow,
+    DeviceRow,
     EventRow,
     MemoryRealmRow,
     OwnerRow,
     PersonaGenomeRow,
 )
+
+WEB_BODY_KIND = "web"
+
+
+def _web_body_device_id(companion_id: str) -> str:
+    return f"web-{companion_id}"
+
+
+def _build_web_body_row(*, owner_id: str, companion_id: str, display_name: str) -> DeviceRow:
+    """A host-local web body for a companion. Auth is via admin trust (no device
+    secret); hub mints its LiveKit token after validating the owner/companion
+    binding. kind=web renders as a 虚拟身体 in the cockpit constellation."""
+    now = utc_now()
+    return DeviceRow(
+        device_id=_web_body_device_id(companion_id),
+        owner_id=owner_id,
+        name=f"{display_name} · 本机",
+        kind=WEB_BODY_KIND,
+        status="active",
+        approved_at=now,
+        approved_by="system",
+        bound_companion_id=companion_id,
+        interaction_mode="full_duplex",
+        capabilities_json={"audio": True, "display": True},
+        metadata_json={"auto_provisioned": True, "role": "local_web"},
+    )
 
 OWNER_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,47}$")
 GENERATED_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
@@ -109,6 +138,7 @@ class CompanionWorkspaceService:
         memory_policy_json: dict | None = None,
         actor_type: str = "admin",
         actor_id: str | None = None,
+        is_master: bool = False,
     ) -> CompanionWorkspaceResult:
         """Compatibility wrapper for owner/companion provisioning.
 
@@ -135,7 +165,51 @@ class CompanionWorkspaceService:
             memory_policy_json=memory_policy_json,
             actor_type=actor_type,
             actor_id=actor_id,
+            is_master=is_master,
         )
+
+    async def ensure_web_body(
+        self,
+        *,
+        owner_id: str,
+        companion_id: str,
+    ) -> DeviceRow:
+        """Idempotently ensure a host-local web body exists for a companion.
+        Powers the 'add local web body' one-click and the master default."""
+        async with self._session_factory() as session, session.begin():
+            companion = await session.get(CompanionRow, companion_id)
+            if companion is None or companion.owner_id != owner_id:
+                raise OwnerWorkspaceError("companion not found for owner")
+            if companion.status != "active":
+                raise OwnerWorkspaceError("companion is not active")
+            existing = (
+                await session.scalars(
+                    select(DeviceRow)
+                    .where(DeviceRow.bound_companion_id == companion_id)
+                    .where(DeviceRow.kind == WEB_BODY_KIND)
+                    .where(DeviceRow.revoked_at.is_(None))
+                )
+            ).first()
+            if existing is not None:
+                return existing
+            row = _build_web_body_row(
+                owner_id=owner_id,
+                companion_id=companion_id,
+                display_name=companion.display_name or companion_id,
+            )
+            session.add(row)
+            session.add(
+                _event(
+                    owner_id=owner_id,
+                    subject_type="device",
+                    subject_id=row.device_id,
+                    event_type="device.web_body.provisioned",
+                    actor_type="admin",
+                    actor_id=None,
+                    payload_json={"companion_id": companion_id, "kind": WEB_BODY_KIND},
+                )
+            )
+        return row
 
     async def provision_workspace(
         self,
@@ -158,6 +232,7 @@ class CompanionWorkspaceService:
         memory_policy_json: dict | None = None,
         actor_type: str = "admin",
         actor_id: str | None = None,
+        is_master: bool = False,
     ) -> CompanionWorkspaceResult:
         owner_id = _validate_owner_id(owner_id)
         companion_id = companion_id or f"c_{owner_id}_default"
@@ -187,6 +262,7 @@ class CompanionWorkspaceService:
                 display_name=companion_name,
                 kind=companion_kind,
                 status="active",
+                is_master=is_master,
                 profile_json=companion_profile_json or {},
                 runtime_config_json=companion_runtime_config_json or {},
                 metadata_json=companion_metadata_json or {},
@@ -222,6 +298,24 @@ class CompanionWorkspaceService:
 
             companion.current_genome_id = genome_id
             companion.default_memory_realm_id = realm_id
+
+            # Master companion defaults to a host-local web body.
+            if is_master:
+                web_body = _build_web_body_row(
+                    owner_id=owner_id, companion_id=companion_id, display_name=companion_name
+                )
+                session.add(web_body)
+                session.add(
+                    _event(
+                        owner_id=owner_id,
+                        subject_type="device",
+                        subject_id=web_body.device_id,
+                        event_type="device.web_body.provisioned",
+                        actor_type=actor_type,
+                        actor_id=actor_id,
+                        payload_json={"companion_id": companion_id, "kind": WEB_BODY_KIND},
+                    )
+                )
 
             event_specs = [
                 ("companion", companion_id, "companion.created", {"display_name": companion_name}),

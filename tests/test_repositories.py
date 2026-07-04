@@ -359,6 +359,86 @@ async def test_device_binding_requires_same_owner_active_companion(store: DataSt
     assert device.bound_companion_id == "companion-a"
 
 
+async def test_companion_can_bind_multiple_bodies(store: DataStore) -> None:
+    await store.owners.create(owner_id="owner-multi", display_name="Owner")
+    await store.companions.create(companion_id="companion-multi", owner_id="owner-multi")
+
+    await store.devices.create_device(
+        device_id="web-companion-multi",
+        owner_id="owner-multi",
+        kind="web",
+        bound_companion_id="companion-multi",
+    )
+    # A second, physical body on the same companion must now be allowed.
+    await store.devices.create_device(
+        device_id="esp-companion-multi",
+        owner_id="owner-multi",
+        kind="esp32",
+        bound_companion_id="companion-multi",
+    )
+
+    bodies = await store.devices.list_devices_for_companion("companion-multi")
+    assert {d.device_id for d in bodies} == {"web-companion-multi", "esp-companion-multi"}
+
+
+async def test_provision_master_creates_web_body(store: DataStore) -> None:
+    await store.owner_service.create_owner(owner_id="owner-master", display_name="Owner")
+
+    result = await store.workspace_provisioning.provision_workspace(
+        owner_id="owner-master",
+        companion_display_name="Xiaoyi",
+        is_master=True,
+    )
+    assert result.companion.is_master is True
+
+    bodies = await store.devices.list_devices_for_companion(result.companion.companion_id)
+    web_bodies = [d for d in bodies if d.kind == "web"]
+    assert len(web_bodies) == 1
+    web = web_bodies[0]
+    assert web.bound_companion_id == result.companion.companion_id
+    assert web.status == "active"
+    assert web.metadata_json.get("role") == "local_web"
+    assert web.metadata_json.get("auto_provisioned") is True
+
+    events = await store.events.list_for_owner("owner-master", limit=20)
+    assert "device.web_body.provisioned" in {event.event_type for event in events}
+
+    # A non-master companion provisions no web body.
+    non_master = await store.workspace_provisioning.provision_workspace(
+        owner_id="owner-master",
+        companion_id="c_owner-master_study",
+        genome_id="g_owner-master_study_v1",
+        realm_id="r_owner-master_study",
+        companion_display_name="Study",
+    )
+    assert non_master.companion.is_master is False
+    assert await store.devices.list_devices_for_companion(non_master.companion.companion_id) == []
+
+
+async def test_ensure_web_body_is_idempotent(store: DataStore) -> None:
+    await store.owners.create(owner_id="owner-ewb", display_name="Owner")
+    await store.companions.create(
+        companion_id="companion-ewb",
+        owner_id="owner-ewb",
+        display_name="Companion",
+    )
+
+    first = await store.workspace_provisioning.ensure_web_body(
+        owner_id="owner-ewb", companion_id="companion-ewb"
+    )
+    second = await store.workspace_provisioning.ensure_web_body(
+        owner_id="owner-ewb", companion_id="companion-ewb"
+    )
+
+    assert first.device_id == second.device_id
+    web_bodies = [
+        d
+        for d in await store.devices.list_devices_for_companion("companion-ewb")
+        if d.kind == "web"
+    ]
+    assert len(web_bodies) == 1
+
+
 async def test_conversation_source_device_is_independent_from_body_binding(store: DataStore) -> None:
     await store.owners.create(owner_id="owner-conv", display_name="Owner")
     await store.companions.create(companion_id="companion-a", owner_id="owner-conv")

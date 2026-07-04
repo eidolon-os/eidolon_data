@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -46,6 +47,9 @@ class CompanionRow(Base):
     display_name: Mapped[str] = mapped_column(String(128), default="")
     kind: Mapped[str] = mapped_column(String(32), default="companion", index=True)
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    # The owner's primary companion. Master companions default-get a local web
+    # body; any companion (master or not) can associate more bodies on demand.
+    is_master: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     current_genome_id: Mapped[str | None] = mapped_column(String(64), index=True)
     default_memory_realm_id: Mapped[str | None] = mapped_column(String(64), index=True)
     profile_json: Mapped[JsonDict] = mapped_column(default=dict)

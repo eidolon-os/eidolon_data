@@ -146,6 +146,15 @@ class DevicesRepository(Repository):
             )
             return list(rows)
 
+    async def list_devices_for_companion(self, companion_id: str) -> list[DeviceRow]:
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(DeviceRow)
+                .where(DeviceRow.bound_companion_id == companion_id)
+                .order_by(DeviceRow.created_at)
+            )
+            return list(rows)
+
     async def list_unclaimed_devices(self) -> list[DeviceRow]:
         async with self._session_factory() as session:
             rows = await session.scalars(
@@ -359,17 +368,6 @@ async def _validate_bound_companion(
         )
     if companion.status != "active":
         raise ValueError(f"companion {companion_id!r} is not active")
-    existing_rows = await session.scalars(
-        select(DeviceRow).where(
-            DeviceRow.owner_id == owner_id,
-            DeviceRow.bound_companion_id == companion_id,
-            DeviceRow.device_id != current_device_id,
-            DeviceRow.status != "revoked",
-            DeviceRow.revoked_at.is_(None),
-        )
-    )
-    existing = next(iter(existing_rows), None)
-    if existing is not None:
-        raise ValueError(
-            f"companion {companion_id!r} is already bound to device {existing.device_id!r}"
-        )
+    # A companion may hold multiple bodies (e.g. a local web body + a LAN esp32
+    # body). We only validate owner/active here; there is deliberately no
+    # one-device-per-companion limit.
