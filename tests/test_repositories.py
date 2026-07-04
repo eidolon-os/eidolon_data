@@ -462,3 +462,26 @@ async def test_stale_persona_genome_proposal_does_not_replace_current_genome(sto
     companion = await store.companions.get(companion_id)
     assert stale.status == "stale"
     assert companion.current_genome_id == current.genome_id
+
+
+async def test_reset_to_origin_returns_to_authored_v1(store: DataStore) -> None:
+    await store.owners.create(owner_id="owner-reset", display_name="Owner")
+    await store.companions.create(
+        companion_id="c-reset", owner_id="owner-reset", display_name="Xiaoyi"
+    )
+    # v1 is the authored origin (base points at itself); v2 is evolution drift.
+    await store.persona.create_genome(
+        genome_id="g-reset-1", companion_id="c-reset", owner_id="owner-reset",
+        event_id="ev-r1", version=1, base_genome_id="g-reset-1",
+        genome_json={"identity": {"name": "v1"}}, status="committed",
+    )
+    await store.persona.create_genome(
+        genome_id="g-reset-2", companion_id="c-reset", owner_id="owner-reset",
+        event_id="ev-r2", version=2, base_genome_id="g-reset-1",
+        genome_json={"identity": {"name": "v2-evolved"}}, status="committed",
+    )
+    assert (await store.companions.get("c-reset")).current_genome_id == "g-reset-2"
+
+    origin = await store.persona.reset_to_origin(owner_id="owner-reset", companion_id="c-reset")
+    assert origin.genome_id == "g-reset-1"
+    assert (await store.companions.get("c-reset")).current_genome_id == "g-reset-1"

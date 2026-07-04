@@ -187,6 +187,46 @@ class PersonaRepository(Repository):
             await session.refresh(genome)
             return genome
 
+    async def rollback_to_origin_genome(self, *, companion_id: str) -> PersonaGenomeRow:
+        """Walk the base_genome_id chain from the current genome back to the
+        authored origin (v1, whose base points at itself) and make it current —
+        discarding accumulated evolution drift."""
+        async with self._session_factory() as session:
+            companion = await session.get(CompanionRow, companion_id)
+            if companion is None:
+                raise KeyError(f"companion not found: {companion_id}")
+            genome = (
+                await session.get(PersonaGenomeRow, companion.current_genome_id)
+                if companion.current_genome_id
+                else None
+            )
+            if genome is None:
+                rows = await session.scalars(
+                    select(PersonaGenomeRow)
+                    .where(PersonaGenomeRow.companion_id == companion_id)
+                    .order_by(PersonaGenomeRow.version)
+                    .limit(1)
+                )
+                genome = rows.first()
+            if genome is None:
+                raise KeyError(f"no genome for companion: {companion_id}")
+            visited: set[str] = set()
+            while (
+                genome.base_genome_id
+                and genome.base_genome_id != genome.genome_id
+                and genome.base_genome_id not in visited
+            ):
+                visited.add(genome.genome_id)
+                parent = await session.get(PersonaGenomeRow, genome.base_genome_id)
+                if parent is None or parent.companion_id != companion_id:
+                    break
+                genome = parent
+            companion.current_genome_id = genome.genome_id
+            companion.updated_at = utc_now()
+            await session.commit()
+            await session.refresh(genome)
+            return genome
+
     async def _set_status(self, genome_id: str, *, status: str, reason: str = "") -> PersonaGenomeRow:
         async with self._session_factory() as session:
             row = await session.get(PersonaGenomeRow, genome_id)

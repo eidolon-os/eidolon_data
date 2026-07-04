@@ -187,6 +187,24 @@ class PersonaService:
         )
         return genome
 
+    async def reset_to_origin(
+        self,
+        *,
+        owner_id: str,
+        companion_id: str,
+    ) -> PersonaGenomeRow:
+        """Reset a companion to its authored origin genome (drops evolution drift)."""
+        genome = await self._persona.rollback_to_origin_genome(companion_id=companion_id)
+        await self._events.append(
+            event_id=_event_id(),
+            owner_id=owner_id,
+            subject_type="companion",
+            subject_id=companion_id,
+            event_type="persona_genome.reset_to_origin",
+            payload_json={"genome_id": genome.genome_id},
+        )
+        return genome
+
 
 def _event_id() -> str:
     return f"evt_{uuid4().hex}"
