@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from eidolon_data.db.base import utc_now
+from eidolon_data.events.facade import build_event
 from eidolon_data.schema.models import (
     CompanionRow,
     DeviceRow,
@@ -201,6 +201,7 @@ class CompanionWorkspaceService:
             session.add(
                 _event(
                     owner_id=owner_id,
+                    companion_id=companion_id,
                     subject_type="device",
                     subject_id=row.device_id,
                     event_type="device.web_body.provisioned",
@@ -308,6 +309,7 @@ class CompanionWorkspaceService:
                 session.add(
                     _event(
                         owner_id=owner_id,
+                        companion_id=companion_id,
                         subject_type="device",
                         subject_id=web_body.device_id,
                         event_type="device.web_body.provisioned",
@@ -332,6 +334,7 @@ class CompanionWorkspaceService:
                 session.add(
                     _event(
                         owner_id=owner_id,
+                        companion_id=companion_id,
                         subject_type=subject_type,
                         subject_id=subject_id,
                         event_type=event_type,
@@ -408,13 +411,16 @@ def _event(
     actor_type: str,
     actor_id: str | None,
     payload_json: dict,
+    companion_id: str | None = None,
 ) -> EventRow:
-    return EventRow(
-        event_id=f"evt_{uuid4().hex}",
+    # Route through the contract-carrying facade (fills tier/source/severity/
+    # outcome from the catalog); returned unpersisted for same-transaction add.
+    return build_event(
+        event_type=event_type,
         owner_id=owner_id,
+        companion_id=companion_id,
         subject_type=subject_type,
         subject_id=subject_id,
-        event_type=event_type,
         actor_type=actor_type,
         actor_id=actor_id,
         payload_json=payload_json,

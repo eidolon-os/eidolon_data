@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from uuid import uuid4
-
 from eidolon_data.repositories.companions import CompanionsRepository
 from eidolon_data.repositories.events import EventsRepository
 from eidolon_data.repositories.persona import PersonaGenomeConflict, PersonaRepository
@@ -52,12 +50,14 @@ class PersonaService:
         )
         if status == "committed":
             await self._companions.set_current_genome(companion_id, genome_id)
-        await self._events.append(
+        # Unified onto persona_genome.created (was persona.genome.created; see registry legacy note).
+        await self._events.record_event(
             event_id=event_id,
             owner_id=owner_id,
+            companion_id=companion_id,
             subject_type="companion",
             subject_id=companion_id,
-            event_type="persona.genome.created",
+            event_type="persona_genome.created",
             payload_json={
                 "genome_id": genome_id,
                 "version": version,
@@ -93,9 +93,9 @@ class PersonaService:
             evolution_state_json=evolution_state_json,
             change_summary=change_summary,
         )
-        await self._events.append(
-            event_id=_event_id(),
+        await self._events.record_event(
             owner_id=owner_id,
+            companion_id=companion_id,
             subject_type="persona_genome",
             subject_id=genome_id,
             event_type="persona_genome.proposed",
@@ -123,9 +123,9 @@ class PersonaService:
                 expected_base_genome_id=expected_base_genome_id,
             )
         except PersonaGenomeConflict:
-            await self._events.append(
-                event_id=_event_id(),
+            await self._events.record_event(
                 owner_id=owner_id,
+                companion_id=companion_id,
                 subject_type="persona_genome",
                 subject_id=genome_id,
                 event_type="persona_genome.stale",
@@ -135,9 +135,9 @@ class PersonaService:
                 },
             )
             raise
-        await self._events.append(
-            event_id=_event_id(),
+        await self._events.record_event(
             owner_id=owner_id,
+            companion_id=companion_id,
             subject_type="persona_genome",
             subject_id=genome_id,
             event_type="persona_genome.activated",
@@ -156,8 +156,7 @@ class PersonaService:
         reason: str = "",
     ) -> PersonaGenomeRow:
         genome = await self._persona.reject_genome(genome_id, reason=reason)
-        await self._events.append(
-            event_id=_event_id(),
+        await self._events.record_event(
             owner_id=owner_id,
             subject_type="persona_genome",
             subject_id=genome_id,
@@ -177,9 +176,9 @@ class PersonaService:
             companion_id=companion_id,
             genome_id=genome_id,
         )
-        await self._events.append(
-            event_id=_event_id(),
+        await self._events.record_event(
             owner_id=owner_id,
+            companion_id=companion_id,
             subject_type="companion",
             subject_id=companion_id,
             event_type="persona_genome.rollback",
@@ -195,16 +194,12 @@ class PersonaService:
     ) -> PersonaGenomeRow:
         """Reset a companion to its authored origin genome (drops evolution drift)."""
         genome = await self._persona.rollback_to_origin_genome(companion_id=companion_id)
-        await self._events.append(
-            event_id=_event_id(),
+        await self._events.record_event(
             owner_id=owner_id,
+            companion_id=companion_id,
             subject_type="companion",
             subject_id=companion_id,
             event_type="persona_genome.reset_to_origin",
             payload_json={"genome_id": genome.genome_id},
         )
         return genome
-
-
-def _event_id() -> str:
-    return f"evt_{uuid4().hex}"

@@ -378,12 +378,28 @@ class EventRow(Base):
     owner_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
     )
+    companion_id: Mapped[str | None] = mapped_column(String(64), index=True)
     subject_type: Mapped[str] = mapped_column(String(32), index=True)
     subject_id: Mapped[str] = mapped_column(String(128), index=True)
     event_type: Mapped[str] = mapped_column(String(96), index=True)
+    # Classification (see eidolon_data.events.registry): tier + subsystem + result.
+    event_class: Mapped[str] = mapped_column(String(8), default="audit", index=True)
+    source: Mapped[str] = mapped_column(String(16), default="data", index=True)
+    severity: Mapped[str] = mapped_column(String(8), default="info", index=True)
+    outcome: Mapped[str] = mapped_column(String(12), default="success", index=True)
+    reason: Mapped[str | None] = mapped_column(String(256))
     actor_type: Mapped[str] = mapped_column(String(32), default="system", index=True)
     actor_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    # Correlation. trace_id is constant across a distributed operation.
+    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    data_classification: Mapped[str] = mapped_column(String(10), default="safe")
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
     payload_json: Mapped[JsonDict] = mapped_column(default=dict)
+    # occurred_at = when the real-world event happened; created_at = when the row was recorded.
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=utc_now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
-    __table_args__ = (Index("ix_events_subject_created", "subject_type", "subject_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_events_subject_created", "subject_type", "subject_id", "created_at"),
+        Index("ix_events_owner_created", "owner_id", "created_at"),
+    )

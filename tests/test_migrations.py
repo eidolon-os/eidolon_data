@@ -39,6 +39,8 @@ def test_alembic_upgrade_head_creates_core_schema(tmp_path: Path, monkeypatch) -
         body_command_columns = {
             column["name"] for column in inspector.get_columns("body_commands")
         }
+        event_columns = {column["name"] for column in inspector.get_columns("events")}
+        event_indexes = {index["name"] for index in inspector.get_indexes("events")}
     finally:
         engine.dispose()
 
@@ -89,5 +91,24 @@ def test_alembic_upgrade_head_creates_core_schema(tmp_path: Path, monkeypatch) -
     assert "runtime_session_id" in turn_columns
     assert "source_device_id" in turn_columns
     assert "device_id" not in turn_columns
+
+    # 0007 event classification/correlation columns (see docs §3–4).
+    assert {
+        "companion_id",
+        "event_class",
+        "source",
+        "severity",
+        "outcome",
+        "reason",
+        "trace_id",
+        "data_classification",
+        "schema_version",
+        "occurred_at",
+    }.issubset(event_columns)
+    assert {
+        "ix_events_source",
+        "ix_events_trace_id",
+        "ix_events_owner_created",
+    }.issubset(event_indexes)
 
     assert os.environ["EIDOLON_DATA_SQLITE_PATH"] == str(db_path)
