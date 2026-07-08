@@ -201,20 +201,76 @@ async def test_owner_service_creates_owner_without_workspace(store: DataStore) -
 async def test_maintenance_deletes_owner_default_tree_only(store: DataStore) -> None:
     await store.owners.create(owner_id="owner-default", display_name="Default")
     await store.owners.create(owner_id="owner-keep", display_name="Keep")
-    await store.companions.create(
-        companion_id="companion-default",
+    workspace = await store.workspace_provisioning.provision_workspace(
         owner_id="owner-default",
-        display_name="Default Companion",
+        companion_id="companion-default",
+        genome_id="genome-default",
+        realm_id="realm-default",
+        is_master=True,
+    )
+    companion_id = workspace.companion.companion_id
+    await store.companions.create(
+        companion_id="companion-keep",
+        owner_id="owner-keep",
+        display_name="Keep Companion",
     )
     await store.devices.create_device(
         device_id="device-default",
         owner_id="owner-default",
         kind="esp32",
+        bound_companion_id=companion_id,
     )
     await store.devices.create_device(
         device_id="device-keep",
         owner_id="owner-keep",
         kind="esp32",
+    )
+    caller = await store.runtime_callers.upsert_caller(
+        caller_id="caller-default",
+        owner_id="owner-default",
+        companion_id=companion_id,
+        actor_kind="web",
+        actor_id="browser",
+        source_device_id="device-default",
+    )
+    session = await store.runtime_sessions.upsert_session(
+        session_id="session-default",
+        owner_id="owner-default",
+        companion_id=companion_id,
+        runtime_caller_id=caller.caller_id,
+        source_device_id="device-default",
+    )
+    conversation = await store.conversations.create_conversation(
+        conversation_id="conversation-default",
+        owner_id="owner-default",
+        companion_id=companion_id,
+        runtime_caller_id=caller.caller_id,
+        runtime_session_id=session.session_id,
+        source_device_id="device-default",
+    )
+    turn = await store.conversations.append_turn(
+        turn_id="turn-default",
+        conversation_id=conversation.conversation_id,
+        seq=1,
+        runtime_caller_id=caller.caller_id,
+        runtime_session_id=session.session_id,
+        source_device_id="device-default",
+    )
+    await store.conversations.append_message(
+        message_id="message-default",
+        turn_id=turn.turn_id,
+        seq=1,
+        role="user",
+        content="delete me",
+    )
+    await store.body_commands.upsert_command(
+        command_id="command-default",
+        owner_id=None,
+        companion_id=companion_id,
+        runtime_caller_id=caller.caller_id,
+        runtime_session_id=session.session_id,
+        device_id="device-default",
+        source_device_id="device-default",
     )
     await store.events.append(
         event_id="event-default",
@@ -227,13 +283,30 @@ async def test_maintenance_deletes_owner_default_tree_only(store: DataStore) -> 
     result = await store.dev_maintenance.delete_owner_tree("owner-default")
 
     assert result.deleted is True
-    assert result.devices == 1
+    assert result.devices == 2  # physical device + auto-provisioned web body
     assert result.companions == 1
-    assert result.events == 1
+    assert result.persona_genomes == 1
+    assert result.memory_realms == 1
+    assert result.body_commands == 1
+    assert result.runtime_callers == 1
+    assert result.runtime_sessions == 1
+    assert result.conversations == 1
+    assert result.turns == 1
+    assert result.messages == 1
+    assert result.events >= 1
+    assert result.realm_ids == ["realm-default"]
     assert await store.owners.get("owner-default") is None
     assert await store.devices.get_device("device-default") is None
+    assert await store.devices.get_device("web-companion-default") is None
+    assert await store.companions.get("companion-default") is None
+    assert await store.persona_repo.get_genome("genome-default") is None
+    assert await store.memory_repo.get_realm("realm-default") is None
+    assert await store.runtime_callers.get("caller-default") is None
+    assert await store.runtime_sessions.get("session-default") is None
+    assert await store.body_commands.get_command("command-default") is None
     assert await store.owners.get("owner-keep") is not None
     assert await store.devices.get_device("device-keep") is not None
+    assert await store.companions.get("companion-keep") is not None
 
 
 async def test_companion_workspace_initialization_is_atomic(store: DataStore) -> None:

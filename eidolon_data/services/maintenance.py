@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from eidolon_data.schema.models import (
+    BodyCommandRow,
     CompanionRow,
     ConversationRow,
     DeviceRow,
@@ -17,6 +18,8 @@ from eidolon_data.schema.models import (
     MessageRow,
     OwnerRow,
     PersonaGenomeRow,
+    RuntimeCallerRow,
+    RuntimeSessionRow,
     TurnRow,
 )
 
@@ -27,9 +30,17 @@ class OwnerCleanupResult:
     deleted: bool
     devices: int
     companions: int
+    persona_genomes: int
+    memory_realms: int
+    body_commands: int
+    runtime_callers: int
+    runtime_sessions: int
+    messages: int
+    turns: int
     conversations: int
     jobs: int
     events: int
+    realm_ids: list[str]
 
 
 class MaintenanceService:
@@ -54,9 +65,17 @@ class MaintenanceService:
                     deleted=False,
                     devices=0,
                     companions=0,
+                    persona_genomes=0,
+                    memory_realms=0,
+                    body_commands=0,
+                    runtime_callers=0,
+                    runtime_sessions=0,
+                    messages=0,
+                    turns=0,
                     conversations=0,
                     jobs=0,
                     events=0,
+                    realm_ids=[],
                 )
 
             companion_ids = list(
@@ -76,10 +95,53 @@ class MaintenanceService:
                         select(TurnRow.turn_id).where(TurnRow.conversation_id.in_(conversation_ids))
                     )
                 )
+            realm_ids = list(
+                await session.scalars(
+                    select(MemoryRealmRow.realm_id).where(MemoryRealmRow.owner_id == owner_id)
+                )
+            )
+            device_ids = list(
+                await session.scalars(
+                    select(DeviceRow.device_id).where(DeviceRow.owner_id == owner_id)
+                )
+            )
 
-            devices = await _count(session, select(DeviceRow.device_id).where(DeviceRow.owner_id == owner_id))
+            devices = len(device_ids)
             conversations = len(conversation_ids)
+            turns = len(turn_ids)
+            messages = await _count(
+                session,
+                select(MessageRow.message_id).where(MessageRow.turn_id.in_(turn_ids)),
+            ) if turn_ids else 0
             companions = len(companion_ids)
+            persona_genomes = (
+                await _count(
+                    session,
+                    select(PersonaGenomeRow.genome_id).where(
+                        PersonaGenomeRow.companion_id.in_(companion_ids)
+                    ),
+                )
+                if companion_ids
+                else 0
+            )
+            memory_realms = len(realm_ids)
+            body_command_condition = _body_command_owner_condition(
+                owner_id=owner_id,
+                companion_ids=companion_ids,
+                device_ids=device_ids,
+            )
+            body_commands = await _count(
+                session,
+                select(BodyCommandRow.command_id).where(body_command_condition),
+            )
+            runtime_sessions = await _count(
+                session,
+                select(RuntimeSessionRow.session_id).where(RuntimeSessionRow.owner_id == owner_id),
+            )
+            runtime_callers = await _count(
+                session,
+                select(RuntimeCallerRow.caller_id).where(RuntimeCallerRow.owner_id == owner_id),
+            )
             jobs = await _count(session, select(JobRow.job_id).where(JobRow.owner_id == owner_id))
             events = await _count(session, select(EventRow.event_id).where(EventRow.owner_id == owner_id))
 
@@ -88,6 +150,9 @@ class MaintenanceService:
             if conversation_ids:
                 await session.execute(delete(TurnRow).where(TurnRow.conversation_id.in_(conversation_ids)))
                 await session.execute(delete(ConversationRow).where(ConversationRow.owner_id == owner_id))
+            await session.execute(delete(BodyCommandRow).where(body_command_condition))
+            await session.execute(delete(RuntimeSessionRow).where(RuntimeSessionRow.owner_id == owner_id))
+            await session.execute(delete(RuntimeCallerRow).where(RuntimeCallerRow.owner_id == owner_id))
             if companion_ids:
                 await session.execute(delete(PersonaGenomeRow).where(PersonaGenomeRow.companion_id.in_(companion_ids)))
             await session.execute(delete(MemoryRealmRow).where(MemoryRealmRow.owner_id == owner_id))
@@ -103,12 +168,35 @@ class MaintenanceService:
                 deleted=True,
                 devices=devices,
                 companions=companions,
+                persona_genomes=persona_genomes,
+                memory_realms=memory_realms,
+                body_commands=body_commands,
+                runtime_callers=runtime_callers,
+                runtime_sessions=runtime_sessions,
+                messages=messages,
+                turns=turns,
                 conversations=conversations,
                 jobs=jobs,
                 events=events,
+                realm_ids=realm_ids,
             )
 
 
 async def _count(session, statement) -> int:
     rows = await session.scalars(statement)
     return len(list(rows))
+
+
+def _body_command_owner_condition(
+    *,
+    owner_id: str,
+    companion_ids: list[str],
+    device_ids: list[str],
+):
+    clauses = [BodyCommandRow.owner_id == owner_id]
+    if companion_ids:
+        clauses.append(BodyCommandRow.companion_id.in_(companion_ids))
+    if device_ids:
+        clauses.append(BodyCommandRow.device_id.in_(device_ids))
+        clauses.append(BodyCommandRow.source_device_id.in_(device_ids))
+    return or_(*clauses)
