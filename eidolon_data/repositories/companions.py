@@ -17,16 +17,24 @@ class CompanionsRepository(Repository):
         display_name: str = "",
         kind: str = "companion",
         status: str = "active",
+        is_master: bool = False,
+        companion_type: str | None = None,
         profile_json: dict | None = None,
         runtime_config_json: dict | None = None,
         metadata_json: dict | None = None,
     ) -> CompanionRow:
+        resolved_companion_type = companion_type or ("master" if is_master else "slave")
+        if resolved_companion_type not in {"master", "slave"}:
+            raise ValueError("companion_type must be master or slave")
+        resolved_is_master = resolved_companion_type == "master"
         row = CompanionRow(
             companion_id=companion_id,
             owner_id=owner_id,
             display_name=display_name,
             kind=kind,
             status=status,
+            is_master=resolved_is_master,
+            companion_type=resolved_companion_type,
             profile_json=profile_json or {},
             runtime_config_json=runtime_config_json or {},
             metadata_json=metadata_json or {},

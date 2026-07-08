@@ -30,6 +30,8 @@ class CompanionCreateRequest(BaseModel):
     display_name: str = ""
     kind: str = "companion"
     status: str = "active"
+    is_master: bool = False
+    companion_type: str | None = None
     profile_json: dict[str, Any] = Field(default_factory=dict)
     runtime_config_json: dict[str, Any] = Field(default_factory=dict)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
@@ -41,6 +43,8 @@ class CompanionResponse(BaseModel):
     display_name: str
     kind: str
     status: str
+    is_master: bool = False
+    companion_type: str = "slave"
     current_genome_id: str | None = None
     default_memory_realm_id: str | None = None
     profile_json: dict[str, Any] = Field(default_factory=dict)

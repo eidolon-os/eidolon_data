@@ -20,30 +20,121 @@ from eidolon_data.schema.models import (
 )
 
 WEB_BODY_KIND = "web"
+COMPANION_TYPE_MASTER = "master"
+COMPANION_TYPE_SLAVE = "slave"
 
 
 def _web_body_device_id(companion_id: str) -> str:
     return f"web-{companion_id}"
 
 
-def _build_web_body_row(*, owner_id: str, companion_id: str, display_name: str) -> DeviceRow:
+def _companion_type_from_master(is_master: bool) -> str:
+    return COMPANION_TYPE_MASTER if is_master else COMPANION_TYPE_SLAVE
+
+
+def _companion_type(row: CompanionRow) -> str:
+    value = str(getattr(row, "companion_type", "") or "").strip()
+    if value in {COMPANION_TYPE_MASTER, COMPANION_TYPE_SLAVE}:
+        return value
+    return _companion_type_from_master(bool(getattr(row, "is_master", False)))
+
+
+def _web_body_payload(
+    *,
+    owner_id: str,
+    companion_id: str,
+    display_name: str,
+    companion_type: str,
+) -> dict:
+    now = utc_now()
+    return {
+        "device_id": _web_body_device_id(companion_id),
+        "owner_id": owner_id,
+        "name": f"{display_name} · 本机",
+        "kind": WEB_BODY_KIND,
+        "status": "active",
+        "approved_at": now,
+        "approved_by": "system:onboarding",
+        "bound_companion_id": companion_id,
+        "interaction_mode": "full_duplex",
+        "auth_type": "admin_trust",
+        "secret_ref": None,
+        "capabilities_json": {
+            "audio": True,
+            "display": True,
+            "text": True,
+            "local_web": True,
+        },
+        "network_json": {},
+        "access_policy_json": {
+            "conversation": True,
+            "voice_input": True,
+            "voice_output": True,
+            "memory_recall": True,
+            "body_commands": False,
+        },
+        "metadata_json": {
+            "auto_provisioned": True,
+            "role": "local_web",
+            "provisioned_by": "owner_onboarding",
+            "companion_type": companion_type,
+        },
+        "last_seen_at": None,
+        "revoked_at": None,
+    }
+
+
+def _build_web_body_row(
+    *,
+    owner_id: str,
+    companion_id: str,
+    display_name: str,
+    companion_type: str,
+) -> DeviceRow:
     """A host-local web body for a companion. Auth is via admin trust (no device
     secret); hub mints its LiveKit token after validating the owner/companion
     binding. kind=web renders as a 虚拟身体 in the cockpit constellation."""
-    now = utc_now()
     return DeviceRow(
-        device_id=_web_body_device_id(companion_id),
-        owner_id=owner_id,
-        name=f"{display_name} · 本机",
-        kind=WEB_BODY_KIND,
-        status="active",
-        approved_at=now,
-        approved_by="system",
-        bound_companion_id=companion_id,
-        interaction_mode="full_duplex",
-        capabilities_json={"audio": True, "display": True},
-        metadata_json={"auto_provisioned": True, "role": "local_web"},
+        **_web_body_payload(
+            owner_id=owner_id,
+            companion_id=companion_id,
+            display_name=display_name,
+            companion_type=companion_type,
+        )
     )
+
+
+def _refresh_web_body_row(row: DeviceRow, *, display_name: str, companion_type: str) -> None:
+    """Backfill older web body rows into the current standard contract."""
+    row.name = row.name or f"{display_name} · 本机"
+    row.status = "active"
+    row.approved_at = row.approved_at or utc_now()
+    row.approved_by = "system:onboarding"
+    row.interaction_mode = "full_duplex"
+    row.auth_type = "admin_trust"
+    row.capabilities_json = {
+        **(row.capabilities_json or {}),
+        "audio": True,
+        "display": True,
+        "text": True,
+        "local_web": True,
+    }
+    row.network_json = row.network_json or {}
+    row.access_policy_json = {
+        **(row.access_policy_json or {}),
+        "conversation": True,
+        "voice_input": True,
+        "voice_output": True,
+        "memory_recall": True,
+        "body_commands": False,
+    }
+    row.metadata_json = {
+        "auto_provisioned": True,
+        "role": "local_web",
+        "provisioned_by": "owner_onboarding",
+        **(row.metadata_json or {}),
+        "companion_type": companion_type,
+    }
 
 OWNER_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,47}$")
 GENERATED_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
@@ -191,11 +282,17 @@ class CompanionWorkspaceService:
                 )
             ).first()
             if existing is not None:
+                _refresh_web_body_row(
+                    existing,
+                    display_name=companion.display_name or companion_id,
+                    companion_type=_companion_type(companion),
+                )
                 return existing
             row = _build_web_body_row(
                 owner_id=owner_id,
                 companion_id=companion_id,
                 display_name=companion.display_name or companion_id,
+                companion_type=_companion_type(companion),
             )
             session.add(row)
             session.add(
@@ -211,6 +308,117 @@ class CompanionWorkspaceService:
                 )
             )
         return row
+
+    async def ensure_memory_realm(
+        self,
+        *,
+        owner_id: str,
+        companion_id: str,
+        realm_id: str | None = None,
+        memory_engine: str = "mempalace",
+        memory_engine_config_json: dict | None = None,
+        memory_policy_json: dict | None = None,
+    ) -> MemoryRealmRow:
+        """Idempotently ensure a companion has an active memory realm.
+
+        Parallels ``ensure_web_body`` for the memory side. Returns the existing
+        active realm if one is present; otherwise creates ``r_<owner>_default``
+        (or the supplied ``realm_id``) and points ``default_memory_realm_id`` at
+        it. Reused by master promotion and by the bootstrap path so a companion
+        is never left conversation-unready with a body but no memory.
+        """
+        async with self._session_factory() as session, session.begin():
+            companion = await session.get(CompanionRow, companion_id)
+            if companion is None or companion.owner_id != owner_id:
+                raise OwnerWorkspaceError("companion not found for owner")
+            if companion.status != "active":
+                raise OwnerWorkspaceError("companion is not active")
+            existing = (
+                await session.scalars(
+                    select(MemoryRealmRow)
+                    .where(MemoryRealmRow.companion_id == companion_id)
+                    .where(MemoryRealmRow.status == "active")
+                )
+            ).first()
+            if existing is not None:
+                if companion.default_memory_realm_id != existing.realm_id:
+                    companion.default_memory_realm_id = existing.realm_id
+                return existing
+            realm_id = realm_id or f"r_{owner_id}_default"
+            _validate_generated_id("realm_id", realm_id)
+            if await session.get(MemoryRealmRow, realm_id) is not None:
+                raise OwnerWorkspaceError(f"realm_id {realm_id!r} already exists")
+            realm = MemoryRealmRow(
+                realm_id=realm_id,
+                owner_id=owner_id,
+                companion_id=companion_id,
+                engine=memory_engine or "mempalace",
+                engine_config_json=memory_engine_config_json or {},
+                policy_json=memory_policy_json or {"scope": "owner", "recall": "companion_default"},
+                status="active",
+            )
+            session.add(realm)
+            companion.default_memory_realm_id = realm_id
+            session.add(
+                _event(
+                    owner_id=owner_id,
+                    companion_id=companion_id,
+                    subject_type="memory_realm",
+                    subject_id=realm_id,
+                    event_type="memory_realm.created",
+                    actor_type="admin",
+                    actor_id=None,
+                    payload_json={"engine": realm.engine},
+                )
+            )
+        return realm
+
+    async def promote_to_master(
+        self,
+        *,
+        owner_id: str,
+        companion_id: str,
+        actor_type: str = "admin",
+        actor_id: str | None = None,
+    ) -> CompanionRow:
+        """Make ``companion_id`` the owner's master and ensure it is
+        conversation-ready (has a current genome, a memory realm, and a
+        host-local web body). Any other master for the owner is demoted so the
+        one-master-per-owner invariant holds. Idempotent."""
+        async with self._session_factory() as session, session.begin():
+            companion = await session.get(CompanionRow, companion_id)
+            if companion is None or companion.owner_id != owner_id:
+                raise OwnerWorkspaceError("companion not found for owner")
+            if companion.status != "active":
+                raise OwnerWorkspaceError("companion is not active")
+            others = await session.scalars(
+                select(CompanionRow)
+                .where(CompanionRow.owner_id == owner_id)
+                .where(CompanionRow.is_master.is_(True))
+                .where(CompanionRow.companion_id != companion_id)
+            )
+            for other in others:
+                other.is_master = False
+                other.companion_type = COMPANION_TYPE_SLAVE
+            companion.is_master = True
+            companion.companion_type = COMPANION_TYPE_MASTER
+            if not companion.current_genome_id:
+                genome = (
+                    await session.scalars(
+                        select(PersonaGenomeRow)
+                        .where(PersonaGenomeRow.companion_id == companion_id)
+                        .order_by(PersonaGenomeRow.version.desc())
+                    )
+                ).first()
+                if genome is not None:
+                    companion.current_genome_id = genome.genome_id
+
+        # Realm + web body each run in their own idempotent transaction.
+        await self.ensure_memory_realm(owner_id=owner_id, companion_id=companion_id)
+        await self.ensure_web_body(owner_id=owner_id, companion_id=companion_id)
+
+        async with self._session_factory() as session:
+            return await session.get(CompanionRow, companion_id)
 
     async def provision_workspace(
         self,
@@ -264,6 +472,7 @@ class CompanionWorkspaceService:
                 kind=companion_kind,
                 status="active",
                 is_master=is_master,
+                companion_type=_companion_type_from_master(is_master),
                 profile_json=companion_profile_json or {},
                 runtime_config_json=companion_runtime_config_json or {},
                 metadata_json=companion_metadata_json or {},
@@ -303,7 +512,10 @@ class CompanionWorkspaceService:
             # Master companion defaults to a host-local web body.
             if is_master:
                 web_body = _build_web_body_row(
-                    owner_id=owner_id, companion_id=companion_id, display_name=companion_name
+                    owner_id=owner_id,
+                    companion_id=companion_id,
+                    display_name=companion_name,
+                    companion_type=_companion_type_from_master(is_master),
                 )
                 session.add(web_body)
                 session.add(
@@ -320,7 +532,15 @@ class CompanionWorkspaceService:
                 )
 
             event_specs = [
-                ("companion", companion_id, "companion.created", {"display_name": companion_name}),
+                (
+                    "companion",
+                    companion_id,
+                    "companion.created",
+                    {
+                        "display_name": companion_name,
+                        "companion_type": _companion_type_from_master(is_master),
+                    },
+                ),
                 ("persona_genome", genome_id, "persona_genome.created", {"version": 1}),
                 ("memory_realm", realm_id, "memory_realm.created", {"engine": realm.engine}),
                 (

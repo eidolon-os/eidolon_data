@@ -21,6 +21,7 @@ from eidolon_data.repositories import (
     RuntimeCallersRepository,
     RuntimeSessionsRepository,
 )
+from eidolon_data.services.companion import CompanionDeletionService
 from eidolon_data.services.maintenance import MaintenanceService
 from eidolon_data.services.memory_service import MemoryService
 from eidolon_data.services.owner_data import OwnerDataService
@@ -132,6 +133,10 @@ class DataStore:
     @property
     def dev_maintenance(self) -> MaintenanceService:
         return MaintenanceService(self.session_factory)
+
+    @property
+    def companion_deletion(self) -> CompanionDeletionService:
+        return CompanionDeletionService(self.session_factory)
 
     @property
     def owner_data(self) -> OwnerDataService:

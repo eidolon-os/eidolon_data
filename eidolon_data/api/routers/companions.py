@@ -21,6 +21,8 @@ async def create_companion(
         display_name=payload.display_name,
         kind=payload.kind,
         status=payload.status,
+        is_master=payload.is_master,
+        companion_type=payload.companion_type,
         profile_json=payload.profile_json,
         runtime_config_json=payload.runtime_config_json,
         metadata_json=payload.metadata_json,
@@ -51,10 +53,11 @@ def _companion_response(row) -> CompanionResponse:
         display_name=row.display_name,
         kind=row.kind,
         status=row.status,
+        is_master=row.is_master,
+        companion_type=row.companion_type or ("master" if row.is_master else "slave"),
         current_genome_id=row.current_genome_id,
         default_memory_realm_id=row.default_memory_realm_id,
         profile_json=row.profile_json,
         runtime_config_json=row.runtime_config_json,
         metadata_json=row.metadata_json,
     )
-

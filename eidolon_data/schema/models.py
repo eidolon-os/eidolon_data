@@ -50,6 +50,7 @@ class CompanionRow(Base):
     # The owner's primary companion. Master companions default-get a local web
     # body; any companion (master or not) can associate more bodies on demand.
     is_master: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    companion_type: Mapped[str] = mapped_column(String(16), default="slave", nullable=False, index=True)
     current_genome_id: Mapped[str | None] = mapped_column(String(64), index=True)
     default_memory_realm_id: Mapped[str | None] = mapped_column(String(64), index=True)
     profile_json: Mapped[JsonDict] = mapped_column(default=dict)

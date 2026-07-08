@@ -353,15 +353,36 @@ async def test_provision_master_creates_web_body(store: DataStore) -> None:
         is_master=True,
     )
     assert result.companion.is_master is True
+    assert result.companion.companion_type == "master"
 
     bodies = await store.devices.list_devices_for_companion(result.companion.companion_id)
     web_bodies = [d for d in bodies if d.kind == "web"]
     assert len(web_bodies) == 1
     web = web_bodies[0]
+    assert web.device_id == f"web-{result.companion.companion_id}"
     assert web.bound_companion_id == result.companion.companion_id
     assert web.status == "active"
+    assert web.approved_at is not None
+    assert web.approved_by == "system:onboarding"
+    assert web.auth_type == "admin_trust"
+    assert web.interaction_mode == "full_duplex"
+    assert web.capabilities_json == {
+        "audio": True,
+        "display": True,
+        "text": True,
+        "local_web": True,
+    }
+    assert web.access_policy_json == {
+        "conversation": True,
+        "voice_input": True,
+        "voice_output": True,
+        "memory_recall": True,
+        "body_commands": False,
+    }
     assert web.metadata_json.get("role") == "local_web"
     assert web.metadata_json.get("auto_provisioned") is True
+    assert web.metadata_json.get("provisioned_by") == "owner_onboarding"
+    assert web.metadata_json.get("companion_type") == "master"
 
     events = await store.events.list_for_owner("owner-master", limit=20)
     assert "device.web_body.provisioned" in {event.event_type for event in events}
@@ -375,6 +396,7 @@ async def test_provision_master_creates_web_body(store: DataStore) -> None:
         companion_display_name="Study",
     )
     assert non_master.companion.is_master is False
+    assert non_master.companion.companion_type == "slave"
     assert await store.devices.list_devices_for_companion(non_master.companion.companion_id) == []
 
 
@@ -394,6 +416,10 @@ async def test_ensure_web_body_is_idempotent(store: DataStore) -> None:
     )
 
     assert first.device_id == second.device_id
+    assert first.auth_type == "admin_trust"
+    assert first.approved_by == "system:onboarding"
+    assert first.access_policy_json["conversation"] is True
+    assert first.metadata_json["companion_type"] == "slave"
     web_bodies = [
         d
         for d in await store.devices.list_devices_for_companion("companion-ewb")
