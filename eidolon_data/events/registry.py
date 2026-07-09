@@ -7,8 +7,8 @@ against this catalog so ``event_type`` strings, tiers and sources stop being
 implicit conventions scattered across writers.
 
 Naming: ``<domain>.<entity>.<action>`` (lowercase, dot-separated). A few
-historical strings drift from that; they are marked ``legacy=True`` and are
-scheduled for reconciliation when writers move onto the facade.
+historical strings drift from that; they are marked ``legacy=True`` while an
+active writer still depends on them.
 
 ``status``:
   - ``active``  — emitted by code today.
@@ -70,20 +70,49 @@ _SPECS: tuple[EventSpec, ...] = (
     EventSpec("companion.created", "audit", "data", "Companion created"),
     EventSpec("companion.workspace.initialized", "audit", "data", "Companion workspace initialized"),
     # —— persona genome lifecycle ——
-    EventSpec("persona_genome.created", "audit", "data", "Persona genome created"),
     EventSpec(
-        "persona.genome.created", "audit", "data", "Persona genome created (legacy name)",
-        legacy=True, note="drift from persona_service.create_genome; unify to persona_genome.created",
+        "persona.observation.created",
+        "audit",
+        "agent",
+        "Persona evolution observation recorded",
+        required_payload=("observation_id", "companion_id"),
     ),
-    EventSpec("persona_genome.proposed", "audit", "data", "Persona genome proposed"),
-    EventSpec("persona_genome.activated", "audit", "data", "Persona genome activated"),
     EventSpec(
-        "persona_genome.stale", "audit", "data", "Persona genome proposal was stale",
-        default_severity="warn", default_outcome="denied",
+        "persona.evolution.proposed",
+        "audit",
+        "agent",
+        "Persona genome evolution proposed",
+        required_payload=("companion_id",),
     ),
-    EventSpec("persona_genome.rejected", "audit", "data", "Persona genome rejected"),
-    EventSpec("persona_genome.rollback", "audit", "data", "Persona genome rolled back"),
-    EventSpec("persona_genome.reset_to_origin", "audit", "data", "Persona reset to authored origin"),
+    EventSpec(
+        "persona.evolution.approved",
+        "audit",
+        "admin",
+        "Persona evolution proposal approved",
+        required_payload=("companion_id",),
+    ),
+    EventSpec(
+        "persona.evolution.rejected",
+        "audit",
+        "admin",
+        "Persona evolution proposal rejected",
+        default_severity="warn",
+        default_outcome="denied",
+    ),
+    EventSpec(
+        "persona.genome.committed",
+        "audit",
+        "data",
+        "Persona genome committed as current",
+        required_payload=("genome_id", "genome_hash"),
+    ),
+    EventSpec(
+        "persona.genome.rolled_back",
+        "audit",
+        "data",
+        "Persona current genome pointer rolled back",
+        required_payload=("genome_id", "genome_hash"),
+    ),
     # —— memory realm ——
     EventSpec("memory_realm.created", "audit", "data", "Memory realm created"),
     # —— device governance ——

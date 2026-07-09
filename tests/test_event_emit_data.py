@@ -29,7 +29,7 @@ async def test_provision_workspace_emits_contract_fields(store: DataStore) -> No
     # companion / genome / realm / workspace events carry the companion scope.
     for event_type in (
         "companion.created",
-        "persona_genome.created",
+        "persona.genome.committed",
         "memory_realm.created",
         "companion.workspace.initialized",
     ):
@@ -54,10 +54,10 @@ async def test_persona_create_genome_uses_unified_type(store: DataStore) -> None
         genome_json={"identity": {"name": "Yi"}},
     )
 
-    events = await store.events.list_for_subject(subject_type="companion", subject_id=cid)
+    events = await store.events.list_for_subject(subject_type="persona_genome", subject_id="g-manual-1")
     types = {e.event_type for e in events}
-    # Drift reconciled: the legacy dotted name must not be emitted anymore.
-    assert "persona.genome.created" not in types
-    ev = assert_event(events, event_type="persona_genome.created", event_id="evt_test_pg")
+    assert "persona_genome.created" not in types
+    ev = assert_event(events, event_type="persona.genome.committed", event_id="evt_test_pg")
     assert ev.companion_id == cid
     assert ev.source == "data"
+    assert ev.payload_json["genome_hash"].startswith("pgv1_")

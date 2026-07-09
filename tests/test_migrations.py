@@ -77,7 +77,11 @@ def test_alembic_upgrade_head_creates_core_schema(tmp_path: Path, monkeypatch) -
     assert {
         "status",
         "base_genome_id",
-        "prompt_markdown",
+        "schema_version",
+        "genome_hash",
+        "compiler_version",
+        "stable_prompt_hash",
+        "applied_event_id",
         "change_summary",
     }.issubset(persona_columns)
     assert {"caller_id", "actor_kind", "actor_id", "last_seen_at"}.issubset(

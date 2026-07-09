@@ -8,6 +8,14 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from eidolon_sdk.biz.persona import (
+    PERSONA_COMPILER_VERSION,
+    PERSONA_GENOME_SCHEMA_VERSION,
+    normalize_persona_genome,
+    persona_genome_hash,
+    persona_genome_to_json,
+)
+
 from eidolon_data.db.base import utc_now
 from eidolon_data.events.facade import build_event
 from eidolon_data.schema.models import (
@@ -221,8 +229,6 @@ class CompanionWorkspaceService:
         genome_id: str | None = None,
         genome_source_json: dict | None = None,
         genome_json: dict | None = None,
-        prompt_markdown: str = "",
-        evolution_state_json: dict | None = None,
         realm_id: str | None = None,
         memory_engine: str = "mempalace",
         memory_engine_config_json: dict | None = None,
@@ -248,8 +254,6 @@ class CompanionWorkspaceService:
             genome_id=genome_id,
             genome_source_json=genome_source_json,
             genome_json=genome_json,
-            prompt_markdown=prompt_markdown,
-            evolution_state_json=evolution_state_json,
             realm_id=realm_id,
             memory_engine=memory_engine,
             memory_engine_config_json=memory_engine_config_json,
@@ -433,8 +437,6 @@ class CompanionWorkspaceService:
         genome_id: str | None = None,
         genome_source_json: dict | None = None,
         genome_json: dict | None = None,
-        prompt_markdown: str = "",
-        evolution_state_json: dict | None = None,
         realm_id: str | None = None,
         memory_engine: str = "mempalace",
         memory_engine_config_json: dict | None = None,
@@ -480,17 +482,30 @@ class CompanionWorkspaceService:
             session.add(companion)
             await session.flush()
 
+            normalized_genome = _normalize_genome(
+                genome_json,
+                companion_name,
+                source_type=str((genome_source_json or {}).get("source_type") or "admin_workspace_initialize"),
+                base_genome_id=None,
+            )
+            normalized_genome_json = persona_genome_to_json(normalized_genome)
+            provenance = dict(normalized_genome_json.get("provenance") or {})
+            provenance.update({"owner_id": owner_id, "companion_id": companion_id})
+            normalized_genome_json["provenance"] = provenance
             genome = PersonaGenomeRow(
                 genome_id=genome_id,
                 companion_id=companion_id,
                 version=1,
                 status="committed",
                 base_genome_id=None,
+                schema_version=PERSONA_GENOME_SCHEMA_VERSION,
+                genome_hash=persona_genome_hash(normalized_genome_json),
+                compiler_version=PERSONA_COMPILER_VERSION,
+                stable_prompt_hash=None,
+                applied_event_id=None,
                 source_json=genome_source_json
                 or {"source_type": "admin_workspace_initialize", "owner_id": owner_id},
-                genome_json=_normalize_genome(genome_json, companion_name),
-                prompt_markdown=prompt_markdown or _default_prompt_markdown(companion_name),
-                evolution_state_json=evolution_state_json or {"version": 1, "mode": "continuous"},
+                genome_json=normalized_genome_json,
                 change_summary="Initial persona genome",
             )
             session.add(genome)
@@ -541,7 +556,18 @@ class CompanionWorkspaceService:
                         "companion_type": _companion_type_from_master(is_master),
                     },
                 ),
-                ("persona_genome", genome_id, "persona_genome.created", {"version": 1}),
+                (
+                    "persona_genome",
+                    genome_id,
+                    "persona.genome.committed",
+                    {
+                        "version": 1,
+                        "genome_id": genome_id,
+                        "genome_hash": genome.genome_hash,
+                        "schema_version": genome.schema_version,
+                        "compiler_version": genome.compiler_version,
+                    },
+                ),
                 ("memory_realm", realm_id, "memory_realm.created", {"engine": realm.engine}),
                 (
                     "companion",
@@ -588,37 +614,24 @@ def _validate_generated_id(label: str, value: str) -> None:
 
 
 def _default_genome(display_name: str) -> dict:
-    return {
-        "identity": {"name": display_name, "archetype": "companion"},
-        "style": {"tone": "warm", "initiative": "balanced"},
-        "boundaries": {},
-        "evolution": {"enabled": True},
-    }
+    return persona_genome_to_json(
+        normalize_persona_genome(None, name=display_name, origin="template")
+    )
 
 
-def _normalize_genome(genome_json: dict | None, display_name: str) -> dict:
-    genome = dict(genome_json or _default_genome(display_name))
-    identity = dict(genome.get("identity") or {})
-    if not str(identity.get("name") or "").strip():
-        identity["name"] = display_name
-    if not str(identity.get("archetype") or "").strip():
-        identity["archetype"] = "companion"
-    genome["identity"] = identity
-    return genome
-
-
-def _default_prompt_markdown(display_name: str) -> str:
-    return (
-        f"# {display_name}\n\n"
-        "## Identity\n\n"
-        f"- Name: {display_name}\n"
-        "- Archetype: companion\n\n"
-        "## Style\n\n"
-        "- Warm, clear, and grounded.\n"
-        "- Respond to the user's intent before adding suggestions.\n"
-        "- Keep healthy boundaries and avoid pretending to know what was not provided.\n\n"
-        "## Evolution\n\n"
-        "- This persona may evolve through reviewed or policy-approved genome versions.\n"
+def _normalize_genome(
+    genome_json: dict | None,
+    display_name: str,
+    *,
+    source_type: str = "template",
+    base_genome_id: str | None = None,
+):
+    return normalize_persona_genome(
+        genome_json,
+        name=display_name,
+        archetype="companion",
+        origin=source_type,
+        base_genome_id=base_genome_id,
     )
 
 

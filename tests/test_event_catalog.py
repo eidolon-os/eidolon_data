@@ -59,10 +59,15 @@ def test_lookup_helpers():
     assert spec_for("owner.nonexistent") is None
 
 
-def test_known_drift_is_flagged_legacy():
-    # The two known historical strings must stay explicitly marked so the
-    # Phase-1 unification does not silently lose them.
-    assert spec_for("persona.genome.created").legacy is True
+def test_persona_legacy_events_are_not_registered():
+    # Persona v1 deliberately has no old compatibility names: writers emit the
+    # observation/proposal/commit/rollback workflow below.
+    assert spec_for("persona.genome.created") is None
+    assert spec_for("persona_genome.created") is None
+
+
+def test_active_memory_drift_is_flagged_legacy():
+    # Still emitted by the agent->memory fanout path, so it remains explicit.
     assert spec_for("eidolon.memory.fanout.status").legacy is True
 
 

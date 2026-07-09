@@ -29,10 +29,10 @@ async def test_repository_workflow_round_trips_core_entities(store: DataStore) -
             "template_revision": 1,
         },
         genome_json={"identity": {"name": "Xiaoyi"}},
-        prompt_markdown="# Xiaoyi\n",
     )
-    assert genome.genome_json["identity"]["name"] == "Xiaoyi"
-    assert genome.prompt_markdown == "# Xiaoyi\n"
+    assert genome.genome_json["identity_core"]["name"] == "Xiaoyi"
+    assert genome.schema_version == "eidolon.persona_genome.v1"
+    assert genome.genome_hash.startswith("pgv1_")
     assert genome.status == "committed"
     assert genome.source_json["template_id"] == "warm-companion"
     assert (await store.companions.get(companion.companion_id)).current_genome_id == "genome-1"
@@ -322,7 +322,8 @@ async def test_companion_workspace_initialization_is_atomic(store: DataStore) ->
     assert result.companion.companion_id == "c_owner-workspace_default"
     assert result.persona_genome.genome_id == "g_owner-workspace_default_v1"
     assert result.persona_genome.status == "committed"
-    assert "# Xiaoyi" in result.persona_genome.prompt_markdown
+    assert result.persona_genome.genome_json["identity_core"]["name"] == "Xiaoyi"
+    assert result.persona_genome.genome_hash.startswith("pgv1_")
     assert result.memory_realm.realm_id == "r_owner-workspace_default"
 
     companion = await store.companions.get(result.companion.companion_id)
@@ -334,7 +335,7 @@ async def test_companion_workspace_initialization_is_atomic(store: DataStore) ->
     assert {
         "owner.created",
         "companion.created",
-        "persona_genome.created",
+        "persona.genome.committed",
         "memory_realm.created",
         "companion.workspace.initialized",
     }.issubset({event.event_type for event in events})
@@ -548,7 +549,6 @@ async def test_persona_genome_proposal_requires_current_base(store: DataStore) -
         companion_id=initial.companion.companion_id,
         base_genome_id=initial.persona_genome.genome_id,
         genome_json={"identity": {"name": "Evo"}},
-        prompt_markdown="# Evo v2\n",
         change_summary="More concise",
     )
     assert proposal.status == "proposed"
@@ -580,7 +580,6 @@ async def test_stale_persona_genome_proposal_does_not_replace_current_genome(sto
         companion_id=companion_id,
         base_genome_id=initial.persona_genome.genome_id,
         genome_json={"identity": {"name": "Evo"}},
-        prompt_markdown="# Old proposal\n",
     )
     current = await store.persona.create_genome(
         genome_id="g_owner-stale_current_v3",
@@ -589,7 +588,6 @@ async def test_stale_persona_genome_proposal_does_not_replace_current_genome(sto
         event_id="event-current-genome",
         version=3,
         genome_json={"identity": {"name": "Evo"}},
-        prompt_markdown="# Current genome\n",
     )
 
     with pytest.raises(PersonaGenomeConflict):

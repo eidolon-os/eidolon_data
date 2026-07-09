@@ -29,9 +29,7 @@ class PersonaService:
         event_id: str,
         version: int = 1,
         genome_json: dict | None = None,
-        prompt_markdown: str = "",
         source_json: dict | None = None,
-        evolution_state_json: dict | None = None,
         status: str = "committed",
         base_genome_id: str | None = None,
         change_summary: str = "",
@@ -44,22 +42,23 @@ class PersonaService:
             base_genome_id=base_genome_id,
             source_json=source_json,
             genome_json=genome_json,
-            prompt_markdown=prompt_markdown,
-            evolution_state_json=evolution_state_json,
+            applied_event_id=event_id if status == "committed" else None,
             change_summary=change_summary,
         )
         if status == "committed":
             await self._companions.set_current_genome(companion_id, genome_id)
-        # Unified onto persona_genome.created (was persona.genome.created; see registry legacy note).
         await self._events.record_event(
             event_id=event_id,
             owner_id=owner_id,
             companion_id=companion_id,
-            subject_type="companion",
-            subject_id=companion_id,
-            event_type="persona_genome.created",
+            subject_type="persona_genome",
+            subject_id=genome_id,
+            event_type="persona.genome.committed" if status == "committed" else "persona.evolution.proposed",
             payload_json={
                 "genome_id": genome_id,
+                "genome_hash": genome.genome_hash,
+                "schema_version": genome.schema_version,
+                "compiler_version": genome.compiler_version,
                 "version": version,
                 "status": status,
                 "source": source_json or {},
@@ -78,9 +77,7 @@ class PersonaService:
         owner_id: str,
         base_genome_id: str,
         genome_json: dict | None = None,
-        prompt_markdown: str = "",
         source_json: dict | None = None,
-        evolution_state_json: dict | None = None,
         change_summary: str = "",
     ) -> PersonaGenomeRow:
         genome = await self._persona.create_proposal(
@@ -89,8 +86,6 @@ class PersonaService:
             base_genome_id=base_genome_id,
             source_json=source_json,
             genome_json=genome_json,
-            prompt_markdown=prompt_markdown,
-            evolution_state_json=evolution_state_json,
             change_summary=change_summary,
         )
         await self._events.record_event(
@@ -98,10 +93,12 @@ class PersonaService:
             companion_id=companion_id,
             subject_type="persona_genome",
             subject_id=genome_id,
-            event_type="persona_genome.proposed",
+            event_type="persona.evolution.proposed",
             payload_json={
                 "companion_id": companion_id,
                 "base_genome_id": base_genome_id,
+                "genome_id": genome_id,
+                "genome_hash": genome.genome_hash,
                 "version": genome.version,
                 "change_summary": change_summary,
             },
@@ -128,10 +125,12 @@ class PersonaService:
                 companion_id=companion_id,
                 subject_type="persona_genome",
                 subject_id=genome_id,
-                event_type="persona_genome.stale",
+                event_type="persona.evolution.rejected",
+                outcome="denied",
                 payload_json={
                     "companion_id": companion_id,
                     "expected_base_genome_id": expected_base_genome_id,
+                    "reason": "current genome changed before activation",
                 },
             )
             raise
@@ -140,9 +139,13 @@ class PersonaService:
             companion_id=companion_id,
             subject_type="persona_genome",
             subject_id=genome_id,
-            event_type="persona_genome.activated",
+            event_type="persona.genome.committed",
             payload_json={
                 "companion_id": companion_id,
+                "genome_id": genome_id,
+                "genome_hash": genome.genome_hash,
+                "schema_version": genome.schema_version,
+                "compiler_version": genome.compiler_version,
                 "expected_base_genome_id": expected_base_genome_id,
             },
         )
@@ -158,10 +161,18 @@ class PersonaService:
         genome = await self._persona.reject_genome(genome_id, reason=reason)
         await self._events.record_event(
             owner_id=owner_id,
+            companion_id=genome.companion_id,
             subject_type="persona_genome",
             subject_id=genome_id,
-            event_type="persona_genome.rejected",
-            payload_json={"reason": reason},
+            event_type="persona.evolution.rejected",
+            payload_json={
+                "companion_id": genome.companion_id,
+                "genome_id": genome.genome_id,
+                "genome_hash": genome.genome_hash,
+                "schema_version": genome.schema_version,
+                "compiler_version": genome.compiler_version,
+                "reason": reason,
+            },
         )
         return genome
 
@@ -181,8 +192,8 @@ class PersonaService:
             companion_id=companion_id,
             subject_type="companion",
             subject_id=companion_id,
-            event_type="persona_genome.rollback",
-            payload_json={"genome_id": genome_id},
+            event_type="persona.genome.rolled_back",
+            payload_json={"genome_id": genome_id, "genome_hash": genome.genome_hash},
         )
         return genome
 
@@ -199,7 +210,11 @@ class PersonaService:
             companion_id=companion_id,
             subject_type="companion",
             subject_id=companion_id,
-            event_type="persona_genome.reset_to_origin",
-            payload_json={"genome_id": genome.genome_id},
+            event_type="persona.genome.rolled_back",
+            payload_json={
+                "genome_id": genome.genome_id,
+                "genome_hash": genome.genome_hash,
+                "reason": "reset_to_origin",
+            },
         )
         return genome

@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from sqlalchemy import desc, select
 
+from eidolon_sdk.biz.persona import (
+    PERSONA_COMPILER_VERSION,
+    PERSONA_GENOME_SCHEMA_VERSION,
+    normalize_persona_genome,
+    persona_genome_hash,
+    persona_genome_to_json,
+)
+
 from eidolon_data.db.base import utc_now
 from eidolon_data.repositories.base import Repository
 from eidolon_data.schema.models import CompanionRow, PersonaGenomeRow
@@ -24,22 +32,38 @@ class PersonaRepository(Repository):
         version: int = 1,
         status: str = "committed",
         base_genome_id: str | None = None,
+        schema_version: str = PERSONA_GENOME_SCHEMA_VERSION,
+        genome_hash: str | None = None,
+        compiler_version: str = PERSONA_COMPILER_VERSION,
+        stable_prompt_hash: str | None = None,
+        applied_event_id: str | None = None,
         source_json: dict | None = None,
         genome_json: dict | None = None,
-        prompt_markdown: str = "",
-        evolution_state_json: dict | None = None,
         change_summary: str = "",
     ) -> PersonaGenomeRow:
+        normalized = normalize_persona_genome(
+            genome_json,
+            name=str((genome_json or {}).get("name") or companion_id),
+            origin=str((source_json or {}).get("source_type") or "template"),
+            base_genome_id=base_genome_id,
+        )
+        genome_dict = persona_genome_to_json(normalized)
+        provenance = dict(genome_dict.get("provenance") or {})
+        provenance.setdefault("companion_id", companion_id)
+        genome_dict["provenance"] = provenance
         row = PersonaGenomeRow(
             genome_id=genome_id,
             companion_id=companion_id,
             version=version,
             status=status,
             base_genome_id=base_genome_id,
+            schema_version=schema_version or normalized.schema_version,
+            genome_hash=genome_hash or persona_genome_hash(genome_dict),
+            compiler_version=compiler_version or PERSONA_COMPILER_VERSION,
+            stable_prompt_hash=stable_prompt_hash,
+            applied_event_id=applied_event_id,
             source_json=source_json or {},
-            genome_json=genome_json or {},
-            prompt_markdown=prompt_markdown,
-            evolution_state_json=evolution_state_json or {},
+            genome_json=genome_dict,
             change_summary=change_summary,
         )
         async with self._session_factory() as session:
@@ -103,10 +127,13 @@ class PersonaRepository(Repository):
         genome_id: str,
         companion_id: str,
         base_genome_id: str,
+        schema_version: str = PERSONA_GENOME_SCHEMA_VERSION,
+        genome_hash: str | None = None,
+        compiler_version: str = PERSONA_COMPILER_VERSION,
+        stable_prompt_hash: str | None = None,
+        applied_event_id: str | None = None,
         source_json: dict | None = None,
         genome_json: dict | None = None,
-        prompt_markdown: str = "",
-        evolution_state_json: dict | None = None,
         change_summary: str = "",
     ) -> PersonaGenomeRow:
         async with self._session_factory() as session:
@@ -118,16 +145,29 @@ class PersonaRepository(Repository):
                     .limit(1)
                 )
             ).scalar_one_or_none()
+            normalized = normalize_persona_genome(
+                genome_json,
+                name=str((genome_json or {}).get("name") or companion_id),
+                origin=str((source_json or {}).get("source_type") or "memory_reflection"),
+                base_genome_id=base_genome_id,
+            )
+            genome_dict = persona_genome_to_json(normalized)
+            provenance = dict(genome_dict.get("provenance") or {})
+            provenance.setdefault("companion_id", companion_id)
+            genome_dict["provenance"] = provenance
             row = PersonaGenomeRow(
                 genome_id=genome_id,
                 companion_id=companion_id,
                 version=(max_version or 0) + 1,
                 status="proposed",
                 base_genome_id=base_genome_id,
+                schema_version=schema_version or normalized.schema_version,
+                genome_hash=genome_hash or persona_genome_hash(genome_dict),
+                compiler_version=compiler_version or PERSONA_COMPILER_VERSION,
+                stable_prompt_hash=stable_prompt_hash,
+                applied_event_id=applied_event_id,
                 source_json=source_json or {},
-                genome_json=genome_json or {},
-                prompt_markdown=prompt_markdown,
-                evolution_state_json=evolution_state_json or {},
+                genome_json=genome_dict,
                 change_summary=change_summary,
             )
             session.add(row)

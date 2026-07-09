@@ -65,7 +65,11 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
         assert {
             "status",
             "base_genome_id",
-            "prompt_markdown",
+            "schema_version",
+            "genome_hash",
+            "compiler_version",
+            "stable_prompt_hash",
+            "applied_event_id",
             "change_summary",
         }.issubset(persona_columns)
         assert "updated_at" in column_names["conversations"]
