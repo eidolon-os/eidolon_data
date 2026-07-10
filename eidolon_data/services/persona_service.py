@@ -137,6 +137,8 @@ class PersonaService:
                 source_json={
                     "source_type": "memory_reflection",
                     "proposal_id": proposal.proposal_id,
+                    "base_genome_id": proposal.base_genome_id,
+                    "base_genome_hash": proposal.base_genome_hash,
                     "evidence_refs": [
                         item.model_dump(mode="json") for item in proposal.evidence_refs
                     ],
@@ -239,13 +241,18 @@ class PersonaService:
         *,
         owner_id: str,
         genome_id: str,
+        companion_id: str | None = None,
         reason: str = "",
     ) -> PersonaGenomeRow:
         async with self._session_factory() as session, session.begin():
             genome = await session.get(PersonaGenomeRow, genome_id)
             if genome is None:
                 raise KeyError(f"genome not found: {genome_id}")
+            if companion_id is not None and genome.companion_id != companion_id:
+                raise KeyError(f"genome not found for companion: {genome_id}")
             await _owned_companion(session, owner_id, genome.companion_id, lock=True)
+            if genome.status != "proposed":
+                raise ValueError("only proposed genomes can be rejected")
             genome.status = "rejected"
             genome.change_summary = f"{genome.change_summary}\n\n{reason}".strip()
             genome.updated_at = utc_now()

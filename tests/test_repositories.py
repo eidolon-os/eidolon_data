@@ -674,6 +674,54 @@ async def test_stale_persona_genome_proposal_does_not_replace_current_genome(sto
     assert companion.current_genome_id == current.genome_id
 
 
+async def test_reject_persona_genome_requires_proposed_status(store: DataStore) -> None:
+    await store.owner_service.create_owner(owner_id="owner-reject-state", display_name="Owner")
+    initial = await store.workspace_provisioning.provision_workspace(
+        owner_id="owner-reject-state",
+        companion_display_name="Evo",
+    )
+
+    with pytest.raises(ValueError, match="only proposed"):
+        await store.persona.reject_evolution(
+            owner_id="owner-reject-state",
+            companion_id=initial.companion.companion_id,
+            genome_id=initial.persona_genome.genome_id,
+            reason="duplicate click",
+        )
+
+
+async def test_reject_persona_genome_requires_matching_companion(store: DataStore) -> None:
+    await store.owner_service.create_owner(owner_id="owner-reject-scope", display_name="Owner")
+    first = await store.workspace_provisioning.provision_workspace(
+        owner_id="owner-reject-scope",
+        companion_id="c-reject-first",
+        genome_id="g-reject-first",
+        realm_id="r-reject-first",
+    )
+    second = await store.workspace_provisioning.provision_workspace(
+        owner_id="owner-reject-scope",
+        companion_id="c-reject-second",
+        genome_id="g-reject-second",
+        realm_id="r-reject-second",
+    )
+    proposal = await store.persona.create_evolution_proposal(
+        _evolution_proposal(
+            owner_id="owner-reject-scope",
+            companion_id=first.companion.companion_id,
+            base=first.persona_genome,
+            genome_id="g-reject-first-proposal",
+        )
+    )
+
+    with pytest.raises(KeyError, match="genome not found for companion"):
+        await store.persona.reject_evolution(
+            owner_id="owner-reject-scope",
+            companion_id=second.companion.companion_id,
+            genome_id=proposal.genome_id,
+            reason="wrong companion",
+        )
+
+
 async def test_reset_to_origin_returns_to_authored_snapshot(store: DataStore) -> None:
     await store.owners.create(owner_id="owner-reset", display_name="Owner")
     await store.companions.create(
