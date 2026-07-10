@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from eidolon_data import DataStore
 from eidolon_data.testing import assert_event
+from eidolon_sdk.biz.persona import build_default_persona_genome, persona_genome_to_json
 
 
 async def test_provision_workspace_emits_contract_fields(store: DataStore) -> None:
@@ -16,7 +17,7 @@ async def test_provision_workspace_emits_contract_fields(store: DataStore) -> No
     result = await store.workspace_provisioning.provision_workspace(
         owner_id="owner-emit",
         companion_display_name="Yi",
-        genome_json={"identity": {"name": "Yi"}},
+        genome_json=persona_genome_to_json(build_default_persona_genome(name="Yi")),
     )
     cid = result.companion.companion_id
     events = await store.events.list_for_owner("owner-emit", limit=20)
@@ -51,7 +52,7 @@ async def test_persona_create_genome_uses_unified_type(store: DataStore) -> None
         owner_id="owner-pg",
         event_id="evt_test_pg",
         version=2,
-        genome_json={"identity": {"name": "Yi"}},
+        genome_json=persona_genome_to_json(build_default_persona_genome(name="Yi")),
     )
 
     events = await store.events.list_for_subject(subject_type="persona_genome", subject_id="g-manual-1")
@@ -60,4 +61,4 @@ async def test_persona_create_genome_uses_unified_type(store: DataStore) -> None
     ev = assert_event(events, event_type="persona.genome.committed", event_id="evt_test_pg")
     assert ev.companion_id == cid
     assert ev.source == "data"
-    assert ev.payload_json["genome_hash"].startswith("pgv1_")
+    assert ev.payload_json["genome_hash"].startswith("pg_")

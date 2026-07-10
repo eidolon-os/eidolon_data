@@ -90,3 +90,38 @@ async def test_hub_device_registry_adapter_round_trips_device_record(tmp_path) -
         assert row.interaction_mode == "voice"
     finally:
         await store.close()
+
+
+async def test_hub_device_registry_adapter_writes_declared_capabilities(tmp_path) -> None:
+    from eidolon_sdk.biz.body import capabilities_from_json
+
+    store = DataStore.open(DataSettings(sqlite_path=str(tmp_path / "eidolon.sqlite3")))
+    repo = EidolonDataDeviceRegistryRepository(store)
+    try:
+        manifest = [
+            {
+                "name": "display.update",
+                "description": "Update the screen",
+                "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+            },
+            {"name": "sound.play"},
+        ]
+        await repo.put(
+            DeviceRegistryRecord(
+                device_id="dev-cap", name="Box", kind="esp32", capabilities=manifest
+            )
+        )
+        row = await store.devices.get_device("dev-cap")
+        assert row is not None
+        # canonical stored shape the agent's body device store reads back
+        assert row.capabilities_json == {"capabilities": manifest}
+        caps = capabilities_from_json(row.capabilities_json, device_kind="esp32")
+        assert {c.name for c in caps} == {"display.update", "sound.play"}
+
+        # a re-register without a manifest preserves the declared capabilities
+        await repo.put(DeviceRegistryRecord(device_id="dev-cap", name="Box", kind="esp32"))
+        row = await store.devices.get_device("dev-cap")
+        assert row is not None
+        assert row.capabilities_json == {"capabilities": manifest}
+    finally:
+        await store.close()

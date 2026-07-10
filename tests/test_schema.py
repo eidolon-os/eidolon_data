@@ -33,6 +33,14 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
                     for column in inspect(sync_conn).get_columns("persona_genomes")
                 }
             )
+            persona_checks = await conn.run_sync(
+                lambda sync_conn: {
+                    constraint["name"]
+                    for constraint in inspect(sync_conn).get_check_constraints(
+                        "persona_genomes"
+                    )
+                }
+            )
             unique_constraints = await conn.run_sync(
                 lambda sync_conn: inspect(sync_conn).get_unique_constraints("messages")
             )
@@ -67,11 +75,16 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
             "base_genome_id",
             "schema_version",
             "genome_hash",
-            "compiler_version",
-            "stable_prompt_hash",
+            "realizer_version",
             "applied_event_id",
             "change_summary",
         }.issubset(persona_columns)
+        assert "compiler_version" not in persona_columns
+        assert "stable_prompt_hash" not in persona_columns
+        assert {
+            "ck_persona_genomes_schema_current",
+            "ck_persona_genomes_realizer_current",
+        }.issubset(persona_checks)
         assert "updated_at" in column_names["conversations"]
         assert "actor_kind" in column_names["runtime_callers"]
         assert "actor_id" in column_names["runtime_callers"]

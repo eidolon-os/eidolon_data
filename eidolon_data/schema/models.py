@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -51,8 +52,26 @@ class CompanionRow(Base):
     # body; any companion (master or not) can associate more bodies on demand.
     is_master: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     companion_type: Mapped[str] = mapped_column(String(16), default="slave", nullable=False, index=True)
-    current_genome_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    default_memory_realm_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    current_genome_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey(
+            "persona_genomes.genome_id",
+            name="fk_companions_current_genome",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        index=True,
+    )
+    default_memory_realm_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey(
+            "memory_realms.realm_id",
+            name="fk_companions_default_memory_realm",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        index=True,
+    )
     profile_json: Mapped[JsonDict] = mapped_column(default=dict)
     runtime_config_json: Mapped[JsonDict] = mapped_column(default=dict)
     metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
@@ -75,11 +94,12 @@ class PersonaGenomeRow(Base):
     )
     version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(32), default="committed", index=True)
-    base_genome_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    schema_version: Mapped[str] = mapped_column(String(64), default="eidolon.persona_genome.v1", index=True)
-    genome_hash: Mapped[str] = mapped_column(String(80), unique=True, index=True)
-    compiler_version: Mapped[str] = mapped_column(String(64), default="eidolon.persona_compiler.v1")
-    stable_prompt_hash: Mapped[str | None] = mapped_column(String(80), index=True)
+    base_genome_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("persona_genomes.genome_id", ondelete="SET NULL"), index=True
+    )
+    schema_version: Mapped[str] = mapped_column(String(64), default="eidolon.persona_genome", index=True)
+    genome_hash: Mapped[str] = mapped_column(String(80), index=True)
+    realizer_version: Mapped[str] = mapped_column(String(64), default="eidolon.persona_realizer")
     applied_event_id: Mapped[str | None] = mapped_column(String(64), index=True)
     source_json: Mapped[JsonDict] = mapped_column(default=dict)
     genome_json: Mapped[JsonDict] = mapped_column(default=dict)
@@ -89,6 +109,14 @@ class PersonaGenomeRow(Base):
 
     __table_args__ = (
         UniqueConstraint("companion_id", "version", name="uq_persona_genomes_companion_version"),
+        CheckConstraint(
+            "schema_version = 'eidolon.persona_genome'",
+            name="schema_current",
+        ),
+        CheckConstraint(
+            "realizer_version = 'eidolon.persona_realizer'",
+            name="realizer_current",
+        ),
     )
 
 

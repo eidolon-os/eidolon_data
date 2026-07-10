@@ -9,8 +9,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from eidolon_sdk.biz.persona import (
-    PERSONA_COMPILER_VERSION,
-    PERSONA_GENOME_SCHEMA_VERSION,
+    PERSONA_GENOME_SCHEMA,
+    PERSONA_REALIZER,
+    build_default_persona_genome,
     normalize_persona_genome,
     persona_genome_hash,
     persona_genome_to_json,
@@ -216,53 +217,6 @@ class CompanionWorkspaceService:
     def __init__(self, session_factory: async_sessionmaker):
         self._session_factory = session_factory
 
-    async def initialize_workspace(
-        self,
-        *,
-        owner_id: str,
-        companion_id: str | None = None,
-        companion_display_name: str = "",
-        companion_kind: str = "companion",
-        companion_profile_json: dict | None = None,
-        companion_runtime_config_json: dict | None = None,
-        companion_metadata_json: dict | None = None,
-        genome_id: str | None = None,
-        genome_source_json: dict | None = None,
-        genome_json: dict | None = None,
-        realm_id: str | None = None,
-        memory_engine: str = "mempalace",
-        memory_engine_config_json: dict | None = None,
-        memory_policy_json: dict | None = None,
-        actor_type: str = "admin",
-        actor_id: str | None = None,
-        is_master: bool = False,
-    ) -> CompanionWorkspaceResult:
-        """Compatibility wrapper for owner/companion provisioning.
-
-        New call sites should use ``provision_workspace``; this name remains
-        for existing admin/agent tests and callers.
-        """
-
-        return await self.provision_workspace(
-            owner_id=owner_id,
-            companion_id=companion_id,
-            companion_display_name=companion_display_name,
-            companion_kind=companion_kind,
-            companion_profile_json=companion_profile_json,
-            companion_runtime_config_json=companion_runtime_config_json,
-            companion_metadata_json=companion_metadata_json,
-            genome_id=genome_id,
-            genome_source_json=genome_source_json,
-            genome_json=genome_json,
-            realm_id=realm_id,
-            memory_engine=memory_engine,
-            memory_engine_config_json=memory_engine_config_json,
-            memory_policy_json=memory_policy_json,
-            actor_type=actor_type,
-            actor_id=actor_id,
-            is_master=is_master,
-        )
-
     async def ensure_web_body(
         self,
         *,
@@ -447,7 +401,7 @@ class CompanionWorkspaceService:
     ) -> CompanionWorkspaceResult:
         owner_id = _validate_owner_id(owner_id)
         companion_id = companion_id or f"c_{owner_id}_default"
-        genome_id = genome_id or f"g_{owner_id}_default_v1"
+        genome_id = genome_id or f"g_{owner_id}_default"
         realm_id = realm_id or f"r_{owner_id}_default"
         _validate_generated_id("companion_id", companion_id)
         _validate_generated_id("genome_id", genome_id)
@@ -498,10 +452,9 @@ class CompanionWorkspaceService:
                 version=1,
                 status="committed",
                 base_genome_id=None,
-                schema_version=PERSONA_GENOME_SCHEMA_VERSION,
+                schema_version=PERSONA_GENOME_SCHEMA,
                 genome_hash=persona_genome_hash(normalized_genome_json),
-                compiler_version=PERSONA_COMPILER_VERSION,
-                stable_prompt_hash=None,
+                realizer_version=PERSONA_REALIZER,
                 applied_event_id=None,
                 source_json=genome_source_json
                 or {"source_type": "admin_workspace_initialize", "owner_id": owner_id},
@@ -565,7 +518,7 @@ class CompanionWorkspaceService:
                         "genome_id": genome_id,
                         "genome_hash": genome.genome_hash,
                         "schema_version": genome.schema_version,
-                        "compiler_version": genome.compiler_version,
+                        "realizer_version": genome.realizer_version,
                     },
                 ),
                 ("memory_realm", realm_id, "memory_realm.created", {"engine": realm.engine}),
@@ -577,18 +530,19 @@ class CompanionWorkspaceService:
                 ),
             ]
             for subject_type, subject_id, event_type, payload_json in event_specs:
-                session.add(
-                    _event(
-                        owner_id=owner_id,
-                        companion_id=companion_id,
-                        subject_type=subject_type,
-                        subject_id=subject_id,
-                        event_type=event_type,
-                        actor_type=actor_type,
-                        actor_id=actor_id,
-                        payload_json=payload_json,
-                    )
+                event = _event(
+                    owner_id=owner_id,
+                    companion_id=companion_id,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    event_type=event_type,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    payload_json=payload_json,
                 )
+                if event_type == "persona.genome.committed":
+                    genome.applied_event_id = event.event_id
+                session.add(event)
 
         return CompanionWorkspaceResult(
             companion=companion,
@@ -615,7 +569,7 @@ def _validate_generated_id(label: str, value: str) -> None:
 
 def _default_genome(display_name: str) -> dict:
     return persona_genome_to_json(
-        normalize_persona_genome(None, name=display_name, origin="template")
+        build_default_persona_genome(name=display_name, origin="template")
     )
 
 
@@ -626,13 +580,14 @@ def _normalize_genome(
     source_type: str = "template",
     base_genome_id: str | None = None,
 ):
-    return normalize_persona_genome(
-        genome_json,
-        name=display_name,
-        archetype="companion",
-        origin=source_type,
-        base_genome_id=base_genome_id,
-    )
+    if genome_json is None:
+        return build_default_persona_genome(
+            name=display_name,
+            archetype="companion",
+            origin=source_type,
+            base_genome_id=base_genome_id,
+        )
+    return normalize_persona_genome(genome_json)
 
 
 def _event(

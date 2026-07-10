@@ -50,7 +50,11 @@ class EidolonDataDeviceRegistryRepository:
             interaction_mode=existing.interaction_mode if existing else None,
             auth_type=auth_type,
             secret_ref=secret_ref,
-            capabilities_json=dict(existing.capabilities_json or {}) if existing else None,
+            capabilities_json=(
+                {"capabilities": list(record.capabilities)}
+                if record.capabilities
+                else (dict(existing.capabilities_json or {}) if existing else None)
+            ),
             access_policy_json=dict(existing.access_policy_json or {}) if existing else None,
             metadata_json=metadata,
             last_seen_at=_parse_dt(record.last_seen),

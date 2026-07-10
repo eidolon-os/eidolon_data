@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy import func, select
+from eidolon_sdk.biz.persona import build_default_persona_genome, persona_genome_to_json
 
 from eidolon_data import DataSettings, DataStore
 from eidolon_data.schema.models import (
@@ -26,7 +27,7 @@ async def test_delete_owner_data_removes_owned_rows_and_retires_companions(tmp_p
             genome_id="genome-a",
             companion_id="companion-a",
             version=1,
-            genome_json={"identity": {"name": "Eidolon"}},
+            genome_json=persona_genome_to_json(build_default_persona_genome(name="Eidolon")),
         )
         await store.companions.set_current_genome("companion-a", "genome-a")
 
@@ -76,7 +77,7 @@ async def test_delete_owner_data_removes_owned_rows_and_retires_companions(tmp_p
             owner_id="owner-a",
             subject_type="persona",
             subject_id="companion-a",
-            event_type="persona.evolution.applied",
+            event_type="persona.genome.committed",
         )
 
         counts = await store.owner_data_ops.delete_owner_data("owner-a")

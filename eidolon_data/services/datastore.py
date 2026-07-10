@@ -108,11 +108,7 @@ class DataStore:
 
     @property
     def persona(self) -> PersonaService:
-        return PersonaService(
-            persona_repo=self.persona_repo,
-            companions=self.companions,
-            events=self.events,
-        )
+        return PersonaService(self.session_factory)
 
     @property
     def memory(self) -> MemoryService:
