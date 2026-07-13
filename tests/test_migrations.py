@@ -119,9 +119,14 @@ def test_alembic_upgrade_head_creates_core_schema(tmp_path: Path, monkeypatch) -
         "status",
         "ack_json",
         "fact_type",
+        "replay_key",
         "command_id",
         "delivery_attempt_count",
         "last_error",
+        "delivery_claim_token",
+        "delivery_lease_expires_at",
+        "next_attempt_at",
+        "delivery_dead_lettered_at",
     }.issubset(guard_action_columns)
     assert {
         "binding_id",

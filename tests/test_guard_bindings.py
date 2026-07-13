@@ -258,8 +258,11 @@ async def test_guard_policy_action_tracks_fact_replay_and_command_mapping(store:
     )
     assert [row.action_id for row in replayed] == ["guard-action-body-1"]
 
+    claimed = await store.guard_actions.claim_for_dispatch("guard-action-body-1")
+    assert claimed is not None and claimed.delivery_claim_token
     mapped = await store.guard_actions.mark_dispatched(
         "guard-action-body-1",
+        claim_token=claimed.delivery_claim_token,
         command_id="cmd-body-1",
     )
     assert mapped is not None and mapped.command_id == "cmd-body-1"

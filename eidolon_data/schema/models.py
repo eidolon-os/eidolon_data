@@ -225,6 +225,7 @@ class GuardPolicyActionRow(Base):
     correlation_id: Mapped[str] = mapped_column(String(96), index=True)
     guard_epoch: Mapped[int] = mapped_column(Integer)
     fact_type: Mapped[str] = mapped_column(String(64), default="")
+    replay_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     policy_id: Mapped[str] = mapped_column(String(64))
     action: Mapped[str] = mapped_column(String(96))
     subscriber: Mapped[str] = mapped_column(String(128))
@@ -234,6 +235,16 @@ class GuardPolicyActionRow(Base):
     command_id: Mapped[str | None] = mapped_column(String(96), index=True)
     delivery_attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str] = mapped_column(Text, default="")
+    delivery_claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    delivery_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+    delivery_dead_lettered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -249,6 +260,7 @@ class GuardPolicyActionRow(Base):
             "guard_epoch",
             "fact_type",
         ),
+        Index("uq_guard_policy_actions_replay_key", "replay_key", unique=True),
     )
 
 
