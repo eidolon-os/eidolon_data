@@ -115,3 +115,22 @@ class BodyCommandsRepository(Repository):
                 .limit(limit)
             )
             return list(rows)
+
+    async def list_unfinished_before(
+        self,
+        *,
+        created_before: datetime,
+        limit: int = 200,
+    ) -> list[BodyCommandRow]:
+        """Return commands that need a timeout decision after a Hub restart."""
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(BodyCommandRow)
+                .where(
+                    BodyCommandRow.status.in_(("sent", "accepted", "running")),
+                    BodyCommandRow.created_at <= created_before,
+                )
+                .order_by(BodyCommandRow.created_at)
+                .limit(limit)
+            )
+            return list(rows)

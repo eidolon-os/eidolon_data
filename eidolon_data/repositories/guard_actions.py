@@ -116,6 +116,26 @@ class GuardPolicyActionsRepository(Repository):
             )
             return list(rows)
 
+    async def list_dispatched_body_deliveries(
+        self,
+        *,
+        action: str,
+        limit: int = 50,
+    ) -> list[GuardPolicyActionRow]:
+        """Return body actions awaiting a terminal command result."""
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(GuardPolicyActionRow)
+                .where(
+                    GuardPolicyActionRow.status == "published",
+                    GuardPolicyActionRow.action == action,
+                    GuardPolicyActionRow.command_id.is_not(None),
+                )
+                .order_by(GuardPolicyActionRow.dispatched_at, GuardPolicyActionRow.action_id)
+                .limit(limit)
+            )
+            return list(rows)
+
     async def mark_dispatched(
         self,
         action_id: str,
