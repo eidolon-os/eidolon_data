@@ -5,6 +5,9 @@ from eidolon_data.repositories.companions import CompanionsRepository
 from eidolon_data.repositories.conversations import ConversationsRepository
 from eidolon_data.repositories.devices import DevicesRepository
 from eidolon_data.repositories.events import EventsRepository
+from eidolon_data.repositories.guard_actions import GuardPolicyActionsRepository
+from eidolon_data.repositories.guard_bindings import GuardBindingsRepository
+from eidolon_data.repositories.guard_runtime_deliveries import GuardRuntimeDeliveriesRepository
 from eidolon_data.repositories.jobs import JobsRepository
 from eidolon_data.repositories.memory import MemoryRepository
 from eidolon_data.repositories.owners import OwnersRepository
@@ -18,6 +21,9 @@ __all__ = [
     "ConversationsRepository",
     "DevicesRepository",
     "EventsRepository",
+    "GuardBindingsRepository",
+    "GuardPolicyActionsRepository",
+    "GuardRuntimeDeliveriesRepository",
     "JobsRepository",
     "MemoryRepository",
     "OwnersRepository",

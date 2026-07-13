@@ -14,6 +14,9 @@ from eidolon_data.repositories import (
     ConversationsRepository,
     DevicesRepository,
     EventsRepository,
+    GuardBindingsRepository,
+    GuardPolicyActionsRepository,
+    GuardRuntimeDeliveriesRepository,
     JobsRepository,
     MemoryRepository,
     OwnersRepository,
@@ -21,6 +24,7 @@ from eidolon_data.repositories import (
     RuntimeCallersRepository,
     RuntimeSessionsRepository,
 )
+from eidolon_data.services.companion import CompanionDeletionService
 from eidolon_data.services.maintenance import MaintenanceService
 from eidolon_data.services.memory_service import MemoryService
 from eidolon_data.services.owner_data import OwnerDataService
@@ -78,6 +82,18 @@ class DataStore:
         return DevicesRepository(self.session_factory)
 
     @property
+    def guard_bindings(self) -> GuardBindingsRepository:
+        return GuardBindingsRepository(self.session_factory)
+
+    @property
+    def guard_actions(self) -> GuardPolicyActionsRepository:
+        return GuardPolicyActionsRepository(self.session_factory)
+
+    @property
+    def guard_runtime_deliveries(self) -> GuardRuntimeDeliveriesRepository:
+        return GuardRuntimeDeliveriesRepository(self.session_factory)
+
+    @property
     def body_commands(self) -> BodyCommandsRepository:
         return BodyCommandsRepository(self.session_factory)
 
@@ -107,11 +123,7 @@ class DataStore:
 
     @property
     def persona(self) -> PersonaService:
-        return PersonaService(
-            persona_repo=self.persona_repo,
-            companions=self.companions,
-            events=self.events,
-        )
+        return PersonaService(self.session_factory)
 
     @property
     def memory(self) -> MemoryService:
@@ -132,6 +144,10 @@ class DataStore:
     @property
     def dev_maintenance(self) -> MaintenanceService:
         return MaintenanceService(self.session_factory)
+
+    @property
+    def companion_deletion(self) -> CompanionDeletionService:
+        return CompanionDeletionService(self.session_factory)
 
     @property
     def owner_data(self) -> OwnerDataService:

@@ -65,9 +65,13 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
         assert {
             "status",
             "base_genome_id",
-            "prompt_markdown",
+            "schema_version",
+            "genome_hash",
+            "realizer_version",
+            "applied_event_id",
             "change_summary",
         }.issubset(persona_columns)
+        assert "prompt_markdown" not in persona_columns
         assert "updated_at" in column_names["conversations"]
         assert "actor_kind" in column_names["runtime_callers"]
         assert "actor_id" in column_names["runtime_callers"]

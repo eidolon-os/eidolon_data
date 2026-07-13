@@ -65,7 +65,7 @@ class EidolonDataDeviceRegistryRepository:
             interaction_mode=existing.interaction_mode if existing else None,
             auth_type=auth_type,
             secret_ref=secret_ref,
-            capabilities_json=dict(existing.capabilities_json or {}) if existing else None,
+            capabilities_json=_capabilities_from_record(record, existing),
             access_policy_json=dict(existing.access_policy_json or {}) if existing else None,
             metadata_json=metadata,
             last_seen_at=_parse_dt(record.last_seen),
@@ -109,6 +109,7 @@ class EidolonDataDeviceRegistryRepository:
             created_at=str(hub.get("created_at") or _dt_to_iso(row.created_at) or _now_iso()),
             last_seen=str(hub.get("last_seen") or _dt_to_iso(row.last_seen_at) or _now_iso()),
             metadata=_without_hub_metadata(row.metadata_json or {}),
+            capabilities=_record_capabilities(row.capabilities_json),
         )
 
 
@@ -116,6 +117,29 @@ def _without_hub_metadata(metadata: dict) -> dict:
     data = dict(metadata)
     data.pop("hub_registry", None)
     return data
+
+
+def _capabilities_from_record(record: DeviceRegistryRecord, existing) -> dict:
+    """Persist a self-declared manifest without treating it as an owner claim."""
+    raw = getattr(existing, "capabilities_json", None) if existing is not None else None
+    data = dict(raw) if isinstance(raw, dict) else {}
+    if record.capabilities:
+        data["ops"] = list(record.capabilities)
+    declaration = (record.metadata or {}).get("guard_manifest")
+    if isinstance(declaration, dict) and declaration.get("enabled") is True:
+        versions = declaration.get("protocol_versions") or []
+        data["guard"] = {
+            "enabled": True,
+            "protocol_versions": [int(version) for version in versions if isinstance(version, int)],
+        }
+    return data
+
+
+def _record_capabilities(value: object) -> list[dict]:
+    if not isinstance(value, dict):
+        return []
+    ops = value.get("ops") or value.get("capabilities") or []
+    return [dict(item) for item in ops if isinstance(item, dict)]
 
 
 def _status_from_record(record: DeviceRegistryRecord, existing) -> str:

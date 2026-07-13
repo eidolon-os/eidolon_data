@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,8 +52,27 @@ class CompanionRow(Base):
     # The owner's primary companion. Master companions default-get a local web
     # body; any companion (master or not) can associate more bodies on demand.
     is_master: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
-    current_genome_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    default_memory_realm_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    companion_type: Mapped[str] = mapped_column(String(16), default="slave", nullable=False, index=True)
+    current_genome_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey(
+            "persona_genomes.genome_id",
+            name="fk_companions_current_genome",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        index=True,
+    )
+    default_memory_realm_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey(
+            "memory_realms.realm_id",
+            name="fk_companions_default_memory_realm",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        index=True,
+    )
     profile_json: Mapped[JsonDict] = mapped_column(default=dict)
     runtime_config_json: Mapped[JsonDict] = mapped_column(default=dict)
     metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
@@ -74,17 +95,29 @@ class PersonaGenomeRow(Base):
     )
     version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(32), default="committed", index=True)
-    base_genome_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    base_genome_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("persona_genomes.genome_id", ondelete="SET NULL"), index=True
+    )
+    schema_version: Mapped[str] = mapped_column(String(64), default="eidolon.persona_genome", index=True)
+    genome_hash: Mapped[str] = mapped_column(String(80), index=True)
+    realizer_version: Mapped[str] = mapped_column(String(64), default="eidolon.persona_realizer")
+    applied_event_id: Mapped[str | None] = mapped_column(String(64), index=True)
     source_json: Mapped[JsonDict] = mapped_column(default=dict)
     genome_json: Mapped[JsonDict] = mapped_column(default=dict)
-    prompt_markdown: Mapped[str] = mapped_column(Text, default="")
-    evolution_state_json: Mapped[JsonDict] = mapped_column(default=dict)
     change_summary: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     __table_args__ = (
         UniqueConstraint("companion_id", "version", name="uq_persona_genomes_companion_version"),
+        CheckConstraint(
+            "schema_version = 'eidolon.persona_genome'",
+            name="schema_current",
+        ),
+        CheckConstraint(
+            "realizer_version = 'eidolon.persona_realizer'",
+            name="realizer_current",
+        ),
     )
 
 
@@ -120,6 +153,140 @@ class DeviceRow(Base):
             name="fk_devices_owner_bound_companion",
         ),
         UniqueConstraint("owner_id", "device_id", name="uq_devices_owner_device"),
+    )
+
+
+class GuardBindingRow(Base):
+    """Owner-scoped control-plane binding for a physical Guard device."""
+
+    __tablename__ = "guard_bindings"
+
+    binding_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
+    )
+    guard_companion_id: Mapped[str] = mapped_column(String(64), index=True)
+    device_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("devices.device_id", ondelete="RESTRICT"), index=True
+    )
+    state: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    policy_id: Mapped[str] = mapped_column(String(64), default="silent_presence")
+    config_revision: Mapped[int] = mapped_column(Integer, default=1)
+    config_json: Mapped[JsonDict] = mapped_column(default=dict)
+    runtime_revision: Mapped[int] = mapped_column(Integer, default=1)
+    runtime_config_json: Mapped[JsonDict] = mapped_column(default=dict)
+    desired_runtime_state: Mapped[str] = mapped_column(String(16), default="stopped")
+    status_json: Mapped[JsonDict] = mapped_column(default=dict)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_id", "guard_companion_id"],
+            ["companions.owner_id", "companions.companion_id"],
+            name="fk_guard_bindings_owner_guard_companion",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "uq_guard_bindings_owner_active",
+            "owner_id",
+            unique=True,
+            sqlite_where=text("state = 'active'"),
+            postgresql_where=text("state = 'active'"),
+        ),
+        Index(
+            "uq_guard_bindings_device_active",
+            "device_id",
+            unique=True,
+            sqlite_where=text("state = 'active'"),
+            postgresql_where=text("state = 'active'"),
+        ),
+        Index("ix_guard_bindings_owner_state", "owner_id", "state"),
+    )
+
+
+class GuardPolicyActionRow(Base):
+    """Durable policy-action outbox for Guard subscribers."""
+
+    __tablename__ = "guard_policy_actions"
+
+    action_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    binding_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("guard_bindings.binding_id", ondelete="CASCADE"), index=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
+    )
+    guard_companion_id: Mapped[str] = mapped_column(String(64), index=True)
+    device_id: Mapped[str] = mapped_column(String(128), index=True)
+    correlation_id: Mapped[str] = mapped_column(String(96), index=True)
+    guard_epoch: Mapped[int] = mapped_column(Integer)
+    fact_type: Mapped[str] = mapped_column(String(64), default="")
+    policy_id: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(96))
+    subscriber: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), default="published", index=True)
+    payload_json: Mapped[JsonDict] = mapped_column(default=dict)
+    ack_json: Mapped[JsonDict | None] = mapped_column(JSON, default=None)
+    command_id: Mapped[str | None] = mapped_column(String(96), index=True)
+    delivery_attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    __table_args__ = (
+        Index("ix_guard_policy_actions_owner_status", "owner_id", "status"),
+        Index(
+            "ix_guard_policy_actions_binding_fact_replay",
+            "binding_id",
+            "correlation_id",
+            "guard_epoch",
+            "fact_type",
+        ),
+    )
+
+
+class GuardRuntimeDeliveryRow(Base):
+    """Durable desired-state delivery for one GuardBinding runtime revision.
+
+    This is intentionally separate from ``guard_policy_actions``: policy
+    actions are consumed by subscribers, while runtime deliveries reconcile a
+    Guard device with its binding-local desired state.
+    """
+
+    __tablename__ = "guard_runtime_deliveries"
+
+    delivery_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    binding_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("guard_bindings.binding_id", ondelete="CASCADE"), index=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
+    )
+    device_id: Mapped[str] = mapped_column(String(128), index=True)
+    runtime_revision: Mapped[int] = mapped_column(Integer)
+    desired_runtime_state: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    command_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result_json: Mapped[JsonDict | None] = mapped_column(JSON, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("binding_id", "runtime_revision", name="uq_guard_runtime_delivery_revision"),
+        Index("ix_guard_runtime_deliveries_device_status", "device_id", "status"),
+        Index("ix_guard_runtime_deliveries_binding_created", "binding_id", "created_at"),
     )
 
 
@@ -378,12 +545,28 @@ class EventRow(Base):
     owner_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
     )
+    companion_id: Mapped[str | None] = mapped_column(String(64), index=True)
     subject_type: Mapped[str] = mapped_column(String(32), index=True)
     subject_id: Mapped[str] = mapped_column(String(128), index=True)
     event_type: Mapped[str] = mapped_column(String(96), index=True)
+    # Classification (see eidolon_data.events.registry): tier + subsystem + result.
+    event_class: Mapped[str] = mapped_column(String(8), default="audit", index=True)
+    source: Mapped[str] = mapped_column(String(16), default="data", index=True)
+    severity: Mapped[str] = mapped_column(String(8), default="info", index=True)
+    outcome: Mapped[str] = mapped_column(String(12), default="success", index=True)
+    reason: Mapped[str | None] = mapped_column(String(256))
     actor_type: Mapped[str] = mapped_column(String(32), default="system", index=True)
     actor_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    # Correlation. trace_id is constant across a distributed operation.
+    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    data_classification: Mapped[str] = mapped_column(String(10), default="safe")
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
     payload_json: Mapped[JsonDict] = mapped_column(default=dict)
+    # occurred_at = when the real-world event happened; created_at = when the row was recorded.
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=utc_now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
-    __table_args__ = (Index("ix_events_subject_created", "subject_type", "subject_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_events_subject_created", "subject_type", "subject_id", "created_at"),
+        Index("ix_events_owner_created", "owner_id", "created_at"),
+    )

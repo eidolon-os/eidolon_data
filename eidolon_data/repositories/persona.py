@@ -1,10 +1,17 @@
-"""Persona genome repositories."""
+"""Read-oriented persistence access for canonical persona snapshots."""
 
 from __future__ import annotations
 
+from eidolon_sdk.biz.persona import (
+    PERSONA_GENOME_SCHEMA,
+    PERSONA_REALIZER,
+    build_default_persona_genome,
+    normalize_persona_genome,
+    persona_genome_hash,
+    persona_genome_to_json,
+)
 from sqlalchemy import desc, select
 
-from eidolon_data.db.base import utc_now
 from eidolon_data.repositories.base import Repository
 from eidolon_data.schema.models import CompanionRow, PersonaGenomeRow
 
@@ -16,6 +23,8 @@ class PersonaGenomeConflict(RuntimeError):
 
 
 class PersonaRepository(Repository):
+    """Store complete immutable snapshots; lifecycle transitions belong to PersonaService."""
+
     async def create_genome(
         self,
         *,
@@ -24,22 +33,41 @@ class PersonaRepository(Repository):
         version: int = 1,
         status: str = "committed",
         base_genome_id: str | None = None,
+        schema_version: str = PERSONA_GENOME_SCHEMA,
+        genome_hash: str | None = None,
+        realizer_version: str = PERSONA_REALIZER,
+        applied_event_id: str | None = None,
         source_json: dict | None = None,
         genome_json: dict | None = None,
-        prompt_markdown: str = "",
-        evolution_state_json: dict | None = None,
         change_summary: str = "",
     ) -> PersonaGenomeRow:
+        origin = str((source_json or {}).get("source_type") or "template")
+        normalized = (
+            normalize_persona_genome(genome_json)
+            if genome_json is not None
+            else build_default_persona_genome(
+                name=companion_id,
+                origin=origin,
+                base_genome_id=base_genome_id,
+            )
+        )
+        payload = persona_genome_to_json(normalized)
+        payload["provenance"] = {
+            **dict(payload.get("provenance") or {}),
+            "companion_id": companion_id,
+        }
         row = PersonaGenomeRow(
             genome_id=genome_id,
             companion_id=companion_id,
             version=version,
             status=status,
             base_genome_id=base_genome_id,
+            schema_version=schema_version or normalized.schema_version,
+            genome_hash=genome_hash or persona_genome_hash(payload),
+            realizer_version=realizer_version or PERSONA_REALIZER,
+            applied_event_id=applied_event_id,
             source_json=source_json or {},
-            genome_json=genome_json or {},
-            prompt_markdown=prompt_markdown,
-            evolution_state_json=evolution_state_json or {},
+            genome_json=payload,
             change_summary=change_summary,
         )
         async with self._session_factory() as session:
@@ -66,15 +94,6 @@ class PersonaRepository(Repository):
                 .order_by(desc(PersonaGenomeRow.version))
                 .limit(1)
             )
-            row = rows.first()
-            if row is not None:
-                return row
-            rows = await session.scalars(
-                select(PersonaGenomeRow)
-                .where(PersonaGenomeRow.companion_id == companion_id)
-                .order_by(desc(PersonaGenomeRow.version))
-                .limit(1)
-            )
             return rows.first()
 
     async def list_for_companion(self, companion_id: str) -> list[PersonaGenomeRow]:
@@ -96,146 +115,3 @@ class PersonaRepository(Repository):
                 .order_by(PersonaGenomeRow.companion_id, PersonaGenomeRow.version, PersonaGenomeRow.created_at)
             )
             return list(rows)
-
-    async def create_proposal(
-        self,
-        *,
-        genome_id: str,
-        companion_id: str,
-        base_genome_id: str,
-        source_json: dict | None = None,
-        genome_json: dict | None = None,
-        prompt_markdown: str = "",
-        evolution_state_json: dict | None = None,
-        change_summary: str = "",
-    ) -> PersonaGenomeRow:
-        async with self._session_factory() as session:
-            max_version = (
-                await session.execute(
-                    select(PersonaGenomeRow.version)
-                    .where(PersonaGenomeRow.companion_id == companion_id)
-                    .order_by(desc(PersonaGenomeRow.version))
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            row = PersonaGenomeRow(
-                genome_id=genome_id,
-                companion_id=companion_id,
-                version=(max_version or 0) + 1,
-                status="proposed",
-                base_genome_id=base_genome_id,
-                source_json=source_json or {},
-                genome_json=genome_json or {},
-                prompt_markdown=prompt_markdown,
-                evolution_state_json=evolution_state_json or {},
-                change_summary=change_summary,
-            )
-            session.add(row)
-            await session.commit()
-            await session.refresh(row)
-            return row
-
-    async def activate_genome(
-        self,
-        *,
-        companion_id: str,
-        genome_id: str,
-        expected_base_genome_id: str | None = None,
-    ) -> PersonaGenomeRow:
-        async with self._session_factory() as session:
-            companion = await session.get(CompanionRow, companion_id)
-            genome = await session.get(PersonaGenomeRow, genome_id)
-            if companion is None:
-                raise KeyError(f"companion not found: {companion_id}")
-            if genome is None or genome.companion_id != companion_id:
-                raise KeyError(f"genome not found: {genome_id}")
-            if expected_base_genome_id and companion.current_genome_id != expected_base_genome_id:
-                genome.status = "stale"
-                genome.updated_at = utc_now()
-                await session.commit()
-                raise PersonaGenomeConflict(
-                    "current genome changed before activation",
-                    stale_genome_id=genome_id,
-                )
-            genome.status = "committed"
-            genome.updated_at = utc_now()
-            companion.current_genome_id = genome_id
-            companion.updated_at = utc_now()
-            await session.commit()
-            await session.refresh(genome)
-            return genome
-
-    async def reject_genome(self, genome_id: str, *, reason: str = "") -> PersonaGenomeRow:
-        return await self._set_status(genome_id, status="rejected", reason=reason)
-
-    async def mark_stale(self, genome_id: str, *, reason: str = "") -> PersonaGenomeRow:
-        return await self._set_status(genome_id, status="stale", reason=reason)
-
-    async def rollback_to_genome(self, *, companion_id: str, genome_id: str) -> PersonaGenomeRow:
-        async with self._session_factory() as session:
-            companion = await session.get(CompanionRow, companion_id)
-            genome = await session.get(PersonaGenomeRow, genome_id)
-            if companion is None:
-                raise KeyError(f"companion not found: {companion_id}")
-            if genome is None or genome.companion_id != companion_id:
-                raise KeyError(f"genome not found: {genome_id}")
-            if genome.status != "committed":
-                raise ValueError("only committed genomes can be rollback targets")
-            companion.current_genome_id = genome_id
-            companion.updated_at = utc_now()
-            await session.commit()
-            await session.refresh(genome)
-            return genome
-
-    async def rollback_to_origin_genome(self, *, companion_id: str) -> PersonaGenomeRow:
-        """Walk the base_genome_id chain from the current genome back to the
-        authored origin (v1, whose base points at itself) and make it current —
-        discarding accumulated evolution drift."""
-        async with self._session_factory() as session:
-            companion = await session.get(CompanionRow, companion_id)
-            if companion is None:
-                raise KeyError(f"companion not found: {companion_id}")
-            genome = (
-                await session.get(PersonaGenomeRow, companion.current_genome_id)
-                if companion.current_genome_id
-                else None
-            )
-            if genome is None:
-                rows = await session.scalars(
-                    select(PersonaGenomeRow)
-                    .where(PersonaGenomeRow.companion_id == companion_id)
-                    .order_by(PersonaGenomeRow.version)
-                    .limit(1)
-                )
-                genome = rows.first()
-            if genome is None:
-                raise KeyError(f"no genome for companion: {companion_id}")
-            visited: set[str] = set()
-            while (
-                genome.base_genome_id
-                and genome.base_genome_id != genome.genome_id
-                and genome.base_genome_id not in visited
-            ):
-                visited.add(genome.genome_id)
-                parent = await session.get(PersonaGenomeRow, genome.base_genome_id)
-                if parent is None or parent.companion_id != companion_id:
-                    break
-                genome = parent
-            companion.current_genome_id = genome.genome_id
-            companion.updated_at = utc_now()
-            await session.commit()
-            await session.refresh(genome)
-            return genome
-
-    async def _set_status(self, genome_id: str, *, status: str, reason: str = "") -> PersonaGenomeRow:
-        async with self._session_factory() as session:
-            row = await session.get(PersonaGenomeRow, genome_id)
-            if row is None:
-                raise KeyError(f"genome not found: {genome_id}")
-            row.status = status
-            if reason:
-                row.change_summary = f"{row.change_summary}\n\n{reason}".strip()
-            row.updated_at = utc_now()
-            await session.commit()
-            await session.refresh(row)
-            return row
