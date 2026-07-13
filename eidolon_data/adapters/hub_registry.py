@@ -7,6 +7,21 @@ from datetime import datetime, timezone
 from eidolon_sdk.biz.registry.models import DeviceRegistryRecord
 
 from eidolon_data.services.datastore import DataStore
+from eidolon_data.services.owner_workspace import WEB_BODY_KIND
+
+
+def _is_hub_managed(row) -> bool:
+    """Whether a sovereign device row belongs in Hub's device registry.
+
+    The sovereign device table holds *every* body — physical devices plus the
+    virtual web bodies that owner onboarding provisions. Hub's registry only
+    governs physical devices (discovery / approval / LiveKit reachability), so
+    this adapter — the sole boundary between the two worlds — filters web bodies
+    out here. Everything downstream (DeviceManager cache, admin hardware table,
+    presence probes) then stays free of any web-body special-casing. Web bodies'
+    lifecycle is owned by the owner-scoped "本机 Web 身体" card instead.
+    """
+    return row.kind != WEB_BODY_KIND
 
 
 class EidolonDataDeviceRegistryRepository:
@@ -20,7 +35,7 @@ class EidolonDataDeviceRegistryRepository:
     async def get(self, device_id: str) -> DeviceRegistryRecord | None:
         await self._ensure_ready()
         row = await self._store.devices.get_device(device_id)
-        if row is None:
+        if row is None or not _is_hub_managed(row):
             return None
         return await self._record_from_row(row)
 
@@ -68,7 +83,9 @@ class EidolonDataDeviceRegistryRepository:
     async def list_all(self) -> dict[str, DeviceRegistryRecord]:
         await self._ensure_ready()
         rows = await self._store.devices.list_all_devices()
-        records = [await self._record_from_row(row) for row in rows]
+        records = [
+            await self._record_from_row(row) for row in rows if _is_hub_managed(row)
+        ]
         return {record.device_id: record for record in records}
 
     async def _ensure_ready(self) -> None:
@@ -78,6 +95,8 @@ class EidolonDataDeviceRegistryRepository:
         self._schema_ready = True
 
     async def _record_from_row(self, row) -> DeviceRegistryRecord:
+        # Only reached for Hub-managed rows (see _is_hub_managed), which always
+        # carry a hub_registry block written by Hub's register/approve path.
         hub = dict((row.metadata_json or {}).get("hub_registry") or {})
         psk_hash = None
         if row.auth_type == "psk" and row.secret_ref and row.secret_ref.startswith("psk_hash:"):
