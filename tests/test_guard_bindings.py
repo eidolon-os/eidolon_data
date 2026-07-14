@@ -15,9 +15,9 @@ async def store(tmp_path):
         await value.close()
 
 
-async def test_guard_binding_is_single_active_and_has_no_workspace_artifacts(store: DataStore) -> None:
+async def test_guard_bindings_are_multi_guard_and_auto_provision_isolated_workspaces(store: DataStore) -> None:
     await store.owners.create(owner_id="owner-1", display_name="Owner")
-    for device_id in ("atk-1", "atk-2"):
+    for device_id in ("atk-1", "atk-2", "atk-3"):
         await store.devices.create_device(
             device_id=device_id,
             owner_id=None,
@@ -31,9 +31,12 @@ async def test_guard_binding_is_single_active_and_has_no_workspace_artifacts(sto
     )
     assert guard.kind == "guard"
     assert guard.is_master is False
-    assert guard.current_genome_id is None
-    assert guard.default_memory_realm_id is None
-    assert await store.memory_repo.list_realms_for_owner("owner-1") == []
+    assert guard.companion_type == "guard"
+    assert guard.current_genome_id is not None
+    assert guard.default_memory_realm_id is not None
+    assert [realm.realm_id for realm in await store.memory_repo.list_realms_for_owner("owner-1")] == [
+        guard.default_memory_realm_id
+    ]
 
     first = await store.guard_bindings.claim(
         owner_id="owner-1",
@@ -49,16 +52,21 @@ async def test_guard_binding_is_single_active_and_has_no_workspace_artifacts(sto
     ]
     assert (await store.devices.get_device("atk-1")).bound_companion_id == "guard-1"
 
-    with pytest.raises(ValueError, match="already has an active"):
-        await store.guard_bindings.claim(
-            owner_id="owner-1",
-            device_id="atk-2",
-            guard_companion_id="guard-1",
-        )
+    second = await store.guard_bindings.claim(
+        owner_id="owner-1",
+        device_id="atk-2",
+        guard_companion_id="guard-2",
+    )
+    assert second.state == "active"
+    second_guard = await store.companions.get("guard-2")
+    assert second_guard is not None
+    assert second_guard.companion_type == "guard"
+    assert second_guard.current_genome_id != guard.current_genome_id
+    assert second_guard.default_memory_realm_id != guard.default_memory_realm_id
 
     replacement = await store.guard_bindings.claim(
         owner_id="owner-1",
-        device_id="atk-2",
+        device_id="atk-3",
         guard_companion_id="guard-1",
         replace=True,
     )
@@ -74,6 +82,7 @@ async def test_guard_binding_is_single_active_and_has_no_workspace_artifacts(sto
         (2, "stopped"),
     ]
     assert (await store.devices.get_device("atk-1")).owner_id is None
+    assert (await store.guard_bindings.get(second.binding_id)).state == "active"
 
 
 async def test_only_guard_capable_pending_devices_can_be_claimed(store: DataStore) -> None:
@@ -95,6 +104,43 @@ async def test_only_guard_capable_pending_devices_can_be_claimed(store: DataStor
             device_id="atk-plain",
             guard_companion_id="guard-1",
         )
+
+
+async def test_reclaim_reuses_owner_device_binding_identity(store: DataStore) -> None:
+    await store.owners.create(owner_id="owner-1", display_name="Owner")
+    await store.devices.create_device(
+        device_id="atk-1",
+        owner_id=None,
+        capabilities_json={"guard": {"enabled": True, "protocol_versions": [1]}},
+    )
+    first = await store.guard_bindings.claim(
+        owner_id="owner-1",
+        device_id="atk-1",
+        guard_companion_id="guard-1",
+    )
+    await store.guard_bindings.disable(first.binding_id)
+
+    reclaimed = await store.guard_bindings.claim(
+        owner_id="owner-1",
+        device_id="atk-1",
+        guard_companion_id="guard-1",
+    )
+
+    assert reclaimed.binding_id == first.binding_id
+    assert reclaimed.state == "active"
+    assert reclaimed.config_revision == 2
+    assert reclaimed.runtime_revision == 3
+    assert reclaimed.disabled_at is None
+    assert len(await store.guard_bindings.list_for_owner("owner-1")) == 1
+    deliveries = await store.guard_runtime_deliveries.list_for_binding(first.binding_id)
+    assert [
+        (row.runtime_revision, row.desired_runtime_state)
+        for row in deliveries
+    ] == [
+        (1, "running"),
+        (2, "stopped"),
+        (3, "running"),
+    ]
 
 
 async def test_guard_policy_config_is_normalized_and_revision_checked(store: DataStore) -> None:

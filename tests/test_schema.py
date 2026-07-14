@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
 from sqlalchemy import inspect
 
 from eidolon_data import DataSettings, DataStore
@@ -51,6 +54,9 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
             "runtime_callers",
             "runtime_sessions",
             "body_commands",
+            "owner_face_profile_revisions",
+            "owner_face_references",
+            "guard_owner_face_profile_deliveries",
         }.issubset(set(table_names))
         assert "persona_presets" not in table_names
         assert "credentials" not in table_names
@@ -91,5 +97,48 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
             constraint["name"] == "uq_messages_turn_seq"
             for constraint in unique_constraints
         )
+    finally:
+        await store.close()
+
+
+async def test_init_schema_rejects_legacy_owner_face_tables(tmp_path) -> None:
+    db_path = tmp_path / "legacy-owner-face.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE owner_face_profile_revisions (
+                profile_revision_id TEXT PRIMARY KEY,
+                created_by TEXT NOT NULL
+            )
+            """
+        )
+
+    store = DataStore.open(DataSettings(sqlite_path=str(db_path)))
+    try:
+        with pytest.raises(RuntimeError, match="non-canonical Guard schema") as exc_info:
+            await store.init_schema()
+        assert "created_by" in str(exc_info.value)
+    finally:
+        await store.close()
+
+
+async def test_init_schema_rejects_legacy_guard_action_table(tmp_path) -> None:
+    db_path = tmp_path / "legacy-guard-action.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE guard_policy_actions (
+                action_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL
+            )
+            """
+        )
+
+    store = DataStore.open(DataSettings(sqlite_path=str(db_path)))
+    try:
+        with pytest.raises(RuntimeError, match="non-canonical Guard schema") as exc_info:
+            await store.init_schema()
+        assert "guard_policy_actions missing columns" in str(exc_info.value)
+        assert "fact_type" in str(exc_info.value)
     finally:
         await store.close()

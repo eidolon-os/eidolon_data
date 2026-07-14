@@ -30,6 +30,7 @@ from eidolon_data.schema.models import (
 WEB_BODY_KIND = "web"
 COMPANION_TYPE_MASTER = "master"
 COMPANION_TYPE_SLAVE = "slave"
+COMPANION_TYPE_GUARD = "guard"
 
 
 def _web_body_device_id(companion_id: str) -> str:
@@ -42,7 +43,7 @@ def _companion_type_from_master(is_master: bool) -> str:
 
 def _companion_type(row: CompanionRow) -> str:
     value = str(getattr(row, "companion_type", "") or "").strip()
-    if value in {COMPANION_TYPE_MASTER, COMPANION_TYPE_SLAVE}:
+    if value in {COMPANION_TYPE_MASTER, COMPANION_TYPE_SLAVE, COMPANION_TYPE_GUARD}:
         return value
     return _companion_type_from_master(bool(getattr(row, "is_master", False)))
 

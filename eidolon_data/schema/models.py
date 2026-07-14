@@ -190,9 +190,14 @@ class GuardBindingRow(Base):
             name="fk_guard_bindings_owner_guard_companion",
             ondelete="CASCADE",
         ),
-        Index(
-            "uq_guard_bindings_owner_active",
+        UniqueConstraint(
             "owner_id",
+            "device_id",
+            name="uq_guard_bindings_owner_device",
+        ),
+        Index(
+            "uq_guard_bindings_guard_companion_active",
+            "guard_companion_id",
             unique=True,
             sqlite_where=text("state = 'active'"),
             postgresql_where=text("state = 'active'"),
@@ -299,6 +304,128 @@ class GuardRuntimeDeliveryRow(Base):
         UniqueConstraint("binding_id", "runtime_revision", name="uq_guard_runtime_delivery_revision"),
         Index("ix_guard_runtime_deliveries_device_status", "device_id", "status"),
         Index("ix_guard_runtime_deliveries_binding_created", "binding_id", "created_at"),
+    )
+
+
+class OwnerFaceProfileRevisionRow(Base):
+    """One immutable-on-activation Owner Face Profile revision."""
+
+    __tablename__ = "owner_face_profile_revisions"
+
+    profile_revision_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    profile_id: Mapped[str] = mapped_column(String(64))
+    owner_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE")
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    desired_state: Mapped[str] = mapped_column(String(16), default="active")
+    model_id: Mapped[str | None] = mapped_column(String(96))
+    preprocessing_version: Mapped[str | None] = mapped_column(String(96))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("profile_id", "revision", name="uq_owner_face_profile_revision"),
+        UniqueConstraint("owner_id", "revision", name="uq_owner_face_owner_revision"),
+        Index(
+            "uq_owner_face_profile_owner_desired",
+            "owner_id",
+            unique=True,
+            sqlite_where=text("state = 'desired'"),
+            postgresql_where=text("state = 'desired'"),
+        ),
+        CheckConstraint("revision > 0", name="ck_owner_face_profile_revision_positive"),
+        CheckConstraint(
+            "state IN ('draft', 'desired', 'superseded')",
+            name="ck_owner_face_profile_state",
+        ),
+        CheckConstraint(
+            "desired_state IN ('active', 'cleared')",
+            name="ck_owner_face_profile_desired_state",
+        ),
+        CheckConstraint(
+            "(desired_state = 'active' AND model_id IS NOT NULL "
+            "AND preprocessing_version IS NOT NULL) OR "
+            "(desired_state = 'cleared' AND model_id IS NULL "
+            "AND preprocessing_version IS NULL)",
+            name="ck_owner_face_profile_model_state",
+        ),
+    )
+
+
+class OwnerFaceReferenceRow(Base):
+    """Pose-labelled reference linked to normalized object metadata."""
+
+    __tablename__ = "owner_face_references"
+
+    reference_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    profile_revision_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("owner_face_profile_revisions.profile_revision_id", ondelete="CASCADE"),
+    )
+    pose: Mapped[str] = mapped_column(String(16))
+    content_type: Mapped[str] = mapped_column(String(32))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    storage_key: Mapped[str] = mapped_column(String(256), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("profile_revision_id", "pose", name="uq_owner_face_reference_pose"),
+        CheckConstraint(
+            "pose IN ('front', 'left', 'right', 'down', 'up')",
+            name="ck_owner_face_reference_pose",
+        ),
+        CheckConstraint(
+            "content_type = 'image/jpeg'",
+            name="ck_owner_face_reference_content_type",
+        ),
+        CheckConstraint("size_bytes > 0", name="ck_owner_face_reference_size_positive"),
+    )
+
+
+class GuardOwnerFaceProfileDeliveryRow(Base):
+    """Durable convergence of one profile revision to one Guard binding."""
+
+    __tablename__ = "guard_owner_face_profile_deliveries"
+
+    delivery_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    binding_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("guard_bindings.binding_id", ondelete="CASCADE")
+    )
+    profile_revision_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("owner_face_profile_revisions.profile_revision_id", ondelete="CASCADE"),
+    )
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    command_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "binding_id",
+            "profile_revision_id",
+            name="uq_guard_owner_face_profile_delivery_revision",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'dispatching', 'dispatched', 'applied', "
+            "'failed', 'superseded')",
+            name="ck_guard_owner_face_profile_delivery_status",
+        ),
+        CheckConstraint("attempt_count >= 0", name="ck_guard_owner_face_attempt_count"),
+        Index(
+            "ix_guard_owner_face_profile_deliveries_binding_created",
+            "binding_id",
+            "created_at",
+        ),
     )
 
 

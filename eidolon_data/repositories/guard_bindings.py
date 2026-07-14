@@ -2,18 +2,35 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from uuid import uuid4
 
+from eidolon_sdk.biz.guard import normalize_guard_policy_config, normalize_guard_runtime_config
+from eidolon_sdk.biz.persona import (
+    PERSONA_GENOME_SCHEMA,
+    PERSONA_REALIZER,
+    build_default_persona_genome,
+    persona_genome_hash,
+    persona_genome_to_json,
+)
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from eidolon_data.db.base import utc_now
 from eidolon_data.repositories.base import Repository
 from eidolon_data.repositories.guard_runtime_deliveries import enqueue_runtime_delivery
-from eidolon_data.schema.models import CompanionRow, DeviceRow, GuardBindingRow, OwnerRow
-from eidolon_sdk.biz.guard import normalize_guard_policy_config, normalize_guard_runtime_config
+from eidolon_data.repositories.owner_face_profiles import enqueue_desired_profile_for_binding
+from eidolon_data.schema.models import (
+    CompanionRow,
+    DeviceRow,
+    GuardBindingRow,
+    MemoryRealmRow,
+    OwnerRow,
+    PersonaGenomeRow,
+)
 
 GUARD_COMPANION_KIND = "guard"
+GUARD_COMPANION_TYPE = "guard"
 ACTIVE_GUARD_BINDING_STATE = "active"
 _TERMINAL_STATES = {"disabled", "revoked", "replaced"}
 GUARD_RUNTIME_DESIRED_RUNNING = "running"
@@ -64,6 +81,12 @@ class GuardBindingsRepository(Repository):
             return await session.get(GuardBindingRow, binding_id)
 
     async def get_active_for_owner(self, owner_id: str) -> GuardBindingRow | None:
+        """Compatibility lookup for callers that only need one active Guard.
+
+        Owners may now have multiple active Guards.  New code should use
+        ``list_for_owner`` and select deliberately; this method returns the
+        most recently activated binding for legacy read-only callers.
+        """
         async with self._session_factory() as session:
             return await session.scalar(
                 select(GuardBindingRow)
@@ -72,6 +95,7 @@ class GuardBindingsRepository(Repository):
                     GuardBindingRow.state == ACTIVE_GUARD_BINDING_STATE,
                 )
                 .order_by(GuardBindingRow.activated_at.desc())
+                .limit(1)
             )
 
     async def get_active_for_device(self, device_id: str) -> GuardBindingRow | None:
@@ -112,6 +136,7 @@ class GuardBindingsRepository(Repository):
                 session.add(row)
             else:
                 _validate_guard_companion(row, owner_id)
+            await _ensure_guard_workspace(session, row)
             await session.commit()
             await session.refresh(row)
             return row
@@ -143,6 +168,7 @@ class GuardBindingsRepository(Repository):
                 )
                 session.add(companion)
             _validate_guard_companion(companion, owner_id)
+            await _ensure_guard_workspace(session, companion)
             device = await session.get(DeviceRow, device_id)
             if device is None:
                 raise KeyError(f"device not found: {device_id}")
@@ -151,9 +177,9 @@ class GuardBindingsRepository(Repository):
             if device.owner_id is not None and device.owner_id != owner_id:
                 raise ValueError(f"device {device_id!r} already belongs to owner {device.owner_id!r}")
 
-            current = await session.scalar(
+            companion_current = await session.scalar(
                 select(GuardBindingRow).where(
-                    GuardBindingRow.owner_id == owner_id,
+                    GuardBindingRow.guard_companion_id == guard_companion_id,
                     GuardBindingRow.state == ACTIVE_GUARD_BINDING_STATE,
                 )
             )
@@ -163,24 +189,42 @@ class GuardBindingsRepository(Repository):
                     GuardBindingRow.state == ACTIVE_GUARD_BINDING_STATE,
                 )
             )
-            if current is not None and current.device_id == device_id:
-                return current
-            if current is not None and not replace:
-                raise ValueError("owner already has an active guard; set replace=true to replace it")
+            existing_pair = await session.scalar(
+                select(GuardBindingRow)
+                .where(
+                    GuardBindingRow.owner_id == owner_id,
+                    GuardBindingRow.device_id == device_id,
+                )
+                .order_by(GuardBindingRow.updated_at.desc())
+            )
+            if companion_current is not None and companion_current.device_id == device_id:
+                return companion_current
+            if companion_current is not None and not replace:
+                raise ValueError(
+                    "guard companion already has an active device; set replace=true to replace it"
+                )
             if device_current is not None and device_current.owner_id != owner_id:
                 raise ValueError(f"device {device_id!r} already has an active guard binding")
+            if (
+                device_current is not None
+                and device_current.guard_companion_id != guard_companion_id
+            ):
+                raise ValueError(
+                    f"device {device_id!r} is already bound to guard companion "
+                    f"{device_current.guard_companion_id!r}"
+                )
 
             now = utc_now()
-            revision = 1
-            if current is not None:
-                current.state = "replaced"
-                current.disabled_at = now
-                current.desired_runtime_state = GUARD_RUNTIME_DESIRED_STOPPED
-                current.runtime_revision += 1
-                current.updated_at = now
-                enqueue_runtime_delivery(session, current)
-                revision = current.config_revision + 1
-                old_device = await session.get(DeviceRow, current.device_id)
+            next_config_revision = 1
+            if companion_current is not None:
+                companion_current.state = "replaced"
+                companion_current.disabled_at = now
+                companion_current.desired_runtime_state = GUARD_RUNTIME_DESIRED_STOPPED
+                companion_current.runtime_revision += 1
+                companion_current.updated_at = now
+                enqueue_runtime_delivery(session, companion_current)
+                next_config_revision = companion_current.config_revision + 1
+                old_device = await session.get(DeviceRow, companion_current.device_id)
                 if old_device is not None:
                     old_device.owner_id = None
                     old_device.bound_companion_id = None
@@ -195,23 +239,43 @@ class GuardBindingsRepository(Repository):
             device.approved_by = device.approved_by or "admin:guard-claim"
             device.revoked_at = None
             device.updated_at = now
-            row = GuardBindingRow(
-                binding_id=f"gb_{uuid4().hex}",
-                owner_id=owner_id,
-                guard_companion_id=guard_companion_id,
-                device_id=device_id,
-                state=ACTIVE_GUARD_BINDING_STATE,
-                policy_id=policy_id,
-                config_revision=revision,
-                config_json=normalized_config,
-                runtime_revision=1,
-                runtime_config_json=normalized_runtime_config,
-                desired_runtime_state=GUARD_RUNTIME_DESIRED_RUNNING,
-                status_json={"subscriber": "mission_control_fixture"},
-                activated_at=now,
-            )
-            session.add(row)
+            if existing_pair is None:
+                row = GuardBindingRow(
+                    binding_id=f"gb_{uuid4().hex}",
+                    owner_id=owner_id,
+                    guard_companion_id=guard_companion_id,
+                    device_id=device_id,
+                    state=ACTIVE_GUARD_BINDING_STATE,
+                    policy_id=policy_id,
+                    config_revision=next_config_revision,
+                    config_json=normalized_config,
+                    runtime_revision=1,
+                    runtime_config_json=normalized_runtime_config,
+                    desired_runtime_state=GUARD_RUNTIME_DESIRED_RUNNING,
+                    status_json={"subscriber": "mission_control_fixture"},
+                    activated_at=now,
+                )
+                session.add(row)
+            else:
+                row = existing_pair
+                row.guard_companion_id = guard_companion_id
+                row.state = ACTIVE_GUARD_BINDING_STATE
+                row.policy_id = policy_id
+                row.config_revision = max(
+                    row.config_revision + 1,
+                    next_config_revision,
+                )
+                row.config_json = normalized_config
+                row.runtime_revision += 1
+                row.runtime_config_json = normalized_runtime_config
+                row.desired_runtime_state = GUARD_RUNTIME_DESIRED_RUNNING
+                row.status_json = {"subscriber": "mission_control_fixture"}
+                row.activated_at = now
+                row.disabled_at = None
+                row.revoked_at = None
+                row.updated_at = now
             enqueue_runtime_delivery(session, row)
+            await enqueue_desired_profile_for_binding(session, row)
             try:
                 await session.commit()
             except IntegrityError as exc:
@@ -330,8 +394,8 @@ def _validate_guard_companion(companion: CompanionRow, owner_id: str) -> None:
         raise ValueError(f"companion {companion.companion_id!r} is not a guard")
     if companion.status != "active" or companion.is_master:
         raise ValueError(f"guard companion {companion.companion_id!r} is not an active non-master guard")
-    if companion.current_genome_id or companion.default_memory_realm_id:
-        raise ValueError("guard companions cannot own persona genomes or memory realms")
+    if companion.companion_type not in {GUARD_COMPANION_TYPE, "slave"}:
+        raise ValueError(f"guard companion {companion.companion_id!r} has an invalid companion type")
 
 
 def _new_guard_companion(*, owner_id: str, companion_id: str, display_name: str) -> CompanionRow:
@@ -342,11 +406,121 @@ def _new_guard_companion(*, owner_id: str, companion_id: str, display_name: str)
         kind=GUARD_COMPANION_KIND,
         status="active",
         is_master=False,
-        companion_type="slave",
-        # Guard companions do not own persona, agent, or memory state.
+        companion_type=GUARD_COMPANION_TYPE,
+        # Guard companions are non-conversational, but still receive a complete
+        # workspace so generic companion-scoped services can resolve safely.
         current_genome_id=None,
         default_memory_realm_id=None,
         profile_json={},
         runtime_config_json={},
-        metadata_json={"guard_control_plane": True},
+        metadata_json={"guard_control_plane": True, "runtime_role": "guard"},
     )
+
+
+def _guard_workspace_ids(companion_id: str) -> tuple[str, str]:
+    """Stable, bounded identifiers for a Guard's compatibility workspace."""
+    digest = sha256(companion_id.encode("utf-8")).hexdigest()[:40]
+    return f"g_guard_{digest}", f"r_guard_{digest}"
+
+
+async def _ensure_guard_workspace(session, companion: CompanionRow) -> None:
+    """Provide the standard companion prerequisites without making Guard a body.
+
+    Several generic read paths intentionally require a committed genome and an
+    active default memory realm.  Guard's own runtime never consumes either,
+    but provisioning them atomically with its identity prevents those generic
+    paths from failing and keeps each Guard isolated from the owner's primary
+    companion workspace.
+    """
+    companion.companion_type = GUARD_COMPANION_TYPE
+    companion.metadata_json = {
+        **(companion.metadata_json or {}),
+        "guard_control_plane": True,
+        "runtime_role": "guard",
+        "workspace_mode": "compatibility",
+    }
+    genome_id, realm_id = _guard_workspace_ids(companion.companion_id)
+
+    genome = None
+    if companion.current_genome_id:
+        genome = await session.get(PersonaGenomeRow, companion.current_genome_id)
+        if genome is not None and genome.companion_id != companion.companion_id:
+            raise ValueError("guard companion genome belongs to another companion")
+    if genome is None:
+        genome = await session.scalar(
+            select(PersonaGenomeRow)
+            .where(
+                PersonaGenomeRow.companion_id == companion.companion_id,
+                PersonaGenomeRow.status == "committed",
+            )
+            .order_by(PersonaGenomeRow.version.desc())
+        )
+    if genome is None:
+        existing = await session.get(PersonaGenomeRow, genome_id)
+        if existing is not None and existing.companion_id != companion.companion_id:
+            raise ValueError("generated guard genome id is already in use")
+        if existing is None:
+            normalized = persona_genome_to_json(
+                build_default_persona_genome(
+                    name=companion.display_name or companion.companion_id,
+                    archetype="companion",
+                    origin="guard_workspace_auto_provision",
+                )
+            )
+            normalized["provenance"] = {
+                **dict(normalized.get("provenance") or {}),
+                "owner_id": companion.owner_id,
+                "companion_id": companion.companion_id,
+                "runtime_role": "guard",
+            }
+            existing = PersonaGenomeRow(
+                genome_id=genome_id,
+                companion_id=companion.companion_id,
+                version=1,
+                status="committed",
+                schema_version=PERSONA_GENOME_SCHEMA,
+                genome_hash=persona_genome_hash(normalized),
+                realizer_version=PERSONA_REALIZER,
+                source_json={"source_type": "guard_workspace_auto_provision"},
+                genome_json=normalized,
+                change_summary="Guard compatibility workspace genome",
+            )
+            session.add(existing)
+        genome = existing
+    companion.current_genome_id = genome.genome_id
+
+    realm = None
+    if companion.default_memory_realm_id:
+        realm = await session.get(MemoryRealmRow, companion.default_memory_realm_id)
+        if realm is not None and (
+            realm.companion_id != companion.companion_id or realm.owner_id != companion.owner_id
+        ):
+            raise ValueError("guard companion memory realm belongs outside its owner")
+    if realm is None:
+        realm = await session.scalar(
+            select(MemoryRealmRow)
+            .where(
+                MemoryRealmRow.companion_id == companion.companion_id,
+                MemoryRealmRow.owner_id == companion.owner_id,
+                MemoryRealmRow.status == "active",
+            )
+            .order_by(MemoryRealmRow.created_at.desc())
+        )
+    if realm is None:
+        existing = await session.get(MemoryRealmRow, realm_id)
+        if existing is not None and (
+            existing.companion_id != companion.companion_id or existing.owner_id != companion.owner_id
+        ):
+            raise ValueError("generated guard memory realm id is already in use")
+        if existing is None:
+            existing = MemoryRealmRow(
+                realm_id=realm_id,
+                owner_id=companion.owner_id,
+                companion_id=companion.companion_id,
+                engine="mempalace",
+                policy_json={"scope": "guard", "recall": "guard_isolated"},
+                status="active",
+            )
+            session.add(existing)
+        realm = existing
+    companion.default_memory_realm_id = realm.realm_id

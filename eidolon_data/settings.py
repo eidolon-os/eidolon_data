@@ -23,12 +23,17 @@ def default_sqlite_path() -> Path:
     return default_data_dir() / "eidolon.sqlite3"
 
 
+def default_object_store_path() -> Path:
+    return default_data_dir() / "objects"
+
+
 class DataSettings(BaseSettings):
     """Runtime settings for repository and service construction."""
 
     model_config = SettingsConfigDict(env_prefix="EIDOLON_DATA_", extra="ignore")
 
     sqlite_path: str = Field(default_factory=lambda: str(default_sqlite_path()))
+    object_store_path: str = Field(default_factory=lambda: str(default_object_store_path()))
     echo_sql: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
@@ -79,6 +84,8 @@ def _load_yaml(settings_yaml: str | Path | None) -> dict[str, Any]:
 def _apply_env_overrides(data: dict[str, Any]) -> None:
     if "EIDOLON_DATA_SQLITE_PATH" in os.environ:
         data["sqlite_path"] = os.environ["EIDOLON_DATA_SQLITE_PATH"]
+    if "EIDOLON_DATA_OBJECT_STORE_PATH" in os.environ:
+        data["object_store_path"] = os.environ["EIDOLON_DATA_OBJECT_STORE_PATH"]
     if "EIDOLON_DATA_ECHO_SQL" in os.environ:
         data["echo_sql"] = _parse_bool(os.environ["EIDOLON_DATA_ECHO_SQL"])
 

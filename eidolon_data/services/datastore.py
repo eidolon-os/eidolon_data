@@ -15,10 +15,12 @@ from eidolon_data.repositories import (
     DevicesRepository,
     EventsRepository,
     GuardBindingsRepository,
+    GuardOwnerFaceProfileDeliveriesRepository,
     GuardPolicyActionsRepository,
     GuardRuntimeDeliveriesRepository,
     JobsRepository,
     MemoryRepository,
+    OwnerFaceProfilesRepository,
     OwnersRepository,
     PersonaRepository,
     RuntimeCallersRepository,
@@ -27,6 +29,7 @@ from eidolon_data.repositories import (
 from eidolon_data.services.companion import CompanionDeletionService
 from eidolon_data.services.maintenance import MaintenanceService
 from eidolon_data.services.memory_service import MemoryService
+from eidolon_data.services.object_storage import LocalObjectStorage
 from eidolon_data.services.owner_data import OwnerDataService
 from eidolon_data.services.owner_workspace import CompanionWorkspaceService, OwnerService
 from eidolon_data.services.persona_service import PersonaService
@@ -92,6 +95,20 @@ class DataStore:
     @property
     def guard_runtime_deliveries(self) -> GuardRuntimeDeliveriesRepository:
         return GuardRuntimeDeliveriesRepository(self.session_factory)
+
+    @property
+    def owner_face_profiles(self) -> OwnerFaceProfilesRepository:
+        return OwnerFaceProfilesRepository(self.session_factory)
+
+    @property
+    def guard_owner_face_profile_deliveries(
+        self,
+    ) -> GuardOwnerFaceProfileDeliveriesRepository:
+        return GuardOwnerFaceProfileDeliveriesRepository(self.session_factory)
+
+    @property
+    def object_storage(self) -> LocalObjectStorage:
+        return LocalObjectStorage(self.settings.object_store_path)
 
     @property
     def body_commands(self) -> BodyCommandsRepository:
