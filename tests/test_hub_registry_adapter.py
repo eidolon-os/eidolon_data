@@ -90,6 +90,20 @@ async def test_hub_device_registry_adapter_round_trips_device_record(tmp_path) -
         assert row.metadata_json["claimed"] is True
         assert row.capabilities_json == {"ops": ["sound.play"]}
         assert row.interaction_mode == "voice"
+
+        await repo.put(
+            DeviceRegistryRecord(
+                device_id="device-1",
+                name="Desk Body",
+                kind="voice_body",
+                enabled=True,
+                capabilities=[],
+                capabilities_declared=True,
+            )
+        )
+        row = await store.devices.get_device("device-1")
+        assert row is not None
+        assert row.capabilities_json == {"ops": []}
     finally:
         await store.close()
 

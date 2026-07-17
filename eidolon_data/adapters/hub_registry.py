@@ -123,7 +123,7 @@ def _capabilities_from_record(record: DeviceRegistryRecord, existing) -> dict:
     """Persist a self-declared manifest without treating it as an owner claim."""
     raw = getattr(existing, "capabilities_json", None) if existing is not None else None
     data = dict(raw) if isinstance(raw, dict) else {}
-    if record.capabilities:
+    if record.capabilities_declared:
         data["ops"] = list(record.capabilities)
     declaration = (record.metadata or {}).get("guard_manifest")
     if isinstance(declaration, dict) and declaration.get("enabled") is True:
