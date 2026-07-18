@@ -29,7 +29,7 @@ class BodyCommandsRepository(Repository):
         payload_json: dict[str, Any] | None = None,
         envelope_json: dict[str, Any] | None = None,
         ack_json: dict[str, Any] | None = None,
-        result_json: dict[str, Any] | None = None,
+        result_json: Any = None,
         ttl_ms: int = 30_000,
         qos: str = "ack",
         priority: str = "normal",
@@ -79,7 +79,7 @@ class BodyCommandsRepository(Repository):
         status: str,
         error: str = "",
         ack_json: dict[str, Any] | None = None,
-        result_json: dict[str, Any] | None = None,
+        result_json: Any = None,
         updated_at: datetime | None = None,
     ) -> BodyCommandRow | None:
         async with self._session_factory() as session:

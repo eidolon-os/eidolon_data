@@ -46,7 +46,9 @@ def _genome(name: str, *, base_genome_id: str | None = None) -> dict:
     )
 
 
-def _proposal(*, owner_id: str, companion_id: str, base, genome_id: str) -> PersonaEvolutionProposalEvent:
+def _proposal(
+    *, owner_id: str, companion_id: str, base, genome_id: str
+) -> PersonaEvolutionProposalEvent:
     return PersonaEvolutionProposalEvent(
         proposal_id=f"proposal-{genome_id}",
         owner_id=owner_id,
@@ -168,15 +170,17 @@ async def test_repository_workflow_round_trips_core_entities(store: DataStore) -
         "command-1",
         status="accepted",
         ack_json={"code": "OK"},
+        result_json=True,
     )
     assert updated_command is not None
     assert updated_command.ack_json["code"] == "OK"
     stored_command = await store.body_commands.get_command("command-1")
     assert stored_command is not None
     assert stored_command.status == "accepted"
-    assert [item.command_id for item in await store.body_commands.list_for_device(device.device_id)] == [
-        "command-1"
-    ]
+    assert stored_command.result_json is True
+    assert [
+        item.command_id for item in await store.body_commands.list_for_device(device.device_id)
+    ] == ["command-1"]
 
     conversation = await store.conversations.create_conversation(
         conversation_id="conversation-1",
@@ -208,7 +212,9 @@ async def test_repository_workflow_round_trips_core_entities(store: DataStore) -
         role="user",
         content="hello",
     )
-    messages = await store.conversations.list_messages_for_conversation(conversation.conversation_id)
+    messages = await store.conversations.list_messages_for_conversation(
+        conversation.conversation_id
+    )
     assert [message.content for message in messages] == ["hello"]
     assert [message.seq for message in messages] == [0]
 
@@ -477,7 +483,9 @@ async def test_ensure_web_body_is_idempotent(store: DataStore) -> None:
     assert len(web_bodies) == 1
 
 
-async def test_conversation_source_device_is_independent_from_body_binding(store: DataStore) -> None:
+async def test_conversation_source_device_is_independent_from_body_binding(
+    store: DataStore,
+) -> None:
     await store.owners.create(owner_id="owner-conv", display_name="Owner")
     await store.companions.create(companion_id="companion-a", owner_id="owner-conv")
     await store.companions.create(companion_id="companion-b", owner_id="owner-conv")
@@ -538,10 +546,14 @@ async def test_persona_genome_proposal_requires_current_base(store: DataStore) -
     assert activated.status == "committed"
     companion = await store.companions.get(initial.companion.companion_id)
     assert companion.current_genome_id == proposal.genome_id
-    assert (await store.persona.get_current_genome(initial.companion.companion_id)).genome_id == proposal.genome_id
+    assert (
+        await store.persona.get_current_genome(initial.companion.companion_id)
+    ).genome_id == proposal.genome_id
 
 
-async def test_stale_persona_genome_proposal_does_not_replace_current_genome(store: DataStore) -> None:
+async def test_stale_persona_genome_proposal_does_not_replace_current_genome(
+    store: DataStore,
+) -> None:
     await store.owner_service.create_owner(owner_id="owner-stale", display_name="Owner")
     initial = await store.workspace_provisioning.provision_workspace(
         owner_id="owner-stale",
@@ -587,14 +599,24 @@ async def test_reset_to_origin_returns_to_authored_v1(store: DataStore) -> None:
     )
     # v1 is the authored origin (base points at itself); v2 is evolution drift.
     await store.persona.create_genome(
-        genome_id="g-reset-1", companion_id="c-reset", owner_id="owner-reset",
-        event_id="ev-r1", version=1, base_genome_id="g-reset-1",
-        genome_json=_genome("v1", base_genome_id="g-reset-1"), status="committed",
+        genome_id="g-reset-1",
+        companion_id="c-reset",
+        owner_id="owner-reset",
+        event_id="ev-r1",
+        version=1,
+        base_genome_id="g-reset-1",
+        genome_json=_genome("v1", base_genome_id="g-reset-1"),
+        status="committed",
     )
     await store.persona.create_genome(
-        genome_id="g-reset-2", companion_id="c-reset", owner_id="owner-reset",
-        event_id="ev-r2", version=2, base_genome_id="g-reset-1",
-        genome_json=_genome("v2-evolved", base_genome_id="g-reset-1"), status="committed",
+        genome_id="g-reset-2",
+        companion_id="c-reset",
+        owner_id="owner-reset",
+        event_id="ev-r2",
+        version=2,
+        base_genome_id="g-reset-1",
+        genome_json=_genome("v2-evolved", base_genome_id="g-reset-1"),
+        status="committed",
     )
     assert (await store.companions.get("c-reset")).current_genome_id == "g-reset-2"
 

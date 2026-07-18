@@ -52,7 +52,9 @@ class CompanionRow(Base):
     # The owner's primary companion. Master companions default-get a local web
     # body; any companion (master or not) can associate more bodies on demand.
     is_master: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
-    companion_type: Mapped[str] = mapped_column(String(16), default="slave", nullable=False, index=True)
+    companion_type: Mapped[str] = mapped_column(
+        String(16), default="slave", nullable=False, index=True
+    )
     current_genome_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey(
@@ -98,7 +100,9 @@ class PersonaGenomeRow(Base):
     base_genome_id: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("persona_genomes.genome_id", ondelete="SET NULL"), index=True
     )
-    schema_version: Mapped[str] = mapped_column(String(64), default="eidolon.persona_genome", index=True)
+    schema_version: Mapped[str] = mapped_column(
+        String(64), default="eidolon.persona_genome", index=True
+    )
     genome_hash: Mapped[str] = mapped_column(String(80), index=True)
     realizer_version: Mapped[str] = mapped_column(String(64), default="eidolon.persona_realizer")
     applied_event_id: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -301,7 +305,9 @@ class GuardRuntimeDeliveryRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     __table_args__ = (
-        UniqueConstraint("binding_id", "runtime_revision", name="uq_guard_runtime_delivery_revision"),
+        UniqueConstraint(
+            "binding_id", "runtime_revision", name="uq_guard_runtime_delivery_revision"
+        ),
         Index("ix_guard_runtime_deliveries_device_status", "device_id", "status"),
         Index("ix_guard_runtime_deliveries_binding_created", "binding_id", "created_at"),
     )
@@ -416,8 +422,7 @@ class GuardOwnerFaceProfileDeliveryRow(Base):
             name="uq_guard_owner_face_profile_delivery_revision",
         ),
         CheckConstraint(
-            "status IN ('pending', 'dispatching', 'dispatched', 'applied', "
-            "'failed', 'superseded')",
+            "status IN ('pending', 'dispatching', 'dispatched', 'applied', 'failed', 'superseded')",
             name="ck_guard_owner_face_profile_delivery_status",
         ),
         CheckConstraint("attempt_count >= 0", name="ck_guard_owner_face_attempt_count"),
@@ -451,13 +456,17 @@ class BodyCommandRow(Base):
     payload_json: Mapped[JsonDict] = mapped_column(default=dict)
     envelope_json: Mapped[JsonDict] = mapped_column(default=dict)
     ack_json: Mapped[JsonDict | None] = mapped_column(JSON, default=None)
-    result_json: Mapped[JsonDict | None] = mapped_column(JSON, default=None)
+    result_json: Mapped[Any | None] = mapped_column(JSON, default=None)
     ttl_ms: Mapped[int] = mapped_column(Integer, default=30_000)
     qos: Mapped[str] = mapped_column(String(32), default="ack")
     priority: Mapped[str] = mapped_column(String(32), default="normal")
     error: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     __table_args__ = (
@@ -481,7 +490,9 @@ class RuntimeCallerRow(Base):
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
     metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -516,8 +527,12 @@ class RuntimeSessionRow(Base):
     transport: Mapped[str] = mapped_column(String(64), default="", index=True)
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
     metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -664,8 +679,12 @@ class JobRow(Base):
     progress_json: Mapped[JsonDict] = mapped_column(default=dict)
     result_json: Mapped[JsonDict] = mapped_column(default=dict)
     error_json: Mapped[JsonDict] = mapped_column(default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
@@ -703,7 +722,9 @@ class EventRow(Base):
     payload_json: Mapped[JsonDict] = mapped_column(default=dict)
     # occurred_at = when the real-world event happened; created_at = when the row was recorded.
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=utc_now)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
 
     __table_args__ = (
         Index("ix_events_subject_created", "subject_type", "subject_id", "created_at"),
