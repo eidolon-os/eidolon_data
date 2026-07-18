@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from eidolon_sdk.biz.guard import GuardOwnerFaceProfileApplyResult
-from sqlalchemy import select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from eidolon_data.db.base import utc_now
@@ -104,36 +104,47 @@ async def _get_view(
 
 
 class GuardOwnerFaceProfileDeliveriesRepository(Repository):
+    async def get_by_command_id(
+        self, command_id: str
+    ) -> OwnerFaceProfileDelivery | None:
+        async with self._session_factory() as session:
+            return await _get_view(session, command_id=command_id)
+
     async def list_ready(self, *, limit: int = 50) -> list[OwnerFaceProfileDelivery]:
         now = utc_now()
         async with self._session_factory() as session:
-            await session.execute(
-                update(GuardOwnerFaceProfileDeliveryRow)
-                .where(
-                    GuardOwnerFaceProfileDeliveryRow.status == "dispatching",
-                    GuardOwnerFaceProfileDeliveryRow.lease_expires_at.is_not(None),
-                    GuardOwnerFaceProfileDeliveryRow.lease_expires_at < now,
-                )
-                .values(
-                    status="pending",
-                    lease_expires_at=None,
-                    last_error="dispatch lease expired",
-                    updated_at=now,
-                )
-            )
             results = await session.execute(
                 _delivery_select()
-                .where(GuardOwnerFaceProfileDeliveryRow.status == "pending")
+                .where(
+                    or_(
+                        and_(
+                            GuardOwnerFaceProfileDeliveryRow.status == "pending",
+                            or_(
+                                GuardOwnerFaceProfileDeliveryRow.lease_expires_at.is_(
+                                    None
+                                ),
+                                GuardOwnerFaceProfileDeliveryRow.lease_expires_at <= now,
+                            ),
+                        ),
+                        and_(
+                            GuardOwnerFaceProfileDeliveryRow.status == "dispatching",
+                            GuardOwnerFaceProfileDeliveryRow.lease_expires_at.is_not(
+                                None
+                            ),
+                            GuardOwnerFaceProfileDeliveryRow.lease_expires_at <= now,
+                        ),
+                    ),
+                )
                 .order_by(GuardOwnerFaceProfileDeliveryRow.created_at)
                 .limit(limit)
             )
-            await session.commit()
             return [_view(*result) for result in results]
 
     async def claim_for_dispatch(
         self,
         delivery_id: str,
         *,
+        command_id: str,
         lease_seconds: int = 60,
     ) -> OwnerFaceProfileDelivery | None:
         now = utc_now()
@@ -142,11 +153,30 @@ class GuardOwnerFaceProfileDeliveriesRepository(Repository):
                 update(GuardOwnerFaceProfileDeliveryRow)
                 .where(
                     GuardOwnerFaceProfileDeliveryRow.delivery_id == delivery_id,
-                    GuardOwnerFaceProfileDeliveryRow.status == "pending",
+                    or_(
+                        and_(
+                            GuardOwnerFaceProfileDeliveryRow.status == "pending",
+                            or_(
+                                GuardOwnerFaceProfileDeliveryRow.lease_expires_at.is_(
+                                    None
+                                ),
+                                GuardOwnerFaceProfileDeliveryRow.lease_expires_at <= now,
+                            ),
+                        ),
+                        and_(
+                            GuardOwnerFaceProfileDeliveryRow.status == "dispatching",
+                            GuardOwnerFaceProfileDeliveryRow.lease_expires_at.is_not(
+                                None
+                            ),
+                            GuardOwnerFaceProfileDeliveryRow.lease_expires_at <= now,
+                        ),
+                    ),
                 )
                 .values(
                     status="dispatching",
-                    attempt_count=GuardOwnerFaceProfileDeliveryRow.attempt_count + 1,
+                    command_id=func.coalesce(
+                        GuardOwnerFaceProfileDeliveryRow.command_id, command_id
+                    ),
                     lease_expires_at=now + timedelta(seconds=lease_seconds),
                     updated_at=now,
                 )
@@ -165,10 +195,14 @@ class GuardOwnerFaceProfileDeliveriesRepository(Repository):
     ) -> OwnerFaceProfileDelivery | None:
         async with self._session_factory() as session:
             row = await session.get(GuardOwnerFaceProfileDeliveryRow, delivery_id)
-            if row is None or row.status != "dispatching":
+            if (
+                row is None
+                or row.status != "dispatching"
+                or row.command_id != command_id
+            ):
                 return None
             row.status = "dispatched"
-            row.command_id = command_id
+            row.attempt_count += 1
             row.dispatched_at = utc_now()
             row.lease_expires_at = None
             row.last_error = ""
@@ -181,13 +215,17 @@ class GuardOwnerFaceProfileDeliveriesRepository(Repository):
         delivery_id: str,
         *,
         error: str,
+        retry_after_seconds: float = 0,
     ) -> OwnerFaceProfileDelivery | None:
         async with self._session_factory() as session:
             row = await session.get(GuardOwnerFaceProfileDeliveryRow, delivery_id)
             if row is None or row.status != "dispatching":
                 return None
             row.status = "pending"
-            row.lease_expires_at = None
+            row.command_id = None
+            row.lease_expires_at = utc_now() + timedelta(
+                seconds=max(retry_after_seconds, 0)
+            )
             row.last_error = error[:1024]
             row.updated_at = utc_now()
             await session.commit()
@@ -239,6 +277,8 @@ class GuardOwnerFaceProfileDeliveriesRepository(Repository):
         *,
         error: str,
         max_attempts: int = 5,
+        retry_after_seconds: float = 0,
+        device_attempted: bool = True,
     ) -> OwnerFaceProfileDelivery | None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
@@ -249,11 +289,21 @@ class GuardOwnerFaceProfileDeliveriesRepository(Repository):
             row = await session.get(GuardOwnerFaceProfileDeliveryRow, delivery.delivery_id)
             if row is None:  # pragma: no cover - guarded by the join above
                 return None
+            if not device_attempted and row.attempt_count > 0:
+                # mark_dispatched reserves one execution attempt optimistically.
+                # A command that never received any device ack/result did not
+                # execute on the device, so return that reservation before
+                # evaluating the bounded device-attempt budget.
+                row.attempt_count -= 1
             row.status = "pending" if row.attempt_count < max_attempts else "failed"
             if row.status == "pending":
                 row.command_id = None
                 row.dispatched_at = None
-            row.lease_expires_at = None
+            row.lease_expires_at = (
+                utc_now() + timedelta(seconds=max(retry_after_seconds, 0))
+                if row.status == "pending"
+                else None
+            )
             row.applied_at = None
             row.last_error = error[:1024]
             row.updated_at = utc_now()

@@ -312,9 +312,30 @@ _SPECS: tuple[EventSpec, ...] = (
     EventSpec("guard.presence.candidate", "activity", "hub", "Guard presence candidate"),
     EventSpec("guard.presence.verified", "audit", "hub", "Guard presence verified"),
     EventSpec("guard.presence.absent", "activity", "hub", "Guard presence absent"),
+    EventSpec(
+        "guard.owner_presence.present",
+        "activity",
+        "hub",
+        "Owner presence lease entered",
+        required_payload=("profile_revision", "guard_epoch", "sequence"),
+    ),
+    EventSpec(
+        "guard.owner_presence.absent",
+        "activity",
+        "hub",
+        "Owner presence lease left",
+        required_payload=("profile_revision", "guard_epoch", "sequence"),
+    ),
     EventSpec("guard.policy.evaluated", "audit", "hub", "Guard policy evaluated"),
     EventSpec("guard.policy.action", "audit", "hub", "Guard policy action published"),
     EventSpec("guard.policy.action_ack", "audit", "hub", "Guard policy action acknowledged"),
+    # sense.* perception plane (desktop co-presence). Sibling of guard.*; same
+    # GuardBinding-scoped ingress. attention/session are device-origin (T0);
+    # fatigue/event come from the host Vision Worker (T2).
+    EventSpec("sense.attention", "activity", "hub", "Owner attention state (co-presence)"),
+    EventSpec("sense.session", "activity", "hub", "Focus session summary (co-presence)"),
+    EventSpec("sense.fatigue", "activity", "hub", "Fatigue hint from the vision worker"),
+    EventSpec("sense.event", "activity", "hub", "Scene event from the vision worker"),
 )
 
 CATALOG: dict[str, EventSpec] = {spec.type: spec for spec in _SPECS}

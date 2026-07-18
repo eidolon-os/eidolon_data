@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from eidolon_data import DataSettings, DataStore
@@ -104,6 +106,80 @@ async def test_only_guard_capable_pending_devices_can_be_claimed(store: DataStor
             device_id="atk-plain",
             guard_companion_id="guard-1",
         )
+
+
+async def test_owner_presence_projection_debounces_replay_and_expires_lease(
+    store: DataStore,
+) -> None:
+    await store.owners.create(owner_id="owner-presence", display_name="Owner")
+    await store.devices.create_device(
+        device_id="atk-presence",
+        owner_id=None,
+        capabilities_json={"guard": {"enabled": True, "protocol_versions": [1]}},
+    )
+    binding = await store.guard_bindings.claim(
+        owner_id="owner-presence",
+        device_id="atk-presence",
+        guard_companion_id="guard-presence",
+    )
+    now = datetime(2026, 7, 15, 4, 0, tzinfo=UTC)
+
+    entered = await store.guard_bindings.apply_owner_presence(
+        binding_id=binding.binding_id,
+        state="present",
+        profile_revision=5,
+        correlation_id="op-boot1-r5-e1",
+        guard_epoch=1,
+        sequence=1,
+        lease_ms=30_000,
+        now=now,
+    )
+    assert entered is not None and entered.transition == "entered"
+    assert entered.state == "present"
+
+    stale = await store.guard_bindings.apply_owner_presence(
+        binding_id=binding.binding_id,
+        state="present",
+        profile_revision=5,
+        correlation_id="op-boot1-r5-e1",
+        guard_epoch=1,
+        sequence=1,
+        lease_ms=30_000,
+        now=now + timedelta(seconds=1),
+    )
+    assert stale is not None and stale.transition == "stale"
+
+    renewed = await store.guard_bindings.apply_owner_presence(
+        binding_id=binding.binding_id,
+        state="present",
+        profile_revision=5,
+        correlation_id="op-boot1-r5-e1",
+        guard_epoch=1,
+        sequence=2,
+        lease_ms=30_000,
+        now=now + timedelta(seconds=10),
+    )
+    assert renewed is not None and renewed.transition == "renewed"
+    current = await store.guard_bindings.get_owner_presence(
+        binding.binding_id, now=now + timedelta(seconds=39)
+    )
+    assert current is not None and current.state == "present"
+    expired = await store.guard_bindings.get_owner_presence(
+        binding.binding_id, now=now + timedelta(seconds=41)
+    )
+    assert expired is not None and expired.state == "absent"
+
+    left = await store.guard_bindings.apply_owner_presence(
+        binding_id=binding.binding_id,
+        state="absent",
+        profile_revision=5,
+        correlation_id="op-boot1-r5-e1",
+        guard_epoch=1,
+        sequence=3,
+        lease_ms=0,
+        now=now + timedelta(seconds=20),
+    )
+    assert left is not None and left.transition == "left"
 
 
 async def test_reclaim_reuses_owner_device_binding_identity(store: DataStore) -> None:

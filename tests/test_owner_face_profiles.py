@@ -96,13 +96,16 @@ async def test_profile_activation_fans_out_and_result_is_strict(store: DataStore
     ]
 
     claimed = await store.guard_owner_face_profile_deliveries.claim_for_dispatch(
-        deliveries[0].delivery_id
+        deliveries[0].delivery_id,
+        command_id="cmd-owner-face-1",
     )
-    assert claimed is not None and claimed.attempt_count == 1
+    assert claimed is not None and claimed.attempt_count == 0
+    assert claimed.command_id == "cmd-owner-face-1"
     dispatched = await store.guard_owner_face_profile_deliveries.mark_dispatched(
         claimed.delivery_id, command_id="cmd-owner-face-1"
     )
     assert dispatched is not None
+    assert dispatched.attempt_count == 1
     applied = await store.guard_owner_face_profile_deliveries.record_command_result(
         "cmd-owner-face-1",
         status="succeeded",
@@ -141,13 +144,15 @@ async def test_transient_command_result_has_bounded_retry_budget(store: DataStor
 
     for attempt in range(1, 6):
         claimed = await store.guard_owner_face_profile_deliveries.claim_for_dispatch(
-            delivery.delivery_id
+            delivery.delivery_id,
+            command_id=f"cmd-retry-{attempt}",
         )
-        assert claimed is not None and claimed.attempt_count == attempt
+        assert claimed is not None and claimed.attempt_count == attempt - 1
         command_id = f"cmd-retry-{attempt}"
-        await store.guard_owner_face_profile_deliveries.mark_dispatched(
+        dispatched = await store.guard_owner_face_profile_deliveries.mark_dispatched(
             delivery.delivery_id, command_id=command_id
         )
+        assert dispatched is not None and dispatched.attempt_count == attempt
         retried = await store.guard_owner_face_profile_deliveries.retry_command_result(
             command_id,
             error="OWNER_FACE_REFERENCE_FETCH_FAILED",
@@ -156,6 +161,90 @@ async def test_transient_command_result_has_bounded_retry_budget(store: DataStor
         assert retried is not None
         assert retried.status == ("pending" if attempt < 5 else "failed")
         assert retried.command_id == (None if attempt < 5 else command_id)
+
+
+async def test_no_ack_timeout_refunds_reserved_device_attempt(store: DataStore) -> None:
+    binding = await _create_binding(
+        store, owner_id="owner-offline", device_id="atk-offline"
+    )
+    profile = await store.owner_face_profiles.create_draft(
+        owner_id="owner-offline",
+        model_id="esp-who-human-face-recognition-v1",
+        preprocessing_version="rgb565-be-qvga-v1",
+    )
+    for pose in ("front", "left", "right"):
+        await _add_reference(store, profile.profile_revision_id, "owner-offline", pose)
+    await store.owner_face_profiles.activate(profile.profile_revision_id)
+    delivery = (
+        await store.guard_owner_face_profile_deliveries.list_for_binding(
+            binding.binding_id
+        )
+    )[0]
+
+    claimed = await store.guard_owner_face_profile_deliveries.claim_for_dispatch(
+        delivery.delivery_id,
+        command_id="cmd-room-stale",
+    )
+    assert claimed is not None and claimed.attempt_count == 0
+    dispatched = await store.guard_owner_face_profile_deliveries.mark_dispatched(
+        delivery.delivery_id,
+        command_id="cmd-room-stale",
+    )
+    assert dispatched is not None and dispatched.attempt_count == 1
+
+    retried = await store.guard_owner_face_profile_deliveries.retry_command_result(
+        "cmd-room-stale",
+        error="no ack/result within 30s",
+        max_attempts=5,
+        device_attempted=False,
+    )
+    assert retried is not None
+    assert retried.status == "pending"
+    assert retried.attempt_count == 0
+    assert retried.command_id is None
+
+    # Replaying the same timeout fact cannot refund twice.
+    replayed = await store.guard_owner_face_profile_deliveries.retry_command_result(
+        "cmd-room-stale",
+        error="no ack/result within 30s",
+        max_attempts=5,
+        device_attempted=False,
+    )
+    assert replayed is None
+
+
+async def test_expired_dispatch_claim_preserves_single_flight_command_id(
+    store: DataStore,
+) -> None:
+    binding = await _create_binding(store, owner_id="owner-crash", device_id="atk-crash")
+    profile = await store.owner_face_profiles.create_draft(
+        owner_id="owner-crash",
+        model_id="esp-who-human-face-recognition-v1",
+        preprocessing_version="rgb565-be-qvga-v1",
+    )
+    for pose in ("front", "left", "right"):
+        await _add_reference(store, profile.profile_revision_id, "owner-crash", pose)
+    await store.owner_face_profiles.activate(profile.profile_revision_id)
+    delivery = (
+        await store.guard_owner_face_profile_deliveries.list_for_binding(binding.binding_id)
+    )[0]
+
+    first = await store.guard_owner_face_profile_deliveries.claim_for_dispatch(
+        delivery.delivery_id,
+        command_id="cmd-before-crash",
+        lease_seconds=0,
+    )
+    assert first is not None and first.command_id == "cmd-before-crash"
+
+    ready = await store.guard_owner_face_profile_deliveries.list_ready()
+    assert [row.delivery_id for row in ready] == [delivery.delivery_id]
+    recovered = await store.guard_owner_face_profile_deliveries.claim_for_dispatch(
+        delivery.delivery_id,
+        command_id="cmd-must-not-replace",
+    )
+    assert recovered is not None
+    assert recovered.command_id == "cmd-before-crash"
+    assert recovered.attempt_count == 0
 
 
 async def test_profile_requires_three_canonical_poses_and_enforces_owner_scope(

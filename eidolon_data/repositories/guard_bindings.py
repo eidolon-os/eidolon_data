@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace as dataclass_replace
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
@@ -37,6 +39,60 @@ GUARD_RUNTIME_DESIRED_RUNNING = "running"
 GUARD_RUNTIME_DESIRED_STOPPED = "stopped"
 
 
+@dataclass(frozen=True)
+class GuardOwnerPresenceProjection:
+    binding_id: str
+    state: str
+    profile_revision: int | None
+    correlation_id: str | None
+    guard_epoch: int
+    sequence: int
+    observed_at: datetime | None
+    expires_at: datetime | None
+    transition: str
+
+
+def _presence_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _presence_projection(
+    binding_id: str,
+    payload: object,
+    *,
+    now: datetime,
+    transition: str = "unchanged",
+) -> GuardOwnerPresenceProjection:
+    value = payload if isinstance(payload, dict) else {}
+    expires_at = _presence_datetime(value.get("expires_at"))
+    active = value.get("state") == "present" and expires_at is not None and expires_at > now
+    return GuardOwnerPresenceProjection(
+        binding_id=binding_id,
+        state="present" if active else "absent",
+        profile_revision=(
+            int(value["profile_revision"])
+            if isinstance(value.get("profile_revision"), int)
+            else None
+        ),
+        correlation_id=(
+            value["correlation_id"]
+            if isinstance(value.get("correlation_id"), str)
+            else None
+        ),
+        guard_epoch=int(value.get("guard_epoch") or 0),
+        sequence=int(value.get("sequence") or 0),
+        observed_at=_presence_datetime(value.get("observed_at")),
+        expires_at=expires_at if active else None,
+        transition=transition,
+    )
+
+
 def is_guard_capable(capabilities: object) -> bool:
     """Accept the canonical declaration and the early manifest variants.
 
@@ -67,6 +123,104 @@ def is_guard_capable(capabilities: object) -> bool:
 
 
 class GuardBindingsRepository(Repository):
+    async def get_owner_presence(
+        self, binding_id: str, *, now: datetime | None = None
+    ) -> GuardOwnerPresenceProjection | None:
+        effective_now = now or utc_now()
+        async with self._session_factory() as session:
+            row = await session.get(GuardBindingRow, binding_id)
+            if row is None:
+                return None
+            return _presence_projection(
+                binding_id,
+                (row.status_json or {}).get("owner_presence"),
+                now=effective_now,
+            )
+
+    async def apply_owner_presence(
+        self,
+        *,
+        binding_id: str,
+        state: str,
+        profile_revision: int,
+        correlation_id: str,
+        guard_epoch: int,
+        sequence: int,
+        lease_ms: int,
+        now: datetime | None = None,
+    ) -> GuardOwnerPresenceProjection | None:
+        if state not in {"present", "absent"}:
+            raise ValueError("owner presence state must be present or absent")
+        if profile_revision < 1 or guard_epoch < 0 or sequence < 1:
+            raise ValueError("owner presence revision and ordering must be positive")
+        if (state == "present" and lease_ms < 5_000) or (
+            state == "absent" and lease_ms != 0
+        ):
+            raise ValueError("owner presence lease does not match state")
+        effective_now = now or utc_now()
+        for _ in range(3):
+            async with self._session_factory() as session:
+                row = await session.get(GuardBindingRow, binding_id)
+                if row is None or row.state != ACTIVE_GUARD_BINDING_STATE:
+                    return None
+                status = dict(row.status_json or {})
+                current = _presence_projection(
+                    binding_id,
+                    status.get("owner_presence"),
+                    now=effective_now,
+                )
+                same_epoch = (
+                    current.correlation_id == correlation_id
+                    and current.guard_epoch == guard_epoch
+                )
+                if same_epoch and sequence <= current.sequence:
+                    return dataclass_replace(current, transition="stale")
+                if state == "absent" and current.state == "present" and not same_epoch:
+                    return dataclass_replace(current, transition="stale")
+                transition = (
+                    "entered"
+                    if state == "present" and current.state != "present"
+                    else "renewed"
+                    if state == "present"
+                    else "left"
+                    if current.state == "present"
+                    else "unchanged"
+                )
+                expires_at = (
+                    effective_now + timedelta(milliseconds=lease_ms)
+                    if state == "present"
+                    else None
+                )
+                presence = {
+                    "state": state,
+                    "profile_revision": profile_revision,
+                    "correlation_id": correlation_id,
+                    "guard_epoch": guard_epoch,
+                    "sequence": sequence,
+                    "observed_at": effective_now.isoformat(),
+                    "expires_at": expires_at.isoformat() if expires_at else None,
+                }
+                status["owner_presence"] = presence
+                previous_updated_at = row.updated_at
+                changed = await session.execute(
+                    update(GuardBindingRow)
+                    .where(
+                        GuardBindingRow.binding_id == binding_id,
+                        GuardBindingRow.updated_at == previous_updated_at,
+                    )
+                    .values(status_json=status, updated_at=effective_now)
+                )
+                if changed.rowcount == 1:
+                    await session.commit()
+                    return _presence_projection(
+                        binding_id,
+                        presence,
+                        now=effective_now,
+                        transition=transition,
+                    )
+                await session.rollback()
+        raise RuntimeError("guard owner presence changed concurrently; retry")
+
     async def list_pending_guard_devices(self) -> list[DeviceRow]:
         async with self._session_factory() as session:
             rows = await session.scalars(
