@@ -304,7 +304,6 @@ class DevicesRepository(Repository):
         approved_by: str = "admin",
         name: str | None = None,
         kind: str | None = None,
-        interaction_mode: str | None = None,
         access_policy_json: dict | None = None,
         metadata_json: dict | None = None,
         network_json: dict | None = None,
@@ -329,7 +328,8 @@ class DevicesRepository(Repository):
             row.owner_id = owner_id
             row.status = "active"
             row.bound_companion_id = companion_id
-            row.interaction_mode = interaction_mode
+            # interaction_mode is firmware-declared (sole source of truth); claiming a
+            # device never sets an admin override — the column stays as-is (NULL).
             row.approved_at = utc_now()
             row.approved_by = approved_by
             row.revoked_at = None

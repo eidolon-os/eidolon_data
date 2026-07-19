@@ -59,11 +59,11 @@ async def test_hub_device_registry_adapter_round_trips_device_record(tmp_path) -
             "device-1",
             owner_id="owner-test",
             companion_id="companion-1",
-            interaction_mode="voice",
             metadata_json={"claimed": True},
         )
         await store.devices.update_device(
             "device-1",
+            interaction_mode="full_duplex",
             capabilities_json={"ops": ["sound.play"]},
         )
 
@@ -89,7 +89,7 @@ async def test_hub_device_registry_adapter_round_trips_device_record(tmp_path) -
         assert row.status == "active"
         assert row.metadata_json["claimed"] is True
         assert row.capabilities_json == {"ops": ["sound.play"]}
-        assert row.interaction_mode == "voice"
+        assert row.interaction_mode == "full_duplex"
 
         await repo.put(
             DeviceRegistryRecord(
