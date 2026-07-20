@@ -119,3 +119,56 @@ async def test_deletion_returns_storage_keys_and_purges_rows(store: DataStore) -
     assert set(result.face_asset_storage_keys) == {v1.cond_storage_key, v2.cond_storage_key}
     assert result.counts.get("companion_face_assets") == 2
     assert await store.companion_face_assets.list_for_companion("c-1") == []
+
+
+async def test_idle_clip_lifecycle_and_gc(store: DataStore) -> None:
+    await _companion(store, owner_id="owner-1", companion_id="c-1")
+    asset, _ = await _put_face(store, owner_id="owner-1", companion_id="c-1", marker=b"x")
+    assert asset.idle_status == "none"
+
+    await store.companion_face_assets.set_idle_status(asset.face_asset_id, "generating")
+    active = await store.companion_face_assets.get_active("c-1")
+    assert active is not None and active.idle_status == "generating"
+
+    idle_key = "owner-1/companion-avatar/c-1/idle-x.mp4"
+    idle_bytes = b"\x00\x00\x00\x18ftypmp42fake-fmp4"
+    store.object_storage.put(idle_key, idle_bytes)
+    ready = await store.companion_face_assets.set_idle_clip(
+        asset.face_asset_id,
+        storage_key=idle_key,
+        content_type="video/mp4",
+        size_bytes=len(idle_bytes),
+        sha256=hashlib.sha256(idle_bytes).hexdigest(),
+    )
+    assert ready.idle_status == "ready" and ready.idle_storage_key == idle_key
+
+    # GC lists both the cond image and the idle clip.
+    keys = await store.companion_face_assets.list_storage_keys_for_companion("c-1")
+    assert idle_key in keys and asset.cond_storage_key in keys
+
+    await store.companion_face_assets.set_idle_status(
+        asset.face_asset_id, "failed", error="ditto unreachable"
+    )
+    failed = await store.companion_face_assets.get_active("c-1")
+    assert failed is not None and failed.idle_status == "failed"
+    assert failed.idle_error == "ditto unreachable"
+
+
+async def test_deletion_collects_idle_clip_keys(store: DataStore) -> None:
+    await _companion(store, owner_id="owner-1", companion_id="c-1")
+    asset, _ = await _put_face(store, owner_id="owner-1", companion_id="c-1", marker=b"y")
+    idle_key = "owner-1/companion-avatar/c-1/idle-y.mp4"
+    store.object_storage.put(idle_key, b"idle-clip-bytes")
+    await store.companion_face_assets.set_idle_clip(
+        asset.face_asset_id,
+        storage_key=idle_key,
+        content_type="video/mp4",
+        size_bytes=15,
+        sha256=hashlib.sha256(b"idle-clip-bytes").hexdigest(),
+    )
+
+    result = await store.companion_deletion.delete_companion(
+        owner_id="owner-1", companion_id="c-1", allow_master=True
+    )
+    assert idle_key in result.face_asset_storage_keys
+    assert asset.cond_storage_key in result.face_asset_storage_keys

@@ -159,9 +159,19 @@ class CompanionFaceAssetRow(Base):
     cond_sha256: Mapped[str] = mapped_column(String(64))
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
+    # Offline-generated photoreal idle loop (plan §8.1/§8.2), keyed to this face
+    # version so a new upload starts fresh. ``idle_status`` drives the generation
+    # lifecycle: none → pending → generating → ready | failed.
+    idle_status: Mapped[str] = mapped_column(
+        String(16), default="none", server_default="none"
+    )
+    idle_storage_key: Mapped[str | None] = mapped_column(String(256))
+    idle_content_type: Mapped[str | None] = mapped_column(String(32))
+    idle_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    idle_sha256: Mapped[str | None] = mapped_column(String(64))
+    idle_error: Mapped[str | None] = mapped_column(Text)
     # Forward-compatible bag for secondary refs the semantic genome must not carry
-    # (e.g. a still ``poster_ref`` or offline idle-clip metadata; see the avatar
-    # integration plan §8.1). P1 populates only cond_image.
+    # (e.g. a still ``poster_ref``; see the avatar integration plan §8.1).
     meta_json: Mapped[JsonDict] = mapped_column(default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -185,6 +195,10 @@ class CompanionFaceAssetRow(Base):
             name="ck_companion_face_asset_content_type",
         ),
         CheckConstraint("cond_size_bytes > 0", name="ck_companion_face_asset_size_positive"),
+        CheckConstraint(
+            "idle_status IN ('none', 'pending', 'generating', 'ready', 'failed')",
+            name="ck_companion_face_asset_idle_status",
+        ),
     )
 
 

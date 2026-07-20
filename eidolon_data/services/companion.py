@@ -92,13 +92,19 @@ class CompanionDeletionService:
                     .where(DeviceRow.owner_id == owner_id)
                 )
             )
-            face_asset_storage_keys = list(
-                await session.scalars(
-                    select(CompanionFaceAssetRow.cond_storage_key).where(
-                        CompanionFaceAssetRow.companion_id == companion_id
-                    )
+            face_asset_rows = (
+                await session.execute(
+                    select(
+                        CompanionFaceAssetRow.cond_storage_key,
+                        CompanionFaceAssetRow.idle_storage_key,
+                    ).where(CompanionFaceAssetRow.companion_id == companion_id)
                 )
-            )
+            ).all()
+            face_asset_storage_keys: list[str] = []
+            for cond_key, idle_key in face_asset_rows:
+                face_asset_storage_keys.append(cond_key)
+                if idle_key:
+                    face_asset_storage_keys.append(idle_key)
             conversation_ids = list(
                 await session.scalars(
                     select(ConversationRow.conversation_id).where(

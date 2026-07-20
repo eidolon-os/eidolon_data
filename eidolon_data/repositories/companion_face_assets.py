@@ -111,6 +111,52 @@ class CompanionFaceAssetsRepository(Repository):
             await session.refresh(row)
             return row
 
+    async def set_idle_status(
+        self, face_asset_id: str, status: str, *, error: str | None = None
+    ) -> None:
+        """Move a face asset's idle-clip lifecycle (pending/generating/failed)."""
+        if status not in {"none", "pending", "generating", "failed"}:
+            raise ValueError(f"unsupported idle status transition: {status}")
+        async with self._session_factory() as session:
+            row = await session.get(CompanionFaceAssetRow, face_asset_id)
+            if row is None:
+                raise KeyError(f"companion face asset not found: {face_asset_id}")
+            row.idle_status = status
+            row.idle_error = error
+            row.updated_at = utc_now()
+            await session.commit()
+
+    async def set_idle_clip(
+        self,
+        face_asset_id: str,
+        *,
+        storage_key: str,
+        content_type: str,
+        size_bytes: int,
+        sha256: str,
+    ) -> CompanionFaceAssetRow:
+        """Record a generated idle clip and mark the asset's idle status ready."""
+        if size_bytes <= 0:
+            raise ValueError("idle clip size must be positive")
+        if _SHA256_RE.fullmatch(sha256) is None:
+            raise ValueError("idle clip sha256 must be lowercase hexadecimal")
+        if not storage_key or storage_key.startswith("/") or ".." in storage_key.split("/"):
+            raise ValueError("idle clip storage key must be a safe relative path")
+        async with self._session_factory() as session:
+            row = await session.get(CompanionFaceAssetRow, face_asset_id)
+            if row is None:
+                raise KeyError(f"companion face asset not found: {face_asset_id}")
+            row.idle_status = "ready"
+            row.idle_storage_key = storage_key
+            row.idle_content_type = content_type
+            row.idle_size_bytes = size_bytes
+            row.idle_sha256 = sha256
+            row.idle_error = None
+            row.updated_at = utc_now()
+            await session.commit()
+            await session.refresh(row)
+            return row
+
     async def get_active(self, companion_id: str) -> CompanionFaceAssetRow | None:
         async with self._session_factory() as session:
             return await session.scalar(
@@ -152,11 +198,18 @@ class CompanionFaceAssetsRepository(Repository):
             return int(result.rowcount or 0) > 0
 
     async def list_storage_keys_for_companion(self, companion_id: str) -> list[str]:
-        """Every object-store key this companion owns, for blob purge on delete."""
+        """Every object-store key this companion owns (cond image + idle clip),
+        for blob purge on delete."""
         async with self._session_factory() as session:
-            rows = await session.scalars(
-                select(CompanionFaceAssetRow.cond_storage_key).where(
-                    CompanionFaceAssetRow.companion_id == companion_id
-                )
+            result = await session.execute(
+                select(
+                    CompanionFaceAssetRow.cond_storage_key,
+                    CompanionFaceAssetRow.idle_storage_key,
+                ).where(CompanionFaceAssetRow.companion_id == companion_id)
             )
-            return list(rows)
+            keys: list[str] = []
+            for cond_key, idle_key in result.all():
+                keys.append(cond_key)
+                if idle_key:
+                    keys.append(idle_key)
+            return keys
