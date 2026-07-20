@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from eidolon_data.schema.models import (
     BodyCommandRow,
+    CompanionFaceAssetRow,
     CompanionRow,
     ConversationRow,
     DeviceRow,
@@ -48,6 +49,10 @@ class CompanionDeletionResult:
     # == memory_space_id and the palace lives outside this database.
     realm_ids: list[str]
     device_ids: list[str]
+    # Object-store keys for the companion's display-face assets. The caller
+    # (admin) purges the corresponding blobs, since the bytes live outside this
+    # database — same contract as ``realm_ids`` for memory palaces.
+    face_asset_storage_keys: list[str]
     counts: dict[str, int]
 
 
@@ -85,6 +90,13 @@ class CompanionDeletionService:
                     select(DeviceRow.device_id)
                     .where(DeviceRow.bound_companion_id == companion_id)
                     .where(DeviceRow.owner_id == owner_id)
+                )
+            )
+            face_asset_storage_keys = list(
+                await session.scalars(
+                    select(CompanionFaceAssetRow.cond_storage_key).where(
+                        CompanionFaceAssetRow.companion_id == companion_id
+                    )
                 )
             )
             conversation_ids = list(
@@ -162,6 +174,12 @@ class CompanionDeletionService:
                     "memory_realms",
                 )
             await _del(
+                delete(CompanionFaceAssetRow).where(
+                    CompanionFaceAssetRow.companion_id == companion_id
+                ),
+                "companion_face_assets",
+            )
+            await _del(
                 delete(PersonaGenomeRow).where(PersonaGenomeRow.companion_id == companion_id),
                 "persona_genomes",
             )
@@ -176,5 +194,6 @@ class CompanionDeletionService:
             deleted=True,
             realm_ids=realm_ids,
             device_ids=device_ids,
+            face_asset_storage_keys=face_asset_storage_keys,
             counts=counts,
         )

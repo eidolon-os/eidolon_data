@@ -125,6 +125,69 @@ class PersonaGenomeRow(Base):
     )
 
 
+class CompanionFaceAssetRow(Base):
+    """A versioned display-face asset (the digital-human ``cond_image``) for one companion.
+
+    The avatar worker seeds the digital-human service with a per-companion still
+    image; this row is the sovereign, versioned pointer to that image's bytes in
+    the object store (SQL holds only the opaque ``cond_storage_key`` + integrity
+    metadata, never the bytes — same split as :class:`OwnerFaceReferenceRow`).
+
+    A display face is deliberately *not* part of the semantic persona genome,
+    which is model/appearance-independent: swapping the photo is not a persona
+    evolution and must not bump the genome hash.  At most one row per companion
+    is ``active``; earlier versions become ``superseded`` (mirrors the Owner Face
+    Profile revision-state pattern).  ``cond_sha256`` doubles as the source hash
+    used to detect a changed image (e.g. to invalidate downstream idle clips).
+    """
+
+    __tablename__ = "companion_face_assets"
+
+    face_asset_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    companion_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("companions.companion_id", ondelete="CASCADE"), index=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    state: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    source: Mapped[str] = mapped_column(String(16), default="upload")
+    cond_storage_key: Mapped[str] = mapped_column(String(256), unique=True)
+    cond_content_type: Mapped[str] = mapped_column(String(32))
+    cond_size_bytes: Mapped[int] = mapped_column(Integer)
+    cond_sha256: Mapped[str] = mapped_column(String(64))
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    # Forward-compatible bag for secondary refs the semantic genome must not carry
+    # (e.g. a still ``poster_ref`` or offline idle-clip metadata; see the avatar
+    # integration plan §8.1). P1 populates only cond_image.
+    meta_json: Mapped[JsonDict] = mapped_column(default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("companion_id", "version", name="uq_companion_face_asset_version"),
+        Index(
+            "uq_companion_face_asset_active",
+            "companion_id",
+            unique=True,
+            sqlite_where=text("state = 'active'"),
+            postgresql_where=text("state = 'active'"),
+        ),
+        CheckConstraint("version > 0", name="ck_companion_face_asset_version_positive"),
+        CheckConstraint(
+            "state IN ('active', 'superseded')",
+            name="ck_companion_face_asset_state",
+        ),
+        CheckConstraint(
+            "cond_content_type = 'image/jpeg'",
+            name="ck_companion_face_asset_content_type",
+        ),
+        CheckConstraint("cond_size_bytes > 0", name="ck_companion_face_asset_size_positive"),
+    )
+
+
 class DeviceRow(Base):
     __tablename__ = "devices"
 

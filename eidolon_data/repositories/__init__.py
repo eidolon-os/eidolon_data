@@ -1,6 +1,7 @@
 """Repository implementations for the Eidolon Data schema."""
 
 from eidolon_data.repositories.body_commands import BodyCommandsRepository
+from eidolon_data.repositories.companion_face_assets import CompanionFaceAssetsRepository
 from eidolon_data.repositories.companions import CompanionsRepository
 from eidolon_data.repositories.conversations import ConversationsRepository
 from eidolon_data.repositories.devices import DevicesRepository
@@ -21,6 +22,7 @@ from eidolon_data.repositories.runtime_sessions import RuntimeSessionsRepository
 
 __all__ = [
     "BodyCommandsRepository",
+    "CompanionFaceAssetsRepository",
     "CompanionsRepository",
     "ConversationsRepository",
     "DevicesRepository",

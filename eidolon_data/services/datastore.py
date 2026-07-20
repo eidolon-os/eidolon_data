@@ -10,6 +10,7 @@ from eidolon_data.db.engine import create_engine, create_session_factory, init_s
 from eidolon_data.ports.memory_engine import MemoryEnginePort
 from eidolon_data.repositories import (
     BodyCommandsRepository,
+    CompanionFaceAssetsRepository,
     CompanionsRepository,
     ConversationsRepository,
     DevicesRepository,
@@ -79,6 +80,10 @@ class DataStore:
     @property
     def persona_repo(self) -> PersonaRepository:
         return PersonaRepository(self.session_factory)
+
+    @property
+    def companion_face_assets(self) -> CompanionFaceAssetsRepository:
+        return CompanionFaceAssetsRepository(self.session_factory)
 
     @property
     def devices(self) -> DevicesRepository:
