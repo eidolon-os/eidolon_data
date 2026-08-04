@@ -9,6 +9,20 @@ The project deliberately does not depend on `eidolon_memory` or MemPalace. Memor
 integration happens through `MemoryEnginePort`, which can be implemented by
 `eidolon_memory` at runtime.
 
+The optional Companion Authority app publishes only the stable identity subset needed
+by OS control-plane services. It is separate from the legacy CRUD app, requires an
+opaque service credential, and never returns profile or runtime configuration:
+
+```bash
+export EIDOLON_DATA_COMPANION_AUTHORITY_TOKEN='<at-least-24-random-characters>'
+uv run --extra api uvicorn eidolon_data.api.companion_authority:create_app \
+  --factory --host 127.0.0.1 --port 8084
+```
+
+Its sole business endpoint is
+`GET /api/companion-authority/v1/companions/{companion_id}`. The normative schema is
+`eidolon_data/contracts/schemas/companion/identity.schema.json`.
+
 ## Quick Start
 
 ```python

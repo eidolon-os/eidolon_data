@@ -1,8 +1,7 @@
 """Separate Guard device runtime configuration from Hub policy configuration."""
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 revision = "0010_guard_runtime_config"
 down_revision = "0009_data_contract_alignment"

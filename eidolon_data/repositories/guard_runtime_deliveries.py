@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from uuid import uuid4
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import select, update
 
 from eidolon_data.db.base import utc_now
 from eidolon_data.repositories.base import Repository

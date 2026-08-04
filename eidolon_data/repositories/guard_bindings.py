@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace as dataclass_replace
+from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
