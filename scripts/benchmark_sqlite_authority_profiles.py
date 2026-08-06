@@ -263,9 +263,7 @@ def main() -> None:
         sequential = [
             benchmark_system_data(root / "system.sqlite3", args.system_iterations),
             benchmark_agent_runtime(root / "agent.sqlite3", args.agent_iterations),
-            benchmark_audit_index(
-                root / "audit.sqlite3", args.audit_events, args.audit_batch_size
-            ),
+            benchmark_audit_index(root / "audit.sqlite3", args.audit_events, args.audit_batch_size),
             benchmark_shared_writer_contention(
                 root / "shared.sqlite3", args.agent_iterations, args.shared_writers
             ),

@@ -1,9 +1,15 @@
-"""Domain services for owner-scoped workspace lifecycle."""
+"""Application services for Owner and Companion workspace lifecycle.
+
+These commands own low-frequency sovereign configuration only. Device
+admission, runtime sessions, memory payloads, and command delivery are outside
+the System Data authority boundary.
+"""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from uuid import uuid4
 
 from eidolon_sdk.biz.persona import (
     PERSONA_GENOME_SCHEMA,
@@ -13,143 +19,26 @@ from eidolon_sdk.biz.persona import (
     persona_genome_hash,
     persona_genome_to_json,
 )
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from eidolon_data.audit import governance_fact
 from eidolon_data.db.base import utc_now
-from eidolon_data.events.facade import build_event
-from eidolon_data.schema.models import (
-    AuditOutboxRow,
+from eidolon_data.schema import (
     CompanionRow,
-    DeviceRow,
+    GuardBindingRow,
     MemoryRealmRow,
     OwnerRow,
     PersonaGenomeRow,
 )
 
-WEB_BODY_KIND = "web"
-COMPANION_TYPE_MASTER = "master"
-COMPANION_TYPE_SLAVE = "slave"
-COMPANION_TYPE_GUARD = "guard"
-
-def _web_body_device_id(companion_id: str) -> str:
-    return f"web-{companion_id}"
-
-
-def _companion_type_from_master(is_master: bool) -> str:
-    return COMPANION_TYPE_MASTER if is_master else COMPANION_TYPE_SLAVE
-
-
-def _companion_type(row: CompanionRow) -> str:
-    value = str(getattr(row, "companion_type", "") or "").strip()
-    if value in {COMPANION_TYPE_MASTER, COMPANION_TYPE_SLAVE, COMPANION_TYPE_GUARD}:
-        return value
-    return _companion_type_from_master(bool(getattr(row, "is_master", False)))
-
-
-def _web_body_payload(
-    *,
-    owner_id: str,
-    companion_id: str,
-    display_name: str,
-    companion_type: str,
-) -> dict:
-    now = utc_now()
-    return {
-        "device_id": _web_body_device_id(companion_id),
-        "owner_id": owner_id,
-        "name": f"{display_name} · 本机",
-        "kind": WEB_BODY_KIND,
-        "status": "active",
-        "approved_at": now,
-        "approved_by": "system:onboarding",
-        "bound_companion_id": companion_id,
-        "interaction_mode": "full_duplex",
-        "auth_type": "admin_trust",
-        "secret_ref": None,
-        "capabilities_json": {
-            "audio": True,
-            "display": True,
-            "text": True,
-            "local_web": True,
-        },
-        "network_json": {},
-        "access_policy_json": {
-            "conversation": True,
-            "voice_input": True,
-            "voice_output": True,
-            "memory_recall": True,
-            "body_commands": False,
-        },
-        "metadata_json": {
-            "auto_provisioned": True,
-            "role": "local_web",
-            "provisioned_by": "owner_onboarding",
-            "companion_type": companion_type,
-        },
-        "last_seen_at": None,
-        "revoked_at": None,
-    }
-
-
-def _build_web_body_row(
-    *,
-    owner_id: str,
-    companion_id: str,
-    display_name: str,
-    companion_type: str,
-) -> DeviceRow:
-    """A host-local web body for a companion. Auth is via admin trust (no device
-    secret); hub mints its LiveKit token after validating the owner/companion
-    binding. kind=web renders as a 虚拟身体 in the cockpit constellation."""
-    return DeviceRow(
-        **_web_body_payload(
-            owner_id=owner_id,
-            companion_id=companion_id,
-            display_name=display_name,
-            companion_type=companion_type,
-        )
-    )
-
-
-def _refresh_web_body_row(row: DeviceRow, *, display_name: str, companion_type: str) -> None:
-    """Backfill older web body rows into the current standard contract."""
-    row.name = row.name or f"{display_name} · 本机"
-    row.status = "active"
-    row.approved_at = row.approved_at or utc_now()
-    row.approved_by = "system:onboarding"
-    row.interaction_mode = "full_duplex"
-    row.auth_type = "admin_trust"
-    row.capabilities_json = {
-        **(row.capabilities_json or {}),
-        "audio": True,
-        "display": True,
-        "text": True,
-        "local_web": True,
-    }
-    row.network_json = row.network_json or {}
-    row.access_policy_json = {
-        **(row.access_policy_json or {}),
-        "conversation": True,
-        "voice_input": True,
-        "voice_output": True,
-        "memory_recall": True,
-        "body_commands": False,
-    }
-    row.metadata_json = {
-        "auto_provisioned": True,
-        "role": "local_web",
-        "provisioned_by": "owner_onboarding",
-        **(row.metadata_json or {}),
-        "companion_type": companion_type,
-    }
-
-OWNER_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,47}$")
-GENERATED_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
+OWNER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$")
+GENERATED_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+COMPANION_ROLES = frozenset({"primary", "standard", "guard"})
 
 
 class OwnerWorkspaceError(ValueError):
-    """Raised when a workspace command violates a domain rule."""
+    """Raised when a workspace command violates a domain invariant."""
 
 
 @dataclass(frozen=True)
@@ -165,7 +54,9 @@ class CompanionWorkspaceResult:
 
 
 class OwnerService:
-    def __init__(self, session_factory: async_sessionmaker):
+    """Transactional commands for the Owner aggregate."""
+
+    def __init__(self, session_factory: async_sessionmaker) -> None:
         self._session_factory = session_factory
 
     async def create_owner(
@@ -182,91 +73,129 @@ class OwnerService:
             raise OwnerWorkspaceError("owner kind must be person, family, or team")
 
         async with self._session_factory() as session, session.begin():
-            existing = await session.get(OwnerRow, owner_id)
-            if existing is not None:
+            if await session.get(OwnerRow, owner_id) is not None:
                 raise OwnerWorkspaceError("owner already exists")
-
             owner = OwnerRow(
                 owner_id=owner_id,
-                display_name=display_name or owner_id,
+                display_name=display_name.strip() or owner_id,
                 kind=kind,
                 status="active",
-                profile_json=profile_json or {},
-                settings_json=settings_json or {},
+                profile_json=dict(profile_json or {}),
+                settings_json=dict(settings_json or {}),
             )
             session.add(owner)
-            # Persist the authority row before adding its audit-outbox receipt
-            # in the same transaction.
-            await session.flush()
-            _add_event(
-                session,
-                _event(
+            session.add(
+                governance_fact(
                     owner_id=owner_id,
                     subject_type="owner",
                     subject_id=owner_id,
-                    event_type="owner.created",
-                    payload_json={"kind": kind, "display_name": owner.display_name},
-                ),
+                    action="owner.created",
+                    payload={"kind": kind, "display_name": owner.display_name},
+                )
             )
-
         return OwnerCreateResult(owner=owner)
 
-
-class CompanionWorkspaceService:
-    def __init__(self, session_factory: async_sessionmaker):
-        self._session_factory = session_factory
-
-    async def ensure_web_body(
+    async def update_owner(
         self,
         *,
         owner_id: str,
-        companion_id: str,
-    ) -> DeviceRow:
-        """Legacy explicit provisioning for Admin's current web endpoint.
-
-        This compatibility entry point is never called by companion lifecycle
-        operations. A browser session is not implicitly a governed Device.
-        """
+        display_name: str | None = None,
+        profile_json: dict | None = None,
+        settings_json: dict | None = None,
+    ) -> OwnerRow:
         async with self._session_factory() as session, session.begin():
-            companion = await session.get(CompanionRow, companion_id)
-            if companion is None or companion.owner_id != owner_id:
-                raise OwnerWorkspaceError("companion not found for owner")
-            if companion.status != "active":
-                raise OwnerWorkspaceError("companion is not active")
-            existing = (
-                await session.scalars(
-                    select(DeviceRow)
-                    .where(DeviceRow.bound_companion_id == companion_id)
-                    .where(DeviceRow.kind == WEB_BODY_KIND)
-                    .where(DeviceRow.revoked_at.is_(None))
-                )
-            ).first()
-            if existing is not None:
-                _refresh_web_body_row(
-                    existing,
-                    display_name=companion.display_name or companion_id,
-                    companion_type=_companion_type(companion),
-                )
-                return existing
-            row = _build_web_body_row(
-                owner_id=owner_id,
-                companion_id=companion_id,
-                display_name=companion.display_name or companion_id,
-                companion_type=_companion_type(companion),
-            )
-            session.add(row)
-            _add_event(
-                session,
-                _event(
+            owner = await session.get(OwnerRow, owner_id)
+            if owner is None:
+                raise KeyError(f"owner not found: {owner_id}")
+            if owner.status != "active":
+                raise OwnerWorkspaceError("only an active owner can be updated")
+            changed: list[str] = []
+            if display_name is not None:
+                value = display_name.strip()
+                if not value:
+                    raise OwnerWorkspaceError("display_name cannot be blank")
+                owner.display_name = value
+                changed.append("display_name")
+            if profile_json is not None:
+                owner.profile_json = dict(profile_json)
+                changed.append("profile")
+            if settings_json is not None:
+                owner.settings_json = dict(settings_json)
+                changed.append("settings")
+            if not changed:
+                return owner
+            owner.updated_at = utc_now()
+            session.add(
+                governance_fact(
                     owner_id=owner_id,
-                    companion_id=companion_id,
-                    subject_type="device",
-                    subject_id=row.device_id,
-                    event_type="device.web_body.provisioned",
-                    payload_json={"companion_id": companion_id, "kind": WEB_BODY_KIND},
-                ),
+                    subject_type="owner",
+                    subject_id=owner_id,
+                    action="owner.updated",
+                    payload={"changed_fields": changed},
+                )
             )
-        return row
+        return owner
+
+    async def archive_owner(self, owner_id: str) -> OwnerRow:
+        async with self._session_factory() as session, session.begin():
+            owner = await session.get(OwnerRow, owner_id)
+            if owner is None:
+                raise KeyError(f"owner not found: {owner_id}")
+            if owner.status == "archived":
+                return owner
+            if owner.status != "active":
+                raise OwnerWorkspaceError(f"cannot archive owner in state {owner.status}")
+            owner.status = "archived"
+            owner.updated_at = utc_now()
+            companions = await session.scalars(
+                select(CompanionRow).where(
+                    CompanionRow.owner_id == owner_id,
+                    CompanionRow.status == "active",
+                )
+            )
+            for companion in companions:
+                companion.status = "inactive"
+                companion.updated_at = owner.updated_at
+            realms = await session.execute(
+                update(MemoryRealmRow)
+                .where(
+                    MemoryRealmRow.owner_id == owner_id,
+                    MemoryRealmRow.status == "active",
+                )
+                .values(status="inactive", updated_at=owner.updated_at)
+            )
+            bindings = await session.execute(
+                update(GuardBindingRow)
+                .where(
+                    GuardBindingRow.owner_id == owner_id,
+                    GuardBindingRow.state == "active",
+                )
+                .values(
+                    state="disabled",
+                    disabled_at=owner.updated_at,
+                    updated_at=owner.updated_at,
+                )
+            )
+            session.add(
+                governance_fact(
+                    owner_id=owner_id,
+                    subject_type="owner",
+                    subject_id=owner_id,
+                    action="owner.archived",
+                    payload={
+                        "memory_realms_inactivated": int(realms.rowcount or 0),
+                        "guard_bindings_disabled": int(bindings.rowcount or 0),
+                    },
+                )
+            )
+        return owner
+
+
+class CompanionWorkspaceService:
+    """Atomic Companion identity, Persona, and Memory catalog commands."""
+
+    def __init__(self, session_factory: async_sessionmaker) -> None:
+        self._session_factory = session_factory
 
     async def ensure_memory_realm(
         self,
@@ -278,105 +207,85 @@ class CompanionWorkspaceService:
         memory_engine_config_json: dict | None = None,
         memory_policy_json: dict | None = None,
     ) -> MemoryRealmRow:
-        """Idempotently ensure a companion has an active memory realm.
+        """Idempotently ensure the catalog pointer; never operate on memory data."""
 
-        Parallels ``ensure_web_body`` for the memory side. Returns the existing
-        active realm if one is present; otherwise creates ``r_<owner>_default``
-        (or the supplied ``realm_id``) and points ``default_memory_realm_id`` at
-        it. Reused by master promotion and by the bootstrap path so a companion
-        is never left conversation-unready with a body but no memory.
-        """
         async with self._session_factory() as session, session.begin():
-            companion = await session.get(CompanionRow, companion_id)
-            if companion is None or companion.owner_id != owner_id:
-                raise OwnerWorkspaceError("companion not found for owner")
-            if companion.status != "active":
-                raise OwnerWorkspaceError("companion is not active")
-            existing = (
-                await session.scalars(
-                    select(MemoryRealmRow)
-                    .where(MemoryRealmRow.companion_id == companion_id)
-                    .where(MemoryRealmRow.status == "active")
-                )
-            ).first()
-            if existing is not None:
-                if companion.default_memory_realm_id != existing.realm_id:
-                    companion.default_memory_realm_id = existing.realm_id
-                return existing
-            realm_id = realm_id or f"r_{owner_id}_default"
-            _validate_generated_id("realm_id", realm_id)
-            if await session.get(MemoryRealmRow, realm_id) is not None:
-                raise OwnerWorkspaceError(f"realm_id {realm_id!r} already exists")
-            realm = MemoryRealmRow(
-                realm_id=realm_id,
-                owner_id=owner_id,
-                companion_id=companion_id,
-                engine=memory_engine or "mempalace",
-                engine_config_json=memory_engine_config_json or {},
-                policy_json=memory_policy_json or {"scope": "owner", "recall": "companion_default"},
-                status="active",
-            )
-            session.add(realm)
-            await session.flush()
-            companion.default_memory_realm_id = realm_id
-            _add_event(
+            companion = await _owned_active_companion(session, owner_id, companion_id)
+            realm, created = await _ensure_memory_realm_in_session(
                 session,
-                _event(
-                    owner_id=owner_id,
-                    companion_id=companion_id,
-                    subject_type="memory_realm",
-                    subject_id=realm_id,
-                    event_type="memory_realm.created",
-                    payload_json={"engine": realm.engine},
-                ),
+                companion=companion,
+                realm_id=realm_id,
+                memory_engine=memory_engine,
+                memory_engine_config_json=memory_engine_config_json,
+                memory_policy_json=memory_policy_json,
             )
+            if created:
+                session.add(
+                    governance_fact(
+                        owner_id=owner_id,
+                        subject_type="memory_realm",
+                        subject_id=realm.realm_id,
+                        action="memory_realm.cataloged",
+                        payload={"companion_id": companion_id, "engine": realm.engine},
+                    )
+                )
         return realm
 
-    async def promote_to_master(
+    async def promote_to_primary(
         self,
         *,
         owner_id: str,
         companion_id: str,
     ) -> CompanionRow:
-        """Make ``companion_id`` the owner's master and ensure its memory realm.
-
-        Device lifecycle is independent: promotion never creates or attaches a
-        Device. Any other master for the owner is demoted so the one-master-per-
-        owner invariant holds. Idempotent.
-        """
         async with self._session_factory() as session, session.begin():
-            companion = await session.get(CompanionRow, companion_id)
-            if companion is None or companion.owner_id != owner_id:
-                raise OwnerWorkspaceError("companion not found for owner")
-            if companion.status != "active":
-                raise OwnerWorkspaceError("companion is not active")
-            others = await session.scalars(
-                select(CompanionRow)
-                .where(CompanionRow.owner_id == owner_id)
-                .where(CompanionRow.is_master.is_(True))
-                .where(CompanionRow.companion_id != companion_id)
+            companion = await _owned_active_companion(session, owner_id, companion_id)
+            if companion.role == "guard":
+                raise OwnerWorkspaceError("a guard companion cannot become primary")
+            previous = await session.scalar(
+                select(CompanionRow).where(
+                    CompanionRow.owner_id == owner_id,
+                    CompanionRow.role == "primary",
+                    CompanionRow.status == "active",
+                    CompanionRow.companion_id != companion_id,
+                )
             )
-            for other in others:
-                other.is_master = False
-                other.companion_type = COMPANION_TYPE_SLAVE
-            companion.is_master = True
-            companion.companion_type = COMPANION_TYPE_MASTER
-            if not companion.current_genome_id:
-                genome = (
-                    await session.scalars(
-                        select(PersonaGenomeRow)
-                        .where(PersonaGenomeRow.companion_id == companion_id)
-                        .order_by(PersonaGenomeRow.version.desc())
+            if previous is not None:
+                previous.role = "standard"
+                previous.updated_at = utc_now()
+                # The partial unique index is evaluated per UPDATE in SQLite.
+                # Release it before assigning the new primary role.
+                await session.flush()
+            if companion.role != "primary":
+                companion.role = "primary"
+                companion.updated_at = utc_now()
+                session.add(
+                    governance_fact(
+                        owner_id=owner_id,
+                        subject_type="companion",
+                        subject_id=companion_id,
+                        action="companion.promoted_to_primary",
+                        payload={
+                            "previous_primary_id": (
+                                previous.companion_id if previous is not None else None
+                            )
+                        },
                     )
-                ).first()
-                if genome is not None:
-                    companion.current_genome_id = genome.genome_id
-
-        # Memory remains companion lifecycle; Device lifecycle belongs elsewhere.
-        await self.ensure_memory_realm(owner_id=owner_id, companion_id=companion_id)
-
-        async with self._session_factory() as session:
-            return await session.get(CompanionRow, companion_id)
+                )
+            realm, created = await _ensure_memory_realm_in_session(
+                session,
+                companion=companion,
+            )
+            if created:
+                session.add(
+                    governance_fact(
+                        owner_id=owner_id,
+                        subject_type="memory_realm",
+                        subject_id=realm.realm_id,
+                        action="memory_realm.cataloged",
+                        payload={"companion_id": companion_id, "engine": realm.engine},
+                    )
+                )
+        return companion
 
     async def provision_workspace(
         self,
@@ -384,7 +293,7 @@ class CompanionWorkspaceService:
         owner_id: str,
         companion_id: str | None = None,
         companion_display_name: str = "",
-        companion_kind: str = "companion",
+        role: str = "standard",
         companion_profile_json: dict | None = None,
         companion_runtime_config_json: dict | None = None,
         companion_metadata_json: dict | None = None,
@@ -395,15 +304,19 @@ class CompanionWorkspaceService:
         memory_engine: str = "mempalace",
         memory_engine_config_json: dict | None = None,
         memory_policy_json: dict | None = None,
-        is_master: bool = False,
     ) -> CompanionWorkspaceResult:
         owner_id = _validate_owner_id(owner_id)
-        companion_id = companion_id or f"c_{owner_id}_default"
-        genome_id = genome_id or f"g_{owner_id}_default"
-        realm_id = realm_id or f"r_{owner_id}_default"
-        _validate_generated_id("companion_id", companion_id)
-        _validate_generated_id("genome_id", genome_id)
-        _validate_generated_id("realm_id", realm_id)
+        if role not in COMPANION_ROLES:
+            raise OwnerWorkspaceError("role must be primary, standard, or guard")
+        resolved_companion_id = companion_id or f"c_{owner_id}"
+        resolved_genome_id = genome_id or f"g_{uuid4().hex}"
+        resolved_realm_id = realm_id or f"r_{uuid4().hex}"
+        for label, value in (
+            ("companion_id", resolved_companion_id),
+            ("genome_id", resolved_genome_id),
+            ("realm_id", resolved_realm_id),
+        ):
+            _validate_generated_id(label, value)
 
         async with self._session_factory() as session, session.begin():
             owner = await session.get(OwnerRow, owner_id)
@@ -411,88 +324,96 @@ class CompanionWorkspaceService:
                 raise OwnerWorkspaceError("owner not found")
             if owner.status != "active":
                 raise OwnerWorkspaceError("owner is not active")
+            if any(
+                (
+                    await session.get(CompanionRow, resolved_companion_id),
+                    await session.get(PersonaGenomeRow, resolved_genome_id),
+                    await session.get(MemoryRealmRow, resolved_realm_id),
+                )
+            ):
+                raise OwnerWorkspaceError("workspace identifier already exists")
+            if role == "primary" and await session.scalar(
+                select(CompanionRow.companion_id).where(
+                    CompanionRow.owner_id == owner_id,
+                    CompanionRow.role == "primary",
+                    CompanionRow.status == "active",
+                )
+            ):
+                raise OwnerWorkspaceError("owner already has an active primary companion")
 
-            existing_companion = await session.get(CompanionRow, companion_id)
-            existing_genome = await session.get(PersonaGenomeRow, genome_id)
-            existing_realm = await session.get(MemoryRealmRow, realm_id)
-            if existing_companion or existing_genome or existing_realm:
-                raise OwnerWorkspaceError("workspace already initialized")
-
-            companion_name = companion_display_name or f"{owner.display_name or owner_id} Companion"
+            companion_name = (
+                companion_display_name.strip() or f"{owner.display_name or owner_id} Companion"
+            )
             companion = CompanionRow(
-                companion_id=companion_id,
+                companion_id=resolved_companion_id,
                 owner_id=owner_id,
                 display_name=companion_name,
-                kind=companion_kind,
+                role=role,
                 status="active",
-                is_master=is_master,
-                companion_type=_companion_type_from_master(is_master),
-                profile_json=companion_profile_json or {},
-                runtime_config_json=companion_runtime_config_json or {},
-                metadata_json=companion_metadata_json or {},
+                profile_json=dict(companion_profile_json or {}),
+                runtime_config_json=dict(companion_runtime_config_json or {}),
+                metadata_json=dict(companion_metadata_json or {}),
             )
             session.add(companion)
             await session.flush()
 
-            normalized_genome = _normalize_genome(
+            normalized = _normalize_genome(
                 genome_json,
                 companion_name,
-                source_type=str((genome_source_json or {}).get("source_type") or "admin_workspace_initialize"),
-                base_genome_id=None,
+                source_type=str(
+                    (genome_source_json or {}).get("source_type") or "workspace_initialize"
+                ),
             )
-            normalized_genome_json = persona_genome_to_json(normalized_genome)
-            provenance = dict(normalized_genome_json.get("provenance") or {})
-            provenance.update({"owner_id": owner_id, "companion_id": companion_id})
-            normalized_genome_json["provenance"] = provenance
+            normalized_json = persona_genome_to_json(normalized)
+            normalized_json["provenance"] = {
+                **dict(normalized_json.get("provenance") or {}),
+                "owner_id": owner_id,
+                "companion_id": resolved_companion_id,
+            }
             genome = PersonaGenomeRow(
-                genome_id=genome_id,
-                companion_id=companion_id,
+                genome_id=resolved_genome_id,
+                companion_id=resolved_companion_id,
                 version=1,
                 status="committed",
                 base_genome_id=None,
                 schema_version=PERSONA_GENOME_SCHEMA,
-                genome_hash=persona_genome_hash(normalized_genome_json),
+                genome_hash=persona_genome_hash(normalized_json),
                 realizer_version=PERSONA_REALIZER,
-                applied_event_id=None,
-                source_json=genome_source_json
-                or {"source_type": "admin_workspace_initialize", "owner_id": owner_id},
-                genome_json=normalized_genome_json,
+                source_json=dict(
+                    genome_source_json
+                    or {"source_type": "workspace_initialize", "owner_id": owner_id}
+                ),
+                genome_json=normalized_json,
                 change_summary="Initial persona genome",
             )
-            session.add(genome)
-
             realm = MemoryRealmRow(
-                realm_id=realm_id,
+                realm_id=resolved_realm_id,
                 owner_id=owner_id,
-                companion_id=companion_id,
-                engine=memory_engine or "mempalace",
-                engine_config_json=memory_engine_config_json or {},
-                policy_json=memory_policy_json or {"scope": "owner", "recall": "companion_default"},
+                companion_id=resolved_companion_id,
+                engine=memory_engine.strip() or "mempalace",
+                engine_config_json=dict(memory_engine_config_json or {}),
+                policy_json=dict(
+                    memory_policy_json or {"scope": "owner", "recall": "companion_default"}
+                ),
                 status="active",
             )
-            session.add(realm)
-
-            # Both pointers are real foreign keys. Flush the new targets before
-            # updating the already-persistent companion row; foreign_keys=ON is
-            # an invariant of the V2 authority store.
+            session.add_all((genome, realm))
             await session.flush()
-
-            companion.current_genome_id = genome_id
-            companion.default_memory_realm_id = realm_id
-
-            # Workspace provisioning is one semantic transaction. Export one
-            # terminal governance fact instead of leaking four internal row
-            # creation details into the global audit contract.
-            event = _event(
+            companion.current_genome_id = genome.genome_id
+            companion.default_memory_realm_id = realm.realm_id
+            fact = governance_fact(
                 owner_id=owner_id,
-                companion_id=companion_id,
                 subject_type="companion",
-                subject_id=companion_id,
-                event_type="companion.workspace.initialized",
-                payload_json={"genome_id": genome_id, "realm_id": realm_id},
+                subject_id=resolved_companion_id,
+                action="companion.workspace.initialized",
+                payload={
+                    "role": role,
+                    "genome_id": genome.genome_id,
+                    "realm_id": realm.realm_id,
+                },
             )
-            genome.applied_event_id = event.event_id
-            _add_event(session, event)
+            genome.applied_event_id = fact.event_id
+            session.add(fact)
 
         return CompanionWorkspaceResult(
             companion=companion,
@@ -501,69 +422,83 @@ class CompanionWorkspaceService:
         )
 
 
+async def _owned_active_companion(session, owner_id: str, companion_id: str) -> CompanionRow:
+    companion = await session.get(CompanionRow, companion_id)
+    if companion is None or companion.owner_id != owner_id:
+        raise OwnerWorkspaceError("companion not found for owner")
+    if companion.status != "active":
+        raise OwnerWorkspaceError("companion is not active")
+    return companion
+
+
+async def _ensure_memory_realm_in_session(
+    session,
+    *,
+    companion: CompanionRow,
+    realm_id: str | None = None,
+    memory_engine: str = "mempalace",
+    memory_engine_config_json: dict | None = None,
+    memory_policy_json: dict | None = None,
+) -> tuple[MemoryRealmRow, bool]:
+    existing = await session.scalar(
+        select(MemoryRealmRow)
+        .where(
+            MemoryRealmRow.companion_id == companion.companion_id,
+            MemoryRealmRow.status == "active",
+        )
+        .order_by(MemoryRealmRow.created_at)
+    )
+    if existing is not None:
+        companion.default_memory_realm_id = existing.realm_id
+        companion.updated_at = utc_now()
+        return existing, False
+
+    resolved_realm_id = realm_id or f"r_{uuid4().hex}"
+    _validate_generated_id("realm_id", resolved_realm_id)
+    if await session.get(MemoryRealmRow, resolved_realm_id) is not None:
+        raise OwnerWorkspaceError(f"realm_id {resolved_realm_id!r} already exists")
+    realm = MemoryRealmRow(
+        realm_id=resolved_realm_id,
+        owner_id=companion.owner_id,
+        companion_id=companion.companion_id,
+        engine=memory_engine.strip() or "mempalace",
+        engine_config_json=dict(memory_engine_config_json or {}),
+        policy_json=dict(memory_policy_json or {"scope": "owner", "recall": "companion_default"}),
+        status="active",
+    )
+    session.add(realm)
+    await session.flush()
+    companion.default_memory_realm_id = resolved_realm_id
+    companion.updated_at = utc_now()
+    return realm, True
+
+
 def _validate_owner_id(owner_id: str) -> str:
-    owner_id = owner_id.strip()
-    if not OWNER_ID_RE.match(owner_id):
+    value = owner_id.strip()
+    if value != owner_id or not OWNER_ID_RE.fullmatch(value):
         raise OwnerWorkspaceError(
             "owner_id must be 1-48 chars and contain only letters, numbers, _, ., or -"
         )
-    return owner_id
+    return value
 
 
 def _validate_generated_id(label: str, value: str) -> None:
-    if not GENERATED_ID_RE.match(value):
+    if not GENERATED_ID_RE.fullmatch(value):
         raise OwnerWorkspaceError(
             f"{label} must be 1-64 chars and contain only letters, numbers, _, ., or -"
         )
-
-
-def _default_genome(display_name: str) -> dict:
-    return persona_genome_to_json(
-        build_default_persona_genome(name=display_name, origin="template")
-    )
 
 
 def _normalize_genome(
     genome_json: dict | None,
     display_name: str,
     *,
-    source_type: str = "template",
-    base_genome_id: str | None = None,
+    source_type: str,
 ):
-    if genome_json is None:
-        return build_default_persona_genome(
-            name=display_name,
-            archetype="companion",
-            origin=source_type,
-            base_genome_id=base_genome_id,
-        )
-    return normalize_persona_genome(genome_json)
-
-
-def _event(
-    *,
-    owner_id: str,
-    subject_type: str,
-    subject_id: str,
-    event_type: str,
-    payload_json: dict,
-    companion_id: str | None = None,
-) -> AuditOutboxRow:
-    # Route through the contract-carrying facade (fills tier/source/severity/
-    # outcome from the catalog); returned unpersisted for same-transaction add.
-    return build_event(
-        event_type=event_type,
-        owner_id=owner_id,
-        companion_id=companion_id,
-        subject_type=subject_type,
-        subject_id=subject_id,
-        payload_json=payload_json,
+    if genome_json is not None:
+        return normalize_persona_genome(genome_json)
+    return build_default_persona_genome(
+        name=display_name,
+        archetype="companion",
+        origin=source_type,
     )
-
-
-def _add_event(
-    session: AsyncSession,
-    event: AuditOutboxRow,
-) -> None:
-    """Write governance intent in the same System Data transaction."""
-    session.add(event)

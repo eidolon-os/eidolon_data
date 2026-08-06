@@ -10,8 +10,8 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import eidolon_data.schema  # noqa: F401
 from eidolon_data.db.base import Base
-from eidolon_data.schema import models  # noqa: F401
 from eidolon_data.settings import load_settings
 
 config = context.config

@@ -46,8 +46,8 @@ class DataSettings(BaseSettings):
     # serialization explicit inside one process instead of allowing an async
     # connection pool to manufacture self-contention.
     sqlite_pool_size: int = Field(default=1, ge=1, le=4)
-    # A consumer outside the authority process can be confined to query-only
-    # compatibility reads while its stable HTTP contract is rolled out.
+    # A controlled reader can be confined to query-only mode. Cross-project
+    # production integration should prefer a versioned authority contract.
     sqlite_read_only: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
@@ -105,9 +105,7 @@ def _apply_env_overrides(data: dict[str, Any]) -> None:
     if "EIDOLON_DATA_ECHO_SQL" in os.environ:
         data["echo_sql"] = _parse_bool(os.environ["EIDOLON_DATA_ECHO_SQL"])
     if "EIDOLON_DATA_SQLITE_READ_ONLY" in os.environ:
-        data["sqlite_read_only"] = _parse_bool(
-            os.environ["EIDOLON_DATA_SQLITE_READ_ONLY"]
-        )
+        data["sqlite_read_only"] = _parse_bool(os.environ["EIDOLON_DATA_SQLITE_READ_ONLY"])
 
 
 def _parse_bool(value: str) -> bool:

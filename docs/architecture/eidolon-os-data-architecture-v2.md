@@ -1,319 +1,193 @@
-# Eidolon OS Data Architecture V2
+# Eidolon OS System Data Architecture V2
 
-- Status: Agent/runtime and audit cutover implemented; Device/command convergence remains staged
-- Date: 2026-08-06
-- Compatibility: the legacy `eidolon.sqlite3` contents and schema are not migrated
+- Status: `eidolon_data` V2 boundary implemented and independently testable
+- Reviewed: 2026-08-06
+- Compatibility: no legacy schema, reader, migration, or data retention
 
-## Decision summary
+## Decision
 
-Eidolon separates logical authority, deployment, and physical persistence:
+The original “put operations for every kind of data in `eidolon_data`” goal is
+not a valid operating-system authority boundary. It groups code by storage
+technology instead of by ownership of mutable facts. That design inevitably
+creates a shared SQLite writer, a shared failure domain, and an import hub that
+allows one OS component to mutate another component's state.
 
-1. Logical authority follows the mutable fact, not generic CRUD ownership.
-2. No domain-per-service split is introduced. Existing Admin, Hub, Kernel,
-   Agent, Channel, and Memory processes remain the deployment units.
-3. SQLite files are partitioned by write profile and failure domain, not by
-   every domain noun.
-4. `eidolon_data` becomes the low-frequency sovereign system-data module for
-   Owner, Companion, Persona, Memory Realm catalog, and governed asset metadata.
-5. High-frequency runtime history stays with the existing process that creates
-   it. It never shares the system-data SQLite writer.
-6. Global audit uses a local transactional outbox, durable asynchronous
-   transport, and an independent rebuildable query index.
+V2 uses four independent concepts:
 
-## Product write profiles
+1. **Logical authority** follows the component that creates and arbitrates a
+   mutable fact.
+2. **Deployment** reuses existing Admin, Hub, Kernel, Agent, Channel, and Memory
+   processes; logical domains do not become a dozen microservices.
+3. **Physical storage** is split only when write profile, retention, recovery,
+   or failure isolation requires it.
+4. **Contracts** cross project boundaries; ORM rows do not.
 
-The important distinction is whether a write is on an interactive hot path,
-how often it can occur per product interaction, and whether it is source data
-or a rebuildable observation.
+`eidolon_data` is therefore a module hosted by the existing control plane, not
+a universal repository and not a required standalone microservice.
 
-| Data | Product frequency | Latency relationship | Authority / storage |
-|---|---|---|---|
-| Audio/video frames, VAD samples, partial STT/TTS | Continuous, highest | Hard realtime | Channel memory/provider buffers; never SQLite |
-| Presence/sensor samples, turn phase/milestones | Many per session/turn | Must not delay media | Telemetry with bounded queues, sampling and aggregation |
-| Body commands, delivery attempts, provider receipts | Bursty, potentially many per session | Must not use system DB lock | Channel/provider-local durable queue or receipt store |
-| Agent Turn/Message/runtime session | Usually one semantic transaction per turn | Outside first-token/media path | Agent-owned SQLite |
-| Memory fanout, extraction, vector/KG mutation | One or more operations per turn | Asynchronous | Memory-owned transport and backend |
-| Security/governance audit | Only on meaningful state transitions | Same local transaction, async globally | Authority-local audit outbox |
-| Owner/Companion lifecycle, Persona commit, Realm catalog | Human/configuration driven, low | Control plane | `eidolon_data` system SQLite |
-| Guard binding/policy/profile configuration | Human/configuration driven, low | Control plane | Admin-hosted Guard module; initially co-located in system SQLite |
-| Device admission and manifest | Onboarding/configuration driven, low | Control plane | Hub SQLite |
-| Device mount/attachment/revision | Session/configuration driven, low | Control plane | Kernel SQLite |
-| Global audit query timeline | Read-heavy projection | Must not contend with producers | Independent audit-index SQLite |
+## Final ownership
 
-Guard sensor facts and policy evaluations are not configuration. They are
-runtime telemetry/receipts and must not be promoted into the system-data DB
-merely because Guard configuration is co-located there.
+| Fact | Authority | Why |
+|---|---|---|
+| Owner identity/profile/settings/lifecycle | System Data | sovereign, low-frequency configuration |
+| Companion identity/role/lifecycle/config | System Data | owner-governed identity |
+| immutable Persona Genome/current pointer | System Data | governed, versioned identity state |
+| Memory Realm ID/engine/policy catalog | System Data | sovereignty pointer only |
+| Companion/Owner face integrity metadata | System Data | governed desired asset metadata |
+| Guard Companion policy binding | System Data | low-frequency owner policy; Device ID is opaque |
+| Device admission/manifest/revocation | Hub | Hub creates and arbitrates admission |
+| Device mount/attachment/revision | Kernel | Kernel owns local resource lifecycle |
+| Session/conversation/turn/message/job | Agent | Agent creates runtime history |
+| media/provider/body-command activity | Channel/provider | hot-path producer and delivery authority |
+| Memory payload/vector/graph operations | Memory | Memory owns storage and realization |
+| global audit query timeline | independent projection | rebuildable read model, never a business authority |
 
-The frequency labels above translate into structural write budgets, without
-inventing hardware-specific latency numbers:
-
-- media frames, VAD and partial transcripts: zero durable writes per frame or
-  partial result;
-- phase/milestone telemetry: zero authoritative SQLite writes; aggregate or
-  sample outside the audit lane;
-- one Agent turn: at most one terminal runtime transaction containing the turn,
-  messages and its necessary audit receipt; never one transaction per token;
-- one body command: one local durable enqueue plus bounded terminal state
-  transitions; transport retry attempts are metrics unless a terminal proof is
-  required;
-- one human control-plane mutation: one system-data transaction including its
-  governance outbox row.
-
-### Evidence from the legacy store
-
-The split is based on the inspected local `eidolon.sqlite3`, not only on domain
-names. On 2026-08-05 it was approximately 21.1 MB. The event table and indexes
-used approximately 11.63 MB and turns used approximately 7 MB; turn JSON
-accounted for roughly 6.7 MB. Of 13,348 event rows, Memory produced 8,109 and
-Channel 3,118; `memory.fanout.absorbed` alone accounted for 7,918 rows. In other
-words, operational observations and runtime history, rather than sovereign
-Owner/Companion configuration, dominated the central writer and file size.
-
-A local copied-database microbenchmark on the development Mac measured roughly
-1,219 commits/s for `DELETE + FULL`, 8,321 commits/s for `WAL + NORMAL`, and
-40,956 rows/s when `WAL + NORMAL` batched 50 rows. Four concurrent writers did
-not become parallel: throughput remained roughly 1,256/s and 7,733/s
-respectively. These figures are diagnostic evidence that WAL and batching help
-but do not remove SQLite's single-writer property. They are not production SLA
-claims and must not be copied into target Pi acceptance thresholds.
-
-The post-split profile benchmark is reproducible with
-`scripts/benchmark_sqlite_authority_profiles.py`. On the 2026-08-06 development
-Mac (Darwin arm64, SQLite 3.51.2), raw SQLite diagnostics measured p95 commit
-latency of 0.107 ms for a FULL System Data mutation plus outbox row, 0.100 ms
-for a FULL Agent turn plus two messages, and 0.221 ms per NORMAL audit-index
-batch of 100 events. A shared FULL database with four writer connections
-processed fewer commits per second than the single Agent writer (11,831 vs
-16,217) and produced a 66.526 ms maximum commit, illustrating the lock-tail
-risk that WAL does not remove. Running System, Agent, and Audit against three
-independent files completed concurrently without busy errors; their parallel
-p95 values were 0.224, 0.178, and 0.720 ms respectively.
-
-These numbers isolate SQLite transaction/fsync behavior and benefit from the
-development machine's filesystem cache. They exclude ORM, HTTP, LLM, media,
-and target-device effects, so they are evidence for partitioning—not product
-latency promises. Target Mac/Pi product gates still require E2E measurement.
-
-## Deployment topology
-
-No Owner, Companion, Persona, Realm, Guard, or Asset microservices are created.
-The Data application module and Guard control module are hosted by the existing
-Admin control-plane process. A narrow authenticated contract remains available
-to Kernel and other OS consumers. In-process Admin callers use application
-ports rather than ORM rows.
-
-The only additional process justified by this design is an optional
-`audit-indexer`. It has no business API. Its independent lifecycle is required
-so audit transport/indexing CPU, fsync, failure, or query load cannot affect a
-business authority. Its implementation and SQLite projection live in the Admin
-read plane (`eidolon_admin_server.audit`), not in `eidolon_data`.
-
-Outbox dispatch is not another domain service and there is no central process
-that opens every authority database. Each existing authority runs one small
-background dispatcher against only its own outbox. This preserves transaction
-ownership and failure isolation without creating Owner/Companion/Persona/etc.
-microservices.
-
-## Physical stores
-
-The target local layout is intentionally small:
-
-- `eidolon-system.sqlite3`: Data sovereign catalog and low-frequency Guard control.
-- `eidolon-hub.sqlite3`: Hub authority.
-- `eidolon-kernel.sqlite3`: Kernel authority.
-- `eidolon-agent.sqlite3`: conversations, turns, messages, jobs, runtime sessions.
-- Memory-owned palace/vector/graph storage.
-- `audit-index.sqlite3`: rebuildable global audit query projection.
-- object storage for large images, clips, and artifacts; SQLite stores metadata only.
-
-Physical co-location does not grant a module permission to mutate another
-module's tables. Conversely, a logical boundary does not require another
-process or database unless write load, retention, lifecycle, or security
-isolation demonstrates that need.
-
-## SQLite profile
-
-Authority databases use explicit settings rather than driver defaults:
-
-- WAL journal mode;
-- FULL synchronous durability by default;
-- foreign keys enabled on every connection;
-- explicit busy timeout and WAL checkpoint policy;
-- one pooled writer connection per authority process;
-- versioned migrations only in production.
-
-`eidolon-system.sqlite3` has one production writer: the Admin-hosted System
-Data authority. Agent currently opens that file only as a transitional
-low-frequency catalog reader, using SQLite `mode=ro` plus `query_only=ON`.
-Consequently Agent cannot run migrations, repair schema, or mutate
-Owner/Companion/Persona/Realm state, and its turn path never enters the System
-Data writer queue. This is physical write isolation, not the final logical
-contract: the remaining direct SQL/schema read dependency must be replaced by
-a narrow authenticated System Data application API.
-
-Rebuildable projections may use `synchronous=NORMAL` and batch writes. Changing
-an authority DB to NORMAL requires a documented power-loss trade-off and a
-measured latency need; it is not a global performance switch.
-
-SQLite remains a single-writer database. WAL reduces fsync overhead and allows
-readers during writes; it does not make concurrent writers parallel. Therefore
-high-frequency producer data is moved to its existing process-local store
-instead of being funneled through a central Data writer.
-
-## Audit plane
-
-Events are split into three lanes:
-
-1. `governance`: owner data, authorization, lifecycle, policy, deletion/export;
-   never sampled and enqueued in the domain transaction.
-2. `receipt`: terminal asynchronous outcomes needed to prove completion or
-   failure; durable with bounded retention.
-3. telemetry: phases, milestones, samples, latency, fanout absorption and other
-   operational observations; sampled/aggregated and excluded from global audit.
-
-Each authority writes a minimal outbox row in its own transaction. A local
-dispatcher publishes batches to the audit transport. Publication is at least
-once; `event_id` makes the independent audit index idempotent. Transport or
-index failure accumulates local backlog and does not add network I/O to the
-business commit. Failed delivery uses bounded exponential backoff rather than
-turning a transport outage into a SQLite/NATS retry storm. Once JetStream has
-durably acknowledged an envelope, the authority retains its published outbox
-copy for a short operational window (24 hours in the current Data dispatcher)
-and purges it periodically. Unacknowledged rows are never removed by this
-housekeeping path.
-
-`owner_id` is the only security/namespace principal in the current OS model.
-`producer` identifies the authority component that emitted an envelope; it is
-not a user, delegate, or second principal. The contract deliberately has no
-`actor_type`, `actor_id`, caller identity, or on-behalf-of fields. If the product
-later gains real delegated authorization, that must be introduced as an
-explicitly authorized delegation contract rather than inferred from a process
-name, ingress, Device, Companion, session, or trace.
-
-Global audit does not replace an authority's exact local ledger. For example,
-Kernel keeps its ordered mount/CAS audit as part of Kernel authority and exports
-only the governance envelope needed for the global owner timeline. The global
-index is a cross-authority read model, never a recovery source for Kernel,
-Agent, Hub, Data, Channel, or Memory.
-
-The dependency direction is explicit:
+This produces exactly nine System Data tables:
 
 ```text
-eidolon_sdk.biz.audit       stable envelope + publisher port only
-        ↑
-authority-local adapter    local outbox table + transaction mapping
-        ↑
-authority application      decides which domain transition is auditable
-
-audit transport adapter    SDK envelope -> JetStream
-audit indexer              JetStream -> rebuildable query SQLite
+owners                         companion_face_assets
+companions                     guard_bindings
+persona_genomes                owner_face_profile_revisions
+memory_realms                  owner_face_references
+audit_outbox
 ```
 
-The SDK contract imports no Data, NATS, SQLAlchemy model, or process lifecycle.
-Its optional integration layer owns the fail-fast JetStream publisher, while
-stream provisioning and indexing live in Admin infrastructure. `eidolon_data`
-implements only the system-data authority's outbox. Agent, Hub, Kernel, Channel
-and Memory must not import `eidolon_data` to publish global audit. This
-separates domain ownership, code dependencies, transport failure, indexing
-performance, and query load.
+There are no V2 tables or APIs for Device, body commands, Guard runtime
+deliveries/actions, Agent runtime, Memory operations, or generic Events.
 
-Global total ordering is not promised. `producer_seq` orders one producer;
-`trace_id` represents cross-authority causality; the index may assign an
-`ingest_seq` only for presentation.
+## Product frequency and write lanes
 
-## Performance gates
+| Lane | Examples | Frequency | System Data rule |
+|---|---|---:|---|
+| hard realtime | audio/video frames, VAD, partial STT/TTS | continuous | zero System Data writes |
+| runtime hot | sensor/presence, commands, delivery retries, turn phases | many per session | producer-local queue/telemetry only |
+| runtime durable | Agent turns/messages/jobs, Memory mutations | per interaction, possibly bursty | authority-local database |
+| control plane | Owner/Companion/Persona/Realm/Guard policy | human/config driven | one short System Data transaction |
+| governed asset metadata | upload/activation/clear and generation terminal state | low/bursty | metadata only; bytes stay in object storage |
+| governance audit | meaningful state transition | same rate as control mutation | one local outbox row in the domain transaction |
+| audit query projection | cross-authority search/index | asynchronous batches | independent store and lifecycle |
 
-The following are architecture acceptance criteria:
+The product invariant is structural: media and turn paths never wait on the
+System Data writer. A System Data command performs no network, Memory, Hub,
+Kernel, renderer, or audit-transport I/O while its SQL transaction is open.
 
-- Channel media and perception callbacks perform no synchronous system-DB,
-  audit-network, or audit-index I/O.
-- System-data writes do not share a SQLite file with Agent turns, Memory fanout,
-  Channel activity, body-command attempts, or the global audit index.
-- A domain transaction performs at most one SQLite commit for one semantic
-  state transition, including its audit outbox row.
-- Audit dispatch and index ingestion are batched and expose backlog, publish
-  latency, duplicate count, database commit latency, WAL size, and dropped
-  telemetry metrics.
-- Transport retry is exponential and capped; acknowledged outbox rows have an
-  explicit operational retention policy, while pending governance rows are not
-  age-purged.
-- Governance audit cannot be dropped. When its bounded local storage is
-  exhausted, governance mutations fail closed; telemetry uses independent
-  bounded/drop policies.
-- No production process calls `create_all` or repairs a sibling schema at
-  runtime after the V2 cutover.
+## SQLite performance model
 
-Numeric latency and throughput thresholds must be set from product E2E
-benchmarks on the target Mac/Pi hardware. They are not inferred from unit tests
-or development-machine SQLite microbenchmarks.
+SQLite still has one physical writer. WAL permits readers during a write but
+does not make multiple writers parallel. V2 addresses this rather than hiding
+it:
 
-## Cutover order
+- the writer contains only low-frequency control-plane mutations;
+- runtime/high-frequency domains use their existing authority-local stores;
+- one pooled connection serializes concurrent System Data writes inside the
+  authority process, avoiding self-contention and long lock tails;
+- every semantic mutation and its governance fact share one commit;
+- transactions contain SQL and deterministic domain logic only;
+- large media bytes live in object storage;
+- foreign keys, a 5-second busy timeout, WAL checkpointing, and FULL
+  synchronous durability are explicitly configured per connection;
+- read-only consumers use SQLite `mode=ro` plus `query_only=ON` during a
+  controlled integration, then move to a versioned authority contract.
 
-No legacy database migration is needed, but code dependencies still require an
-ordered cutover:
+The repository includes
+`scripts/benchmark_sqlite_authority_profiles.py` for reproducible diagnostics.
+Its output is evidence about the local filesystem and SQLite build, not a Mac,
+Pi, or product SLA. Numeric acceptance thresholds must come from target-device
+E2E measurements.
 
-1. establish the SDK audit contract, explicit SQLite profiles, Data outbox,
-   JetStream adapter and independent audit index;
-2. remove Memory fanout observations and Channel phase/milestone telemetry from
-   the shared Event table;
-3. move Agent runtime sessions, conversations, turns, messages and jobs into an
-   Agent-owned schema and database; restrict any transitional low-frequency
-   Companion/Persona catalog access to query-only mode, then replace it with a
-   Data application port/authority contract;
-4. move body command queues/receipts to Channel or the concrete provider that
-   owns delivery, and move Device admission/mount reads to Hub/Kernel contracts;
-5. change Admin Mission Control to compose three read models: Agent runtime,
-   operational telemetry, and the global audit index, instead of querying one
-   polymorphic Event table;
-6. delete legacy runtime/device/event tables and squash Data migrations into a
-   clean V2 system-data baseline. Do not retain a compatibility reader or copy
-   the old `eidolon.sqlite3`.
+The 2026-08-06 verification run on the current Darwin arm64 development host
+(Python 3.13.13, SQLite 3.51.2) measured a 0.094 ms p95 commit for 300 sequential
+FULL System Data mutations including an outbox row. Four writers sharing one
+FULL database produced a 72.026 ms maximum commit, while the three independent
+authority files completed the same diagnostic concurrently without a busy
+error. These observed numbers support writer separation; they are not retained
+as acceptance thresholds.
 
-Memory fanout status and all current Channel session/phase/milestone/terminal
-observations no longer write the system database. Channel telemetry is
-authority-local and Agent/Memory fanout observations use their operational
-lanes; neither is converted back into a global audit stream.
+## Application and code layers
 
-Steps 1–3 and 5 are implemented. Agent production bootstrap opens its WAL/FULL
-`eidolon-agent.sqlite3` as the only store it writes for runtime sessions,
-conversations, turns, messages, jobs, and its local audit outbox. Its temporary
-System Data catalog connection is enforced as SQLite read-only/query-only;
-Admin remains the sole System Data writer. Agent Admin readers have no runtime
-fallback to Data. Admin Mission Control composes Agent runtime, operational
-telemetry, and the independent audit index. Owner deletion is durably journaled
-and runs in fail-safe order: revoke/delete Agent runtime, delete System Data,
-then clean Memory/object state. If Agent is unavailable, System Data remains
-intact and the journal is retryable. Replay and product acceptance use separate
-files.
+```text
+API / host adapter
+        ↓
+application commands (`services/`)
+        ↓
+read queries / governed aggregate stores (`repositories/`)
+        ↓
+persistence rows (`schema/`) + SQLite (`db/`)
 
-System Data no longer defines or creates Agent runtime tables or the legacy
-`events` table. Same-transaction governance writes go to `audit_outbox`; a
-local dispatcher publishes immutable SDK envelopes and the Admin audit index
-is an independently rebuildable projection. The indexer is its only writable
-client; Admin opens the file with SQLite `mode=ro` and `query_only=ON`. Admin
-deployment runs Alembic to head before process start; runtime validates the
-authority schema and does not repair a legacy database.
+domain command ──same transaction──> local `audit_outbox`
+                                      ↓ async batch/retry
+                              SDK publisher port
+                                      ↓
+                            independent audit index
+```
 
-Step 4 remains intentionally staged. The physical Device compatibility/read
-surface and body-command control rows still have active Admin/Guard consumers.
-Hub already owns Device admission and Kernel owns mount/optional attachment in
-their independent authorities; removing the remaining Data Device/command
-surfaces requires those concrete consumer contracts to land together. They are
-not justification to restore Agent runtime or telemetry to System Data. The
-old `eidolon.sqlite3` and the pre-cutover `eidolon-system.sqlite3` are discarded
-rather than migrated.
+- `schema/` is divided by bounded persistence context: core, assets, Guard,
+  and audit. It imports no service or repository code.
+- repositories expose reads and small aggregate persistence behavior; they do
+  not call APIs or other authorities.
+- services own multi-row transactions, current-pointer changes, lifecycle
+  transitions, and deletions.
+- `DataStore` is the composition root. Its public surface has no legacy aliases.
+- the API is narrow, authenticated, versioned, and read-only; no generic CRUD
+  app is mounted.
+- tests enforce dependency direction and the exact table/accessor boundary.
 
-One additional boundary debt remains explicit: Agent's low-frequency
-Owner/Companion/Persona/Realm reads are physically safe but still compiled
-against the System Data schema. The next boundary change is a stable snapshot
-contract (with version/hash and cache semantics) owned by System Data. Until
-that lands, Agent is not a System Data writer, but it is still a schema-coupled
-reader; this document does not label that dependency as fully decoupled.
+## Atomic invariants
+
+- An Owner has at most one active primary Companion.
+- A Guard binding must point to an active Guard-role Companion owned by the
+  same Owner, but its external `device_id` has no Data foreign key.
+- Workspace initialization atomically creates Companion, initial immutable
+  Persona Genome, Memory Realm catalog row, both pointers, and one audit fact.
+- Persona proposal approval uses the expected base/current pointer and marks a
+  conflicting proposal stale rather than overwriting concurrent evolution.
+- Face assets and Owner face profiles use versioned desired/superseded state;
+  SQL stores integrity metadata, not bytes.
+- Deletion breaks cyclic pointers, cascades only System Data rows, retains its
+  audit fact, and returns Realm/object keys for the orchestrator to clean in
+  the owning authorities.
+
+## Audit decoupling
+
+Global audit is decoupled in four separate dimensions:
+
+1. **Architecture:** every authority decides which of its own transitions is a
+   governance fact. There is no central process that opens all business DBs.
+2. **Code:** the envelope and publisher protocol live in `eidolon_sdk`; Data
+   contains only its own outbox adapter and explicit fact constructors.
+3. **Technology:** the application depends on a publisher protocol, not NATS,
+   JetStream, or the audit-index schema.
+4. **Performance/failure:** the domain commit inserts one local row. A separate
+   dispatcher publishes batches, records only durable acknowledgements, and
+   uses capped exponential retry. Transport/index failure cannot add network
+   latency to the business transaction or corrupt the source authority.
+
+The global index is a rebuildable read model, not a recovery source. Local
+`event_id` provides idempotency; no global total order is promised.
+
+## Schema and cutover
+
+There is one explicit Alembic baseline:
+`0001_system_data_v2.py`. It creates only the canonical V2 tables. Production
+startup validates exact tables and columns and rejects retired/unknown storage.
+
+The cutover contract is:
+
+1. stop the old writer;
+2. create a fresh V2 database from Alembic;
+3. validate schema and authority health;
+4. atomically switch the configured database path;
+5. do not copy or retain `eidolon.sqlite3` or pre-V2 System Data contents.
+
+Other projects are changed only after this module passes its independent unit,
+component, integration, migration, read-only, contract, and real-process E2E
+gates.
 
 ## Non-goals
 
-- No database-per-table or service-per-domain split.
-- No shared ORM as an OS contract.
-- No universal event bus, Binder, blackboard, or ResourceGraph.
-- No migration or compatibility reader for legacy `eidolon.sqlite3` data.
-- No synchronous global audit write on an interactive path.
+- no service-per-table or domain-per-microservice split;
+- no shared ORM as an OS contract;
+- no central event table, universal bus, Binder, blackboard, or ResourceGraph;
+- no synchronous global audit write on an interaction path;
+- no compatibility reader or legacy data migration;
+- no claim that local development benchmarks are production performance SLAs.

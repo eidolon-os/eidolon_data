@@ -12,12 +12,12 @@ from eidolon_sdk.biz.persona import (
     persona_genome_to_json,
 )
 from sqlalchemy import desc, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from eidolon_data.audit import governance_fact
 from eidolon_data.db.base import utc_now
-from eidolon_data.events.facade import build_event
 from eidolon_data.repositories.persona import PersonaGenomeConflict
-from eidolon_data.schema.models import AuditOutboxRow, CompanionRow, PersonaGenomeRow
+from eidolon_data.schema import CompanionRow, PersonaGenomeRow
 
 
 class PersonaService:
@@ -47,6 +47,10 @@ class PersonaService:
     ) -> PersonaGenomeRow:
         async with self._session_factory() as session, session.begin():
             companion = await _owned_companion(session, owner_id, companion_id, lock=True)
+            if base_genome_id is not None:
+                base = await session.get(PersonaGenomeRow, base_genome_id)
+                if base is None or base.companion_id != companion_id:
+                    raise ValueError("base genome must belong to the same companion")
             genome = _genome_row(
                 genome_id=genome_id,
                 companion_id=companion_id,
@@ -412,18 +416,17 @@ def _event(
     subject_id: str | None = None,
     outcome: str | None = None,
 ):
-    return build_event(
+    return governance_fact(
         event_id=event_id,
         owner_id=owner_id,
-        companion_id=companion_id,
         subject_type=subject_type,
         subject_id=subject_id or genome.genome_id,
-        event_type=event_type,
-        outcome=outcome,
-        payload_json=payload,
+        action=event_type,
+        outcome=outcome or "success",
+        payload={"companion_id": companion_id, **payload},
     )
 
 
-def _add_event(session: AsyncSession, event: AuditOutboxRow) -> None:
+def _add_event(session, event) -> None:
     """Write governance intent in the same System Data transaction."""
     session.add(event)

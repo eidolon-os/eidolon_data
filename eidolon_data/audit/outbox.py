@@ -11,13 +11,22 @@ from eidolon_sdk.biz.audit import AuditEnvelope
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from eidolon_data.schema.models import AuditOutboxRow
+from eidolon_data.schema import AuditOutboxRow
 
 
 @dataclass(frozen=True)
 class PendingAuditBatch:
     events: list[AuditEnvelope]
     max_attempt_count: int
+
+
+@dataclass(frozen=True)
+class AuditDeliveryState:
+    event_id: str
+    attempt_count: int
+    published_at: datetime | None
+    next_attempt_at: datetime
+    last_error: str
 
 
 class AuditOutboxRepository:
@@ -81,6 +90,23 @@ class AuditOutboxRepository:
 
     async def list_pending(self, *, limit: int = 200) -> list[AuditEnvelope]:
         return (await self.pending_batch(limit=limit)).events
+
+    async def get_delivery_state(self, event_id: str) -> AuditDeliveryState | None:
+        """Read transport state without exposing the persistence session."""
+
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(AuditOutboxRow).where(AuditOutboxRow.event_id == event_id)
+            )
+            if row is None:
+                return None
+            return AuditDeliveryState(
+                event_id=row.event_id,
+                attempt_count=row.attempt_count,
+                published_at=_as_utc(row.published_at),
+                next_attempt_at=_as_utc(row.next_attempt_at),
+                last_error=row.last_error,
+            )
 
     async def pending_batch(self, *, limit: int = 200) -> PendingAuditBatch:
         now = datetime.now(UTC)
@@ -168,5 +194,13 @@ def _envelope(row: AuditOutboxRow) -> AuditEnvelope:
         data_classification=row.data_classification,
         schema_version=row.schema_version,
         payload=dict(row.payload_json or {}),
-        occurred_at=row.occurred_at,
+        occurred_at=_as_utc(row.occurred_at),
     )
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

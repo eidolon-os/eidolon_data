@@ -15,9 +15,10 @@ from uuid import uuid4
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
+from eidolon_data.audit import governance_fact
 from eidolon_data.db.base import utc_now
 from eidolon_data.repositories.base import Repository
-from eidolon_data.schema.models import CompanionFaceAssetRow, CompanionRow
+from eidolon_data.schema import CompanionFaceAssetRow, CompanionRow
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -101,6 +102,20 @@ class CompanionFaceAssetsRepository(Repository):
                 updated_at=now,
             )
             session.add(row)
+            session.add(
+                governance_fact(
+                    owner_id=companion.owner_id,
+                    subject_type="companion_face_asset",
+                    subject_id=row.face_asset_id,
+                    action="companion.face_asset.activated",
+                    data_classification="sensitive",
+                    payload={
+                        "companion_id": companion_id,
+                        "version": row.version,
+                        "sha256": cond_sha256,
+                    },
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError as exc:
@@ -153,6 +168,20 @@ class CompanionFaceAssetsRepository(Repository):
             row.idle_sha256 = sha256
             row.idle_error = None
             row.updated_at = utc_now()
+            session.add(
+                governance_fact(
+                    owner_id=row.owner_id,
+                    subject_type="companion_face_asset",
+                    subject_id=row.face_asset_id,
+                    action="companion.face_asset.idle_clip_ready",
+                    data_classification="sensitive",
+                    payload={
+                        "companion_id": row.companion_id,
+                        "version": row.version,
+                        "sha256": sha256,
+                    },
+                )
+            )
             await session.commit()
             await session.refresh(row)
             return row
@@ -185,17 +214,28 @@ class CompanionFaceAssetsRepository(Repository):
         Returns ``True`` when an active face was superseded, ``False`` when the
         companion already had none.
         """
-        async with self._session_factory() as session:
-            result = await session.execute(
-                update(CompanionFaceAssetRow)
-                .where(
+        async with self._session_factory() as session, session.begin():
+            row = await session.scalar(
+                select(CompanionFaceAssetRow).where(
                     CompanionFaceAssetRow.companion_id == companion_id,
                     CompanionFaceAssetRow.state == "active",
                 )
-                .values(state="superseded", updated_at=utc_now())
             )
-            await session.commit()
-            return int(result.rowcount or 0) > 0
+            if row is None:
+                return False
+            row.state = "superseded"
+            row.updated_at = utc_now()
+            session.add(
+                governance_fact(
+                    owner_id=row.owner_id,
+                    subject_type="companion_face_asset",
+                    subject_id=row.face_asset_id,
+                    action="companion.face_asset.cleared",
+                    data_classification="sensitive",
+                    payload={"companion_id": companion_id, "version": row.version},
+                )
+            )
+            return True
 
     async def list_storage_keys_for_companion(self, companion_id: str) -> list[str]:
         """Every object-store key this companion owns (cond image + idle clip),

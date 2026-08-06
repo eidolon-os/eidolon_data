@@ -1,9 +1,9 @@
 """Local encrypted-volume-friendly object storage adapter.
 
-SQL stores only owner-scoped metadata and opaque keys.  This adapter owns all
-filesystem path validation and atomic file replacement so Admin and Hub do not
-grow independent storage implementations.  Deployments may place the root on
-an encrypted volume or replace this adapter behind the same small interface.
+SQL stores only owner-scoped metadata and opaque keys. This authority-local
+adapter owns filesystem path validation and atomic file replacement. Deployments
+may place the root on an encrypted volume or replace the adapter behind the same
+small interface.
 """
 
 from __future__ import annotations

@@ -6,7 +6,7 @@ from eidolon_data.services.companion import (
     CompanionDeletionService,
 )
 from eidolon_data.services.datastore import DataStore
-from eidolon_data.services.memory_service import MemoryService
+from eidolon_data.services.owner_deletion import OwnerDeletionResult, OwnerDeletionService
 from eidolon_data.services.owner_workspace import (
     CompanionWorkspaceResult,
     CompanionWorkspaceService,
@@ -23,8 +23,9 @@ __all__ = [
     "CompanionWorkspaceResult",
     "CompanionWorkspaceService",
     "DataStore",
-    "MemoryService",
     "OwnerCreateResult",
+    "OwnerDeletionResult",
+    "OwnerDeletionService",
     "OwnerService",
     "OwnerWorkspaceError",
     "PersonaService",
