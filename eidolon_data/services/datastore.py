@@ -42,8 +42,10 @@ from eidolon_data.settings import DataSettings
 class DataStore:
     """System-data authority facade hosted by the Admin control plane.
 
-    Device/event accessors are transitional removal targets; Agent runtime has
-    already moved to its own authority store.
+    Device/body-command accessors are transitional removal targets; Agent
+    runtime has already moved to its own authority store. ``events`` is a
+    compatibility-shaped facade over this authority's audit outbox, not a
+    second event table.
     """
 
     settings: DataSettings
@@ -69,11 +71,22 @@ class DataStore:
         )
 
     async def init_schema(self) -> None:
+        if self.settings.sqlite_read_only:
+            raise RuntimeError("read-only System Data clients cannot initialize schema")
         await init_schema(self.engine)
 
     async def validate_schema(self) -> None:
         """Validate an Alembic-managed production schema without mutating it."""
         await validate_schema(self.engine)
+        if self.settings.sqlite_read_only:
+            from sqlalchemy import text
+
+            async with self.engine.connect() as connection:
+                query_only = int(
+                    (await connection.execute(text("PRAGMA query_only"))).scalar_one()
+                )
+                if query_only != 1:
+                    raise RuntimeError("System Data reader is not query-only")
 
     async def close(self) -> None:
         await self.engine.dispose()

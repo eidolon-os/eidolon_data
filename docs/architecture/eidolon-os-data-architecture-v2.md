@@ -1,7 +1,7 @@
 # Eidolon OS Data Architecture V2
 
-- Status: Accepted for implementation
-- Date: 2026-08-05
+- Status: Agent/runtime and audit cutover implemented; Device/command convergence remains staged
+- Date: 2026-08-06
 - Compatibility: the legacy `eidolon.sqlite3` contents and schema are not migrated
 
 ## Decision summary
@@ -77,6 +77,23 @@ respectively. These figures are diagnostic evidence that WAL and batching help
 but do not remove SQLite's single-writer property. They are not production SLA
 claims and must not be copied into target Pi acceptance thresholds.
 
+The post-split profile benchmark is reproducible with
+`scripts/benchmark_sqlite_authority_profiles.py`. On the 2026-08-06 development
+Mac (Darwin arm64, SQLite 3.51.2), raw SQLite diagnostics measured p95 commit
+latency of 0.107 ms for a FULL System Data mutation plus outbox row, 0.100 ms
+for a FULL Agent turn plus two messages, and 0.221 ms per NORMAL audit-index
+batch of 100 events. A shared FULL database with four writer connections
+processed fewer commits per second than the single Agent writer (11,831 vs
+16,217) and produced a 66.526 ms maximum commit, illustrating the lock-tail
+risk that WAL does not remove. Running System, Agent, and Audit against three
+independent files completed concurrently without busy errors; their parallel
+p95 values were 0.224, 0.178, and 0.720 ms respectively.
+
+These numbers isolate SQLite transaction/fsync behavior and benefit from the
+development machine's filesystem cache. They exclude ORM, HTTP, LLM, media,
+and target-device effects, so they are evidence for partitioning—not product
+latency promises. Target Mac/Pi product gates still require E2E measurement.
+
 ## Deployment topology
 
 No Owner, Companion, Persona, Realm, Guard, or Asset microservices are created.
@@ -124,6 +141,15 @@ Authority databases use explicit settings rather than driver defaults:
 - explicit busy timeout and WAL checkpoint policy;
 - one pooled writer connection per authority process;
 - versioned migrations only in production.
+
+`eidolon-system.sqlite3` has one production writer: the Admin-hosted System
+Data authority. Agent currently opens that file only as a transitional
+low-frequency catalog reader, using SQLite `mode=ro` plus `query_only=ON`.
+Consequently Agent cannot run migrations, repair schema, or mutate
+Owner/Companion/Persona/Realm state, and its turn path never enters the System
+Data writer queue. This is physical write isolation, not the final logical
+contract: the remaining direct SQL/schema read dependency must be replaced by
+a narrow authenticated System Data application API.
 
 Rebuildable projections may use `synchronous=NORMAL` and batch writes. Changing
 an authority DB to NORMAL requires a documented power-loss trade-off and a
@@ -231,8 +257,9 @@ ordered cutover:
 2. remove Memory fanout observations and Channel phase/milestone telemetry from
    the shared Event table;
 3. move Agent runtime sessions, conversations, turns, messages and jobs into an
-   Agent-owned schema and database; Agent may read low-frequency Companion and
-   Persona facts only through a Data application port/authority contract;
+   Agent-owned schema and database; restrict any transitional low-frequency
+   Companion/Persona catalog access to query-only mode, then replace it with a
+   Data application port/authority contract;
 4. move body command queues/receipts to Channel or the concrete provider that
    owns delivery, and move Device admission/mount reads to Hub/Kernel contracts;
 5. change Admin Mission Control to compose three read models: Agent runtime,
@@ -242,24 +269,46 @@ ordered cutover:
    clean V2 system-data baseline. Do not retain a compatibility reader or copy
    the old `eidolon.sqlite3`.
 
-Steps 1 and 2 are implemented in the current change: Memory fanout status and
-all current Channel session/phase/milestone/terminal observations no longer
-write the system database. Channel telemetry is in-process and Agent/Memory
-fanout observations use their operational lanes. The old runtime tables remain
-transitional only until steps 3–5 remove active consumers; deleting them
-earlier would turn an architectural cleanup into an uncontrolled
-multi-repository outage.
+Memory fanout status and all current Channel session/phase/milestone/terminal
+observations no longer write the system database. Channel telemetry is
+authority-local and Agent/Memory fanout observations use their operational
+lanes; neither is converted back into a global audit stream.
 
-Step 3 now has an isolated implementation baseline in Agent: its own ORM,
-`eidolon-agent.sqlite3` store, WAL/FULL profile, clean schema version, local
-terminal-job audit outbox, runtime query adapter, and owner-runtime deletion
-path. Isolation tests run it without opening Data. Agent Admin readers prefer a
-runtime store and retain a temporary Data fallback. The production bootstrap
-has deliberately not been switched yet: Admin Mission Control, the cross-store
-owner deletion journal, replay tooling, and product-acceptance cleanup must be
-migrated and verified as one release boundary first. This is a deployment
-safety gate, not a legacy-data migration requirement; the old database will
-still not be copied when cutover occurs.
+Steps 1–3 and 5 are implemented. Agent production bootstrap opens its WAL/FULL
+`eidolon-agent.sqlite3` as the only store it writes for runtime sessions,
+conversations, turns, messages, jobs, and its local audit outbox. Its temporary
+System Data catalog connection is enforced as SQLite read-only/query-only;
+Admin remains the sole System Data writer. Agent Admin readers have no runtime
+fallback to Data. Admin Mission Control composes Agent runtime, operational
+telemetry, and the independent audit index. Owner deletion is durably journaled
+and runs in fail-safe order: revoke/delete Agent runtime, delete System Data,
+then clean Memory/object state. If Agent is unavailable, System Data remains
+intact and the journal is retryable. Replay and product acceptance use separate
+files.
+
+System Data no longer defines or creates Agent runtime tables or the legacy
+`events` table. Same-transaction governance writes go to `audit_outbox`; a
+local dispatcher publishes immutable SDK envelopes and the Admin audit index
+is an independently rebuildable projection. The indexer is its only writable
+client; Admin opens the file with SQLite `mode=ro` and `query_only=ON`. Admin
+deployment runs Alembic to head before process start; runtime validates the
+authority schema and does not repair a legacy database.
+
+Step 4 remains intentionally staged. The physical Device compatibility/read
+surface and body-command control rows still have active Admin/Guard consumers.
+Hub already owns Device admission and Kernel owns mount/optional attachment in
+their independent authorities; removing the remaining Data Device/command
+surfaces requires those concrete consumer contracts to land together. They are
+not justification to restore Agent runtime or telemetry to System Data. The
+old `eidolon.sqlite3` and the pre-cutover `eidolon-system.sqlite3` are discarded
+rather than migrated.
+
+One additional boundary debt remains explicit: Agent's low-frequency
+Owner/Companion/Persona/Realm reads are physically safe but still compiled
+against the System Data schema. The next boundary change is a stable snapshot
+contract (with version/hash and cache semantics) owned by System Data. Until
+that lands, Agent is not a System Data writer, but it is still a schema-coupled
+reader; this document does not label that dependency as fully decoupled.
 
 ## Non-goals
 

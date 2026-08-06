@@ -46,11 +46,16 @@ class DataSettings(BaseSettings):
     # serialization explicit inside one process instead of allowing an async
     # connection pool to manufacture self-contention.
     sqlite_pool_size: int = Field(default=1, ge=1, le=4)
+    # A consumer outside the authority process can be confined to query-only
+    # compatibility reads while its stable HTTP contract is rolled out.
+    sqlite_read_only: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def database_url(self) -> str:
         path = Path(self.sqlite_path).expanduser()
+        if self.sqlite_read_only:
+            return f"sqlite+aiosqlite:///file:{path}?mode=ro&uri=true"
         return f"sqlite+aiosqlite:///{path}"
 
 
@@ -99,6 +104,10 @@ def _apply_env_overrides(data: dict[str, Any]) -> None:
         data["object_store_path"] = os.environ["EIDOLON_DATA_OBJECT_STORE_PATH"]
     if "EIDOLON_DATA_ECHO_SQL" in os.environ:
         data["echo_sql"] = _parse_bool(os.environ["EIDOLON_DATA_ECHO_SQL"])
+    if "EIDOLON_DATA_SQLITE_READ_ONLY" in os.environ:
+        data["sqlite_read_only"] = _parse_bool(
+            os.environ["EIDOLON_DATA_SQLITE_READ_ONLY"]
+        )
 
 
 def _parse_bool(value: str) -> bool:

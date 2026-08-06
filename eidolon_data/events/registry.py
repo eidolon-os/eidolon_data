@@ -1,10 +1,10 @@
 """Event-type registry — the catalog as code.
 
-One authoritative declaration of every event the platform may write to the
-``events`` table, with its classification tier, originating subsystem and
-default severity/outcome. The ``record_event`` facade (Phase 1) validates
-against this catalog so ``event_type`` strings, tiers and sources stop being
-implicit conventions scattered across writers.
+One declaration of the event vocabulary used by Data's governance facade and
+legacy contract tests, including classification, originating subsystem and
+default severity/outcome. Data persists governance facts only to its local
+audit outbox; activity entries document authority-local telemetry contracts
+and are rejected by Data's writer.
 
 Naming: ``<domain>.<entity>.<action>`` (lowercase, dot-separated). A few
 historical strings drift from that; they are marked ``legacy=True`` while an

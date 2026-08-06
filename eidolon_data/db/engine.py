@@ -16,8 +16,10 @@ from eidolon_data.settings import DataSettings
 def create_engine(settings: DataSettings) -> AsyncEngine:
     engine_kwargs: dict[str, object] = {"echo": settings.echo_sql}
     if settings.database_url.startswith("sqlite+aiosqlite:///"):
-        path_text = settings.database_url.removeprefix("sqlite+aiosqlite:///")
-        Path(path_text).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        if not settings.sqlite_read_only:
+            Path(settings.sqlite_path).expanduser().parent.mkdir(
+                parents=True, exist_ok=True
+            )
         engine_kwargs.update(
             connect_args={"timeout": settings.sqlite_busy_timeout_ms / 1_000},
             pool_size=settings.sqlite_pool_size,
@@ -43,14 +45,17 @@ def _install_sqlite_profile(engine: AsyncEngine, settings: DataSettings) -> None
     ) -> None:
         cursor = dbapi_connection.cursor()
         try:
-            cursor.execute(f"PRAGMA journal_mode={settings.sqlite_journal_mode}")
-            cursor.execute(f"PRAGMA synchronous={settings.sqlite_synchronous}")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute(f"PRAGMA busy_timeout={settings.sqlite_busy_timeout_ms}")
-            cursor.execute(
-                "PRAGMA wal_autocheckpoint="
-                f"{settings.sqlite_wal_autocheckpoint_pages}"
-            )
+            if settings.sqlite_read_only:
+                cursor.execute("PRAGMA query_only=ON")
+            else:
+                cursor.execute(f"PRAGMA journal_mode={settings.sqlite_journal_mode}")
+                cursor.execute(f"PRAGMA synchronous={settings.sqlite_synchronous}")
+                cursor.execute(
+                    "PRAGMA wal_autocheckpoint="
+                    f"{settings.sqlite_wal_autocheckpoint_pages}"
+                )
         finally:
             cursor.close()
 
@@ -180,7 +185,7 @@ _GUARD_COLUMNS: dict[str, set[str]] = {
     },
 }
 
-_RETIRED_AGENT_TABLES = {
+_RETIRED_SYSTEM_TABLES = {
     "runtime_sessions",
     "conversations",
     "turns",
@@ -198,10 +203,11 @@ def _assert_guard_schema(connection: Connection) -> None:
     problems: list[str] = []
     if "storage_objects" in tables:
         problems.append("legacy table storage_objects is present")
-    retired = sorted(tables & _RETIRED_AGENT_TABLES)
+    retired = sorted(tables & _RETIRED_SYSTEM_TABLES)
     if retired:
         problems.append(
-            "Agent runtime tables remain in System Data: " + ", ".join(retired)
+            "retired runtime/event tables remain in System Data: "
+            + ", ".join(retired)
         )
     for table, expected in _GUARD_COLUMNS.items():
         if table not in tables:

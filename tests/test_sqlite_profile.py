@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
+from eidolon_data import DataStore
 from eidolon_data.db.engine import create_engine
 from eidolon_data.settings import DataSettings
 
@@ -43,3 +46,24 @@ async def test_rebuildable_profile_can_choose_normal_synchronous(tmp_path) -> No
             assert (await connection.execute(text("PRAGMA synchronous"))).scalar() == 1
     finally:
         await engine.dispose()
+
+
+async def test_query_only_consumer_cannot_mutate_system_data(tmp_path) -> None:
+    path = tmp_path / "eidolon-system.sqlite3"
+    writer = DataStore.open(DataSettings(sqlite_path=str(path)))
+    await writer.init_schema()
+    await writer.owner_service.create_owner(owner_id="owner-read-only")
+    await writer.close()
+
+    reader = DataStore.open(
+        DataSettings(sqlite_path=str(path), sqlite_read_only=True)
+    )
+    try:
+        await reader.validate_schema()
+        assert await reader.owners.get("owner-read-only") is not None
+        with pytest.raises(RuntimeError, match="cannot initialize schema"):
+            await reader.init_schema()
+        with pytest.raises(OperationalError):
+            await reader.owner_service.create_owner(owner_id="owner-write-denied")
+    finally:
+        await reader.close()

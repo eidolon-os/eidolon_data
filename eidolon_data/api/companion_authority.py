@@ -54,7 +54,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await store.init_schema()
+        await store.validate_schema()
         try:
             yield
         finally:
