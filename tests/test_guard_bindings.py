@@ -52,8 +52,13 @@ async def test_guard_bindings_are_multi_guard_and_auto_provision_isolated_worksp
     assert [(row.runtime_revision, row.desired_runtime_state, row.status) for row in first_deliveries] == [
         (1, "running", "pending")
     ]
-    assert (await store.devices.get_device("atk-1")).bound_companion_id == "guard-1"
+    claimed_device = await store.devices.get_device("atk-1")
+    assert claimed_device.owner_id is None
+    assert claimed_device.bound_companion_id is None
 
+    await store.guard_bindings.ensure_guard_companion(
+        owner_id="owner-1", companion_id="guard-2"
+    )
     second = await store.guard_bindings.claim(
         owner_id="owner-1",
         device_id="atk-2",
@@ -83,7 +88,9 @@ async def test_guard_bindings_are_multi_guard_and_auto_provision_isolated_worksp
         (1, "running"),
         (2, "stopped"),
     ]
-    assert (await store.devices.get_device("atk-1")).owner_id is None
+    replaced_device = await store.devices.get_device("atk-1")
+    assert replaced_device.owner_id is None
+    assert replaced_device.bound_companion_id is None
     assert (await store.guard_bindings.get(second.binding_id)).state == "active"
 
 
@@ -117,11 +124,15 @@ async def test_owner_presence_projection_debounces_replay_and_expires_lease(
         owner_id=None,
         capabilities_json={"guard": {"enabled": True, "protocol_versions": [1]}},
     )
+    await store.guard_bindings.ensure_guard_companion(
+        owner_id="owner-presence", companion_id="guard-presence"
+    )
     binding = await store.guard_bindings.claim(
         owner_id="owner-presence",
         device_id="atk-presence",
         guard_companion_id="guard-presence",
     )
+    audit_before_presence = await store.audit_outbox.list_pending()
     now = datetime(2026, 7, 15, 4, 0, tzinfo=UTC)
 
     entered = await store.guard_bindings.apply_owner_presence(
@@ -180,6 +191,10 @@ async def test_owner_presence_projection_debounces_replay_and_expires_lease(
         now=now + timedelta(seconds=20),
     )
     assert left is not None and left.transition == "left"
+    audit_after_presence = await store.audit_outbox.list_pending()
+    assert [event.event_id for event in audit_after_presence] == [
+        event.event_id for event in audit_before_presence
+    ]
 
 
 async def test_reclaim_reuses_owner_device_binding_identity(store: DataStore) -> None:
@@ -189,12 +204,18 @@ async def test_reclaim_reuses_owner_device_binding_identity(store: DataStore) ->
         owner_id=None,
         capabilities_json={"guard": {"enabled": True, "protocol_versions": [1]}},
     )
+    await store.guard_bindings.ensure_guard_companion(
+        owner_id="owner-1", companion_id="guard-1"
+    )
     first = await store.guard_bindings.claim(
         owner_id="owner-1",
         device_id="atk-1",
         guard_companion_id="guard-1",
     )
     await store.guard_bindings.disable(first.binding_id)
+    unchanged = await store.devices.get_device("atk-1")
+    assert unchanged.owner_id is None
+    assert unchanged.bound_companion_id is None
 
     reclaimed = await store.guard_bindings.claim(
         owner_id="owner-1",
@@ -225,6 +246,9 @@ async def test_guard_policy_config_is_normalized_and_revision_checked(store: Dat
         device_id="atk-1",
         owner_id=None,
         capabilities_json={"guard": {"enabled": True, "protocol_versions": [1]}},
+    )
+    await store.guard_bindings.ensure_guard_companion(
+        owner_id="owner-1", companion_id="guard-1"
     )
     binding = await store.guard_bindings.claim(
         owner_id="owner-1",
@@ -299,6 +323,9 @@ async def test_guard_policy_action_outbox_survives_acknowledgement(store: DataSt
         owner_id=None,
         capabilities_json={"guard": {"enabled": True, "protocol_versions": [1]}},
     )
+    await store.guard_bindings.ensure_guard_companion(
+        owner_id="owner-1", companion_id="guard-1"
+    )
     binding = await store.guard_bindings.claim(
         owner_id="owner-1",
         device_id="atk-1",
@@ -351,6 +378,9 @@ async def test_guard_policy_action_tracks_fact_replay_and_command_mapping(store:
         device_id="atk-1",
         owner_id=None,
         capabilities_json={"guard": {"enabled": True, "protocol_versions": [1]}},
+    )
+    await store.guard_bindings.ensure_guard_companion(
+        owner_id="owner-1", companion_id="guard-1"
     )
     binding = await store.guard_bindings.claim(
         owner_id="owner-1",

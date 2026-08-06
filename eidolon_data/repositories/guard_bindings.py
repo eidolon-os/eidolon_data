@@ -19,6 +19,7 @@ from eidolon_sdk.biz.persona import (
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
+from eidolon_data.audit.outbox import AuditOutboxRepository
 from eidolon_data.db.base import utc_now
 from eidolon_data.repositories.base import Repository
 from eidolon_data.repositories.guard_runtime_deliveries import enqueue_runtime_delivery
@@ -314,16 +315,11 @@ class GuardBindingsRepository(Repository):
         async with self._session_factory() as session:
             companion = await session.get(CompanionRow, guard_companion_id)
             if companion is None:
-                if await session.get(OwnerRow, owner_id) is None:
-                    raise KeyError(f"owner not found: {owner_id}")
-                companion = _new_guard_companion(
-                    owner_id=owner_id,
-                    companion_id=guard_companion_id,
-                    display_name=guard_display_name,
+                raise KeyError(
+                    f"guard companion not found: {guard_companion_id}; "
+                    "provision it explicitly before assigning a Device"
                 )
-                session.add(companion)
             _validate_guard_companion(companion, owner_id)
-            await _ensure_guard_workspace(session, companion)
             device = await session.get(DeviceRow, device_id)
             if device is None:
                 raise KeyError(f"device not found: {device_id}")
@@ -379,21 +375,6 @@ class GuardBindingsRepository(Repository):
                 companion_current.updated_at = now
                 enqueue_runtime_delivery(session, companion_current)
                 next_config_revision = companion_current.config_revision + 1
-                old_device = await session.get(DeviceRow, companion_current.device_id)
-                if old_device is not None:
-                    old_device.owner_id = None
-                    old_device.bound_companion_id = None
-                    old_device.interaction_mode = None
-                    old_device.status = "discovered"
-                    old_device.updated_at = now
-
-            device.owner_id = owner_id
-            device.bound_companion_id = guard_companion_id
-            device.status = "active"
-            device.approved_at = device.approved_at or now
-            device.approved_by = device.approved_by or "admin:guard-claim"
-            device.revoked_at = None
-            device.updated_at = now
             if existing_pair is None:
                 row = GuardBindingRow(
                     binding_id=f"gb_{uuid4().hex}",
@@ -431,6 +412,22 @@ class GuardBindingsRepository(Repository):
                 row.updated_at = now
             enqueue_runtime_delivery(session, row)
             await enqueue_desired_profile_for_binding(session, row)
+            session.add(
+                AuditOutboxRepository.build_row(
+                    producer="eidolon-guard",
+                    category="governance",
+                    owner_id=owner_id,
+                    subject_type="guard_binding",
+                    subject_id=row.binding_id,
+                    action="guard.binding.claimed",
+                    payload={
+                        "device_id": row.device_id,
+                        "guard_companion_id": row.guard_companion_id,
+                        "policy_id": row.policy_id,
+                        "replace": replace,
+                    },
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError as exc:
@@ -474,6 +471,17 @@ class GuardBindingsRepository(Repository):
                 raise ValueError("guard runtime configuration changed; refresh and retry")
             await session.refresh(row)
             enqueue_runtime_delivery(session, row)
+            session.add(
+                AuditOutboxRepository.build_row(
+                    producer="eidolon-guard",
+                    category="governance",
+                    owner_id=row.owner_id,
+                    subject_type="guard_binding",
+                    subject_id=row.binding_id,
+                    action="guard.runtime.configured",
+                    payload={"runtime_revision": row.runtime_revision},
+                )
+            )
             await session.commit()
             await session.refresh(row)
             return row
@@ -511,6 +519,21 @@ class GuardBindingsRepository(Repository):
             if result.rowcount != 1:
                 await session.rollback()
                 raise ValueError("guard binding configuration changed; refresh and retry")
+            await session.refresh(row)
+            session.add(
+                AuditOutboxRepository.build_row(
+                    producer="eidolon-guard",
+                    category="governance",
+                    owner_id=row.owner_id,
+                    subject_type="guard_binding",
+                    subject_id=row.binding_id,
+                    action="guard.binding.configured",
+                    payload={
+                        "config_revision": row.config_revision,
+                        "policy_id": row.policy_id,
+                    },
+                )
+            )
             await session.commit()
             await session.refresh(row)
             return row
@@ -529,14 +552,24 @@ class GuardBindingsRepository(Repository):
                 row.runtime_revision += 1
                 row.updated_at = now
                 enqueue_runtime_delivery(session, row)
-                device = await session.get(DeviceRow, row.device_id)
-                if device is not None:
-                    device.owner_id = None
-                    device.bound_companion_id = None
-                    device.interaction_mode = None
-                    device.status = "revoked" if revoke else "discovered"
-                    device.revoked_at = now if revoke else None
-                    device.updated_at = now
+                session.add(
+                    AuditOutboxRepository.build_row(
+                        producer="eidolon-guard",
+                        category="governance",
+                        owner_id=row.owner_id,
+                        subject_type="guard_binding",
+                        subject_id=row.binding_id,
+                        action=(
+                            "guard.binding.revoked"
+                            if revoke
+                            else "guard.binding.disabled"
+                        ),
+                        payload={
+                            "device_id": row.device_id,
+                            "runtime_revision": row.runtime_revision,
+                        },
+                    )
+                )
             await session.commit()
             await session.refresh(row)
             return row
@@ -642,6 +675,7 @@ async def _ensure_guard_workspace(session, companion: CompanionRow) -> None:
             )
             session.add(existing)
         genome = existing
+    await session.flush()
     companion.current_genome_id = genome.genome_id
 
     realm = None
@@ -678,4 +712,5 @@ async def _ensure_guard_workspace(session, companion: CompanionRow) -> None:
             )
             session.add(existing)
         realm = existing
+    await session.flush()
     companion.default_memory_realm_id = realm.realm_id

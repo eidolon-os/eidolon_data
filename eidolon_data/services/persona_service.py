@@ -12,12 +12,12 @@ from eidolon_sdk.biz.persona import (
     persona_genome_to_json,
 )
 from sqlalchemy import desc, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from eidolon_data.db.base import utc_now
 from eidolon_data.events.facade import build_event
 from eidolon_data.repositories.persona import PersonaGenomeConflict
-from eidolon_data.schema.models import CompanionRow, PersonaGenomeRow
+from eidolon_data.schema.models import AuditOutboxRow, CompanionRow, PersonaGenomeRow
 
 
 class PersonaService:
@@ -64,7 +64,8 @@ class PersonaService:
             if status == "committed":
                 companion.current_genome_id = genome_id
                 companion.updated_at = utc_now()
-            session.add(
+            _add_event(
+                session,
                 _event(
                     event_id=event_id,
                     owner_id=owner_id,
@@ -85,7 +86,7 @@ class PersonaService:
                         "status": status,
                         "source": source_json or {},
                     },
-                )
+                ),
             )
         return genome
 
@@ -147,14 +148,15 @@ class PersonaService:
             )
             session.add(genome)
             await session.flush()
-            session.add(
+            _add_event(
+                session,
                 _event(
                     owner_id=proposal.owner_id,
                     companion_id=proposal.companion_id,
                     genome=genome,
                     event_type="persona.evolution.proposed",
                     payload=proposal.model_dump(mode="json", exclude_none=True),
-                )
+                ),
             )
         return genome
 
@@ -178,7 +180,8 @@ class PersonaService:
                 genome.status = "stale"
                 genome.updated_at = utc_now()
                 conflict = True
-                session.add(
+                _add_event(
+                    session,
                     _event(
                         owner_id=owner_id,
                         companion_id=companion_id,
@@ -191,10 +194,11 @@ class PersonaService:
                             "expected_base_genome_id": expected_base_genome_id,
                             "reason": "current genome changed before activation",
                         },
-                    )
+                    ),
                 )
             else:
-                session.add(
+                _add_event(
+                    session,
                     _event(
                         owner_id=owner_id,
                         companion_id=companion_id,
@@ -206,7 +210,7 @@ class PersonaService:
                             "base_genome_id": genome.base_genome_id,
                             "proposal_id": (genome.source_json or {}).get("proposal_id"),
                         },
-                    )
+                    ),
                 )
                 genome.status = "committed"
                 genome.updated_at = utc_now()
@@ -227,7 +231,7 @@ class PersonaService:
                     },
                 )
                 genome.applied_event_id = committed_event.event_id
-                session.add(committed_event)
+                _add_event(session, committed_event)
         if conflict:
             raise PersonaGenomeConflict(
                 "current genome changed before activation",
@@ -255,7 +259,8 @@ class PersonaService:
             genome.status = "rejected"
             genome.change_summary = f"{genome.change_summary}\n\n{reason}".strip()
             genome.updated_at = utc_now()
-            session.add(
+            _add_event(
+                session,
                 _event(
                     owner_id=owner_id,
                     companion_id=genome.companion_id,
@@ -268,7 +273,7 @@ class PersonaService:
                         "genome_hash": genome.genome_hash,
                         "reason": reason,
                     },
-                )
+                ),
             )
         return genome
 
@@ -288,7 +293,8 @@ class PersonaService:
                 raise ValueError("only committed genomes can be rollback targets")
             companion.current_genome_id = genome_id
             companion.updated_at = utc_now()
-            session.add(
+            _add_event(
+                session,
                 _event(
                     owner_id=owner_id,
                     companion_id=companion_id,
@@ -297,7 +303,7 @@ class PersonaService:
                     subject_type="companion",
                     subject_id=companion_id,
                     payload={"genome_id": genome_id, "genome_hash": genome.genome_hash},
-                )
+                ),
             )
         return genome
 
@@ -320,7 +326,8 @@ class PersonaService:
                 genome = parent
             companion.current_genome_id = genome.genome_id
             companion.updated_at = utc_now()
-            session.add(
+            _add_event(
+                session,
                 _event(
                     owner_id=owner_id,
                     companion_id=companion_id,
@@ -333,7 +340,7 @@ class PersonaService:
                         "genome_hash": genome.genome_hash,
                         "reason": "reset_to_origin",
                     },
-                )
+                ),
             )
         return genome
 
@@ -415,3 +422,8 @@ def _event(
         outcome=outcome,
         payload_json=payload,
     )
+
+
+def _add_event(session: AsyncSession, event: AuditOutboxRow) -> None:
+    """Write governance intent in the same System Data transaction."""
+    session.add(event)

@@ -8,7 +8,7 @@ from eidolon_data.settings import default_sqlite_path
 
 
 def test_default_sqlite_path_uses_data_directory() -> None:
-    assert default_sqlite_path() == Path.home() / "eidolon" / "data" / "eidolon.sqlite3"
+    assert default_sqlite_path() == Path.home() / "eidolon" / "data" / "eidolon-system.sqlite3"
     assert DataSettings().sqlite_path == str(default_sqlite_path())
 
 

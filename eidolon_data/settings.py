@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,7 +20,7 @@ def default_data_dir() -> Path:
 
 
 def default_sqlite_path() -> Path:
-    return default_data_dir() / "eidolon.sqlite3"
+    return default_data_dir() / "eidolon-system.sqlite3"
 
 
 def default_object_store_path() -> Path:
@@ -35,6 +35,17 @@ class DataSettings(BaseSettings):
     sqlite_path: str = Field(default_factory=lambda: str(default_sqlite_path()))
     object_store_path: str = Field(default_factory=lambda: str(default_object_store_path()))
     echo_sql: bool = False
+    # Sovereign/control-plane data favors durability. Rebuildable projections
+    # (for example the global audit index) use their own NORMAL profile instead
+    # of weakening this database globally.
+    sqlite_journal_mode: Literal["WAL", "DELETE"] = "WAL"
+    sqlite_synchronous: Literal["FULL", "NORMAL"] = "FULL"
+    sqlite_busy_timeout_ms: int = Field(default=5_000, ge=0, le=60_000)
+    sqlite_wal_autocheckpoint_pages: int = Field(default=1_000, ge=0, le=100_000)
+    # SQLite has one physical writer. A single pooled connection makes that
+    # serialization explicit inside one process instead of allowing an async
+    # connection pool to manufacture self-contention.
+    sqlite_pool_size: int = Field(default=1, ge=1, le=4)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -31,6 +31,9 @@ async def _create_binding(store: DataStore, *, owner_id: str, device_id: str):
         owner_id=None,
         capabilities_json={"guard": {"enabled": True, "protocol_versions": [1]}},
     )
+    await store.guard_bindings.ensure_guard_companion(
+        owner_id=owner_id, companion_id=f"guard-{owner_id}"
+    )
     return await store.guard_bindings.claim(
         owner_id=owner_id,
         device_id=device_id,
@@ -321,6 +324,9 @@ async def test_existing_desired_profile_is_enqueued_when_device_is_claimed(store
         device_id="atk-1",
         owner_id=None,
         capabilities_json={"guard": {"enabled": True, "protocol_versions": [1]}},
+    )
+    await store.guard_bindings.ensure_guard_companion(
+        owner_id="owner-1", companion_id="guard-1"
     )
 
     binding = await store.guard_bindings.claim(

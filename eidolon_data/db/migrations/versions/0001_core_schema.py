@@ -95,8 +95,6 @@ def upgrade() -> None:
         sa.Column("subject_type", sa.String(length=32), nullable=False),
         sa.Column("subject_id", sa.String(length=128), nullable=False),
         sa.Column("event_type", sa.String(length=96), nullable=False),
-        sa.Column("actor_type", sa.String(length=32), nullable=False),
-        sa.Column("actor_id", sa.String(length=128), nullable=True),
         sa.Column("payload_json", sa.JSON(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
@@ -104,8 +102,6 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("event_id", name=op.f("pk_events")),
     )
-    op.create_index(op.f("ix_events_actor_id"), "events", ["actor_id"], unique=False)
-    op.create_index(op.f("ix_events_actor_type"), "events", ["actor_type"], unique=False)
     op.create_index(op.f("ix_events_created_at"), "events", ["created_at"], unique=False)
     op.create_index(op.f("ix_events_event_type"), "events", ["event_type"], unique=False)
     op.create_index(op.f("ix_events_owner_id"), "events", ["owner_id"], unique=False)
@@ -327,8 +323,6 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_events_owner_id"), table_name="events")
     op.drop_index(op.f("ix_events_event_type"), table_name="events")
     op.drop_index(op.f("ix_events_created_at"), table_name="events")
-    op.drop_index(op.f("ix_events_actor_type"), table_name="events")
-    op.drop_index(op.f("ix_events_actor_id"), table_name="events")
     op.drop_table("events")
 
     op.drop_index(op.f("ix_devices_status"), table_name="devices")

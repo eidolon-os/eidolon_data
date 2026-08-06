@@ -13,6 +13,7 @@ from eidolon_sdk.biz.guard import (
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 
+from eidolon_data.audit.outbox import AuditOutboxRepository
 from eidolon_data.db.base import utc_now
 from eidolon_data.repositories.base import Repository
 from eidolon_data.schema.models import (
@@ -83,6 +84,22 @@ class OwnerFaceProfilesRepository(Repository):
                 updated_at=now,
             )
             session.add(row)
+            session.add(
+                AuditOutboxRepository.build_row(
+                    producer="eidolon-guard",
+                    category="governance",
+                    owner_id=owner_id,
+                    subject_type="owner_face_profile",
+                    subject_id=profile_id,
+                    action="guard.owner_face_profile.draft_created",
+                    data_classification="sensitive",
+                    payload={
+                        "profile_revision": revision,
+                        "model_id": model_id,
+                        "preprocessing_version": preprocessing_version,
+                    },
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError as exc:
@@ -136,6 +153,22 @@ class OwnerFaceProfilesRepository(Repository):
                 storage_key=storage_key,
             )
             session.add(row)
+            session.add(
+                AuditOutboxRepository.build_row(
+                    producer="eidolon-guard",
+                    category="governance",
+                    owner_id=profile.owner_id,
+                    subject_type="owner_face_profile",
+                    subject_id=profile.profile_id,
+                    action="guard.owner_face_profile.reference_added",
+                    data_classification="sensitive",
+                    payload={
+                        "profile_revision": profile.revision,
+                        "reference_id": row.reference_id,
+                        "pose": row.pose,
+                    },
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError as exc:
@@ -190,6 +223,21 @@ class OwnerFaceProfilesRepository(Repository):
             )
             for binding in bindings:
                 await _enqueue_profile_delivery(session, binding, profile)
+            session.add(
+                AuditOutboxRepository.build_row(
+                    producer="eidolon-guard",
+                    category="governance",
+                    owner_id=profile.owner_id,
+                    subject_type="owner_face_profile",
+                    subject_id=profile.profile_id,
+                    action="guard.owner_face_profile.desired",
+                    data_classification="sensitive",
+                    payload={
+                        "profile_revision": profile.revision,
+                        "reference_count": len(references),
+                    },
+                )
+            )
             await session.commit()
             await session.refresh(profile)
             return profile
@@ -238,6 +286,18 @@ class OwnerFaceProfilesRepository(Repository):
             )
             for binding in bindings:
                 await _enqueue_profile_delivery(session, binding, profile)
+            session.add(
+                AuditOutboxRepository.build_row(
+                    producer="eidolon-guard",
+                    category="governance",
+                    owner_id=owner_id,
+                    subject_type="owner_face_profile",
+                    subject_id=profile_id,
+                    action="guard.owner_face_profile.cleared",
+                    data_classification="sensitive",
+                    payload={"profile_revision": revision},
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError as exc:

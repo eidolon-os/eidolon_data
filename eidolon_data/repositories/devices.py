@@ -236,14 +236,13 @@ class DevicesRepository(Repository):
             await session.refresh(row)
             return row
 
-    async def approve(self, device_id: str, *, actor_id: str | None = None) -> DeviceRow:
+    async def approve(self, device_id: str) -> DeviceRow:
         async with self._session_factory() as session:
             row = await session.get(DeviceRow, device_id)
             if row is None:
                 raise KeyError(f"device not found: {device_id}")
             row.status = "approved"
             row.approved_at = utc_now()
-            row.approved_by = actor_id or "admin"
             row.revoked_at = None
             row.updated_at = utc_now()
             await session.commit()

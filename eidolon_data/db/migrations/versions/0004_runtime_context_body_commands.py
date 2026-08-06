@@ -17,47 +17,8 @@ def upgrade() -> None:
     op.drop_table("conversations")
 
     op.create_table(
-        "runtime_callers",
-        sa.Column("caller_id", sa.String(length=96), nullable=False),
-        sa.Column("owner_id", sa.String(length=64), nullable=False),
-        sa.Column("companion_id", sa.String(length=64), nullable=True),
-        sa.Column("actor_kind", sa.String(length=64), nullable=False),
-        sa.Column("actor_id", sa.String(length=128), nullable=False),
-        sa.Column("display_name", sa.String(length=128), nullable=False),
-        sa.Column("source_device_id", sa.String(length=128), nullable=True),
-        sa.Column("status", sa.String(length=32), nullable=False),
-        sa.Column("metadata_json", sa.JSON(), nullable=False),
-        sa.Column("first_seen_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["owner_id"], ["owners.owner_id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(
-            ["owner_id", "companion_id"],
-            ["companions.owner_id", "companions.companion_id"],
-            name="fk_runtime_callers_owner_companion",
-        ),
-        sa.PrimaryKeyConstraint("caller_id"),
-        sa.UniqueConstraint(
-            "owner_id",
-            "actor_kind",
-            "actor_id",
-            "companion_id",
-            name="uq_runtime_callers_identity",
-        ),
-    )
-    op.create_index("ix_runtime_callers_actor_id", "runtime_callers", ["actor_id"])
-    op.create_index("ix_runtime_callers_actor_kind", "runtime_callers", ["actor_kind"])
-    op.create_index("ix_runtime_callers_companion_id", "runtime_callers", ["companion_id"])
-    op.create_index("ix_runtime_callers_last_seen_at", "runtime_callers", ["last_seen_at"])
-    op.create_index("ix_runtime_callers_owner_id", "runtime_callers", ["owner_id"])
-    op.create_index("ix_runtime_callers_source_device_id", "runtime_callers", ["source_device_id"])
-    op.create_index("ix_runtime_callers_status", "runtime_callers", ["status"])
-
-    op.create_table(
         "runtime_sessions",
         sa.Column("session_id", sa.String(length=128), nullable=False),
-        sa.Column("runtime_caller_id", sa.String(length=96), nullable=True),
         sa.Column("owner_id", sa.String(length=64), nullable=False),
         sa.Column("companion_id", sa.String(length=64), nullable=True),
         sa.Column("source_device_id", sa.String(length=128), nullable=True),
@@ -75,18 +36,12 @@ def upgrade() -> None:
             ["companions.owner_id", "companions.companion_id"],
             name="fk_runtime_sessions_owner_companion",
         ),
-        sa.ForeignKeyConstraint(
-            ["runtime_caller_id"],
-            ["runtime_callers.caller_id"],
-            ondelete="SET NULL",
-        ),
         sa.PrimaryKeyConstraint("session_id"),
     )
     op.create_index("ix_runtime_sessions_companion_id", "runtime_sessions", ["companion_id"])
     op.create_index("ix_runtime_sessions_last_seen_at", "runtime_sessions", ["last_seen_at"])
     op.create_index("ix_runtime_sessions_owner_id", "runtime_sessions", ["owner_id"])
     op.create_index("ix_runtime_sessions_owner_last_seen", "runtime_sessions", ["owner_id", "last_seen_at"])
-    op.create_index("ix_runtime_sessions_runtime_caller_id", "runtime_sessions", ["runtime_caller_id"])
     op.create_index("ix_runtime_sessions_source_device_id", "runtime_sessions", ["source_device_id"])
     op.create_index("ix_runtime_sessions_started_at", "runtime_sessions", ["started_at"])
     op.create_index("ix_runtime_sessions_status", "runtime_sessions", ["status"])
@@ -97,7 +52,6 @@ def upgrade() -> None:
         sa.Column("command_id", sa.String(length=64), nullable=False),
         sa.Column("owner_id", sa.String(length=64), nullable=True),
         sa.Column("companion_id", sa.String(length=64), nullable=True),
-        sa.Column("runtime_caller_id", sa.String(length=96), nullable=True),
         sa.Column("runtime_session_id", sa.String(length=128), nullable=True),
         sa.Column("device_id", sa.String(length=128), nullable=False),
         sa.Column("source_device_id", sa.String(length=128), nullable=True),
@@ -117,11 +71,6 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["owner_id"], ["owners.owner_id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(
-            ["runtime_caller_id"],
-            ["runtime_callers.caller_id"],
-            ondelete="SET NULL",
-        ),
-        sa.ForeignKeyConstraint(
             ["runtime_session_id"],
             ["runtime_sessions.session_id"],
             ondelete="SET NULL",
@@ -136,7 +85,6 @@ def upgrade() -> None:
     op.create_index("ix_body_commands_op", "body_commands", ["op"])
     op.create_index("ix_body_commands_owner_created", "body_commands", ["owner_id", "created_at"])
     op.create_index("ix_body_commands_owner_id", "body_commands", ["owner_id"])
-    op.create_index("ix_body_commands_runtime_caller_id", "body_commands", ["runtime_caller_id"])
     op.create_index("ix_body_commands_runtime_session_id", "body_commands", ["runtime_session_id"])
     op.create_index("ix_body_commands_source_device_id", "body_commands", ["source_device_id"])
     op.create_index("ix_body_commands_status", "body_commands", ["status"])
@@ -148,7 +96,6 @@ def upgrade() -> None:
         sa.Column("conversation_id", sa.String(length=64), nullable=False),
         sa.Column("owner_id", sa.String(length=64), nullable=False),
         sa.Column("companion_id", sa.String(length=64), nullable=False),
-        sa.Column("runtime_caller_id", sa.String(length=96), nullable=True),
         sa.Column("runtime_session_id", sa.String(length=128), nullable=True),
         sa.Column("source_device_id", sa.String(length=128), nullable=True),
         sa.Column("title", sa.String(length=256), nullable=True),
@@ -164,11 +111,6 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
-            ["runtime_caller_id"],
-            ["runtime_callers.caller_id"],
-            ondelete="SET NULL",
-        ),
-        sa.ForeignKeyConstraint(
             ["runtime_session_id"],
             ["runtime_sessions.session_id"],
             ondelete="SET NULL",
@@ -179,7 +121,6 @@ def upgrade() -> None:
     op.create_index("ix_conversations_owner_id", "conversations", ["owner_id"])
     op.create_index("ix_conversations_owner_started", "conversations", ["owner_id", "started_at"])
     op.create_index("ix_conversations_owner_updated", "conversations", ["owner_id", "updated_at"])
-    op.create_index("ix_conversations_runtime_caller_id", "conversations", ["runtime_caller_id"])
     op.create_index("ix_conversations_runtime_session_id", "conversations", ["runtime_session_id"])
     op.create_index("ix_conversations_source_device_id", "conversations", ["source_device_id"])
     op.create_index("ix_conversations_status", "conversations", ["status"])
@@ -189,7 +130,6 @@ def upgrade() -> None:
         sa.Column("turn_id", sa.String(length=64), nullable=False),
         sa.Column("conversation_id", sa.String(length=64), nullable=False),
         sa.Column("seq", sa.Integer(), nullable=False),
-        sa.Column("runtime_caller_id", sa.String(length=96), nullable=True),
         sa.Column("runtime_session_id", sa.String(length=128), nullable=True),
         sa.Column("source_device_id", sa.String(length=128), nullable=True),
         sa.Column("trigger", sa.String(length=32), nullable=False),
@@ -206,11 +146,6 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
-            ["runtime_caller_id"],
-            ["runtime_callers.caller_id"],
-            ondelete="SET NULL",
-        ),
-        sa.ForeignKeyConstraint(
             ["runtime_session_id"],
             ["runtime_sessions.session_id"],
             ondelete="SET NULL",
@@ -219,7 +154,6 @@ def upgrade() -> None:
         sa.UniqueConstraint("conversation_id", "seq", name="uq_turns_conversation_seq"),
     )
     op.create_index("ix_turns_conversation_id", "turns", ["conversation_id"])
-    op.create_index("ix_turns_runtime_caller_id", "turns", ["runtime_caller_id"])
     op.create_index("ix_turns_runtime_session_id", "turns", ["runtime_session_id"])
     op.create_index("ix_turns_source_device_id", "turns", ["source_device_id"])
     op.create_index("ix_turns_status", "turns", ["status"])
@@ -257,4 +191,3 @@ def downgrade() -> None:
     op.drop_table("conversations")
     op.drop_table("body_commands")
     op.drop_table("runtime_sessions")
-    op.drop_table("runtime_callers")

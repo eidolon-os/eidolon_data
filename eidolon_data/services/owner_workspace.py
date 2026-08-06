@@ -14,14 +14,14 @@ from eidolon_sdk.biz.persona import (
     persona_genome_to_json,
 )
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from eidolon_data.db.base import utc_now
 from eidolon_data.events.facade import build_event
 from eidolon_data.schema.models import (
+    AuditOutboxRow,
     CompanionRow,
     DeviceRow,
-    EventRow,
     MemoryRealmRow,
     OwnerRow,
     PersonaGenomeRow,
@@ -31,7 +31,6 @@ WEB_BODY_KIND = "web"
 COMPANION_TYPE_MASTER = "master"
 COMPANION_TYPE_SLAVE = "slave"
 COMPANION_TYPE_GUARD = "guard"
-
 
 def _web_body_device_id(companion_id: str) -> str:
     return f"web-{companion_id}"
@@ -177,8 +176,6 @@ class OwnerService:
         kind: str = "person",
         profile_json: dict | None = None,
         settings_json: dict | None = None,
-        actor_type: str = "admin",
-        actor_id: str | None = None,
     ) -> OwnerCreateResult:
         owner_id = _validate_owner_id(owner_id)
         if kind not in {"person", "family", "team"}:
@@ -198,16 +195,18 @@ class OwnerService:
                 settings_json=settings_json or {},
             )
             session.add(owner)
-            session.add(
+            # Persist the authority row before adding its audit-outbox receipt
+            # in the same transaction.
+            await session.flush()
+            _add_event(
+                session,
                 _event(
                     owner_id=owner_id,
                     subject_type="owner",
                     subject_id=owner_id,
                     event_type="owner.created",
-                    actor_type=actor_type,
-                    actor_id=actor_id,
                     payload_json={"kind": kind, "display_name": owner.display_name},
-                )
+                ),
             )
 
         return OwnerCreateResult(owner=owner)
@@ -223,8 +222,11 @@ class CompanionWorkspaceService:
         owner_id: str,
         companion_id: str,
     ) -> DeviceRow:
-        """Idempotently ensure a host-local web body exists for a companion.
-        Powers the 'add local web body' one-click and the master default."""
+        """Legacy explicit provisioning for Admin's current web endpoint.
+
+        This compatibility entry point is never called by companion lifecycle
+        operations. A browser session is not implicitly a governed Device.
+        """
         async with self._session_factory() as session, session.begin():
             companion = await session.get(CompanionRow, companion_id)
             if companion is None or companion.owner_id != owner_id:
@@ -253,17 +255,16 @@ class CompanionWorkspaceService:
                 companion_type=_companion_type(companion),
             )
             session.add(row)
-            session.add(
+            _add_event(
+                session,
                 _event(
                     owner_id=owner_id,
                     companion_id=companion_id,
                     subject_type="device",
                     subject_id=row.device_id,
                     event_type="device.web_body.provisioned",
-                    actor_type="admin",
-                    actor_id=None,
                     payload_json={"companion_id": companion_id, "kind": WEB_BODY_KIND},
-                )
+                ),
             )
         return row
 
@@ -316,18 +317,18 @@ class CompanionWorkspaceService:
                 status="active",
             )
             session.add(realm)
+            await session.flush()
             companion.default_memory_realm_id = realm_id
-            session.add(
+            _add_event(
+                session,
                 _event(
                     owner_id=owner_id,
                     companion_id=companion_id,
                     subject_type="memory_realm",
                     subject_id=realm_id,
                     event_type="memory_realm.created",
-                    actor_type="admin",
-                    actor_id=None,
                     payload_json={"engine": realm.engine},
-                )
+                ),
             )
         return realm
 
@@ -336,13 +337,13 @@ class CompanionWorkspaceService:
         *,
         owner_id: str,
         companion_id: str,
-        actor_type: str = "admin",
-        actor_id: str | None = None,
     ) -> CompanionRow:
-        """Make ``companion_id`` the owner's master and ensure it is
-        conversation-ready (has a current genome, a memory realm, and a
-        host-local web body). Any other master for the owner is demoted so the
-        one-master-per-owner invariant holds. Idempotent."""
+        """Make ``companion_id`` the owner's master and ensure its memory realm.
+
+        Device lifecycle is independent: promotion never creates or attaches a
+        Device. Any other master for the owner is demoted so the one-master-per-
+        owner invariant holds. Idempotent.
+        """
         async with self._session_factory() as session, session.begin():
             companion = await session.get(CompanionRow, companion_id)
             if companion is None or companion.owner_id != owner_id:
@@ -371,9 +372,8 @@ class CompanionWorkspaceService:
                 if genome is not None:
                     companion.current_genome_id = genome.genome_id
 
-        # Realm + web body each run in their own idempotent transaction.
+        # Memory remains companion lifecycle; Device lifecycle belongs elsewhere.
         await self.ensure_memory_realm(owner_id=owner_id, companion_id=companion_id)
-        await self.ensure_web_body(owner_id=owner_id, companion_id=companion_id)
 
         async with self._session_factory() as session:
             return await session.get(CompanionRow, companion_id)
@@ -395,8 +395,6 @@ class CompanionWorkspaceService:
         memory_engine: str = "mempalace",
         memory_engine_config_json: dict | None = None,
         memory_policy_json: dict | None = None,
-        actor_type: str = "admin",
-        actor_id: str | None = None,
         is_master: bool = False,
     ) -> CompanionWorkspaceResult:
         owner_id = _validate_owner_id(owner_id)
@@ -474,75 +472,27 @@ class CompanionWorkspaceService:
             )
             session.add(realm)
 
+            # Both pointers are real foreign keys. Flush the new targets before
+            # updating the already-persistent companion row; foreign_keys=ON is
+            # an invariant of the V2 authority store.
+            await session.flush()
+
             companion.current_genome_id = genome_id
             companion.default_memory_realm_id = realm_id
 
-            # Master companion defaults to a host-local web body.
-            if is_master:
-                web_body = _build_web_body_row(
-                    owner_id=owner_id,
-                    companion_id=companion_id,
-                    display_name=companion_name,
-                    companion_type=_companion_type_from_master(is_master),
-                )
-                session.add(web_body)
-                session.add(
-                    _event(
-                        owner_id=owner_id,
-                        companion_id=companion_id,
-                        subject_type="device",
-                        subject_id=web_body.device_id,
-                        event_type="device.web_body.provisioned",
-                        actor_type=actor_type,
-                        actor_id=actor_id,
-                        payload_json={"companion_id": companion_id, "kind": WEB_BODY_KIND},
-                    )
-                )
-
-            event_specs = [
-                (
-                    "companion",
-                    companion_id,
-                    "companion.created",
-                    {
-                        "display_name": companion_name,
-                        "companion_type": _companion_type_from_master(is_master),
-                    },
-                ),
-                (
-                    "persona_genome",
-                    genome_id,
-                    "persona.genome.committed",
-                    {
-                        "version": 1,
-                        "genome_id": genome_id,
-                        "genome_hash": genome.genome_hash,
-                        "schema_version": genome.schema_version,
-                        "realizer_version": genome.realizer_version,
-                    },
-                ),
-                ("memory_realm", realm_id, "memory_realm.created", {"engine": realm.engine}),
-                (
-                    "companion",
-                    companion_id,
-                    "companion.workspace.initialized",
-                    {"genome_id": genome_id, "realm_id": realm_id},
-                ),
-            ]
-            for subject_type, subject_id, event_type, payload_json in event_specs:
-                event = _event(
-                    owner_id=owner_id,
-                    companion_id=companion_id,
-                    subject_type=subject_type,
-                    subject_id=subject_id,
-                    event_type=event_type,
-                    actor_type=actor_type,
-                    actor_id=actor_id,
-                    payload_json=payload_json,
-                )
-                if event_type == "persona.genome.committed":
-                    genome.applied_event_id = event.event_id
-                session.add(event)
+            # Workspace provisioning is one semantic transaction. Export one
+            # terminal governance fact instead of leaking four internal row
+            # creation details into the global audit contract.
+            event = _event(
+                owner_id=owner_id,
+                companion_id=companion_id,
+                subject_type="companion",
+                subject_id=companion_id,
+                event_type="companion.workspace.initialized",
+                payload_json={"genome_id": genome_id, "realm_id": realm_id},
+            )
+            genome.applied_event_id = event.event_id
+            _add_event(session, event)
 
         return CompanionWorkspaceResult(
             companion=companion,
@@ -596,11 +546,9 @@ def _event(
     subject_type: str,
     subject_id: str,
     event_type: str,
-    actor_type: str,
-    actor_id: str | None,
     payload_json: dict,
     companion_id: str | None = None,
-) -> EventRow:
+) -> AuditOutboxRow:
     # Route through the contract-carrying facade (fills tier/source/severity/
     # outcome from the catalog); returned unpersisted for same-transaction add.
     return build_event(
@@ -609,7 +557,13 @@ def _event(
         companion_id=companion_id,
         subject_type=subject_type,
         subject_id=subject_id,
-        actor_type=actor_type,
-        actor_id=actor_id,
         payload_json=payload_json,
     )
+
+
+def _add_event(
+    session: AsyncSession,
+    event: AuditOutboxRow,
+) -> None:
+    """Write governance intent in the same System Data transaction."""
+    session.add(event)

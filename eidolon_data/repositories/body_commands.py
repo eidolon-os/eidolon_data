@@ -20,7 +20,6 @@ class BodyCommandsRepository(Repository):
         device_id: str,
         owner_id: str | None = None,
         companion_id: str | None = None,
-        runtime_caller_id: str | None = None,
         runtime_session_id: str | None = None,
         source_device_id: str | None = None,
         topic: str = "",
@@ -51,7 +50,6 @@ class BodyCommandsRepository(Repository):
 
             row.owner_id = owner_id
             row.companion_id = companion_id
-            row.runtime_caller_id = runtime_caller_id
             row.runtime_session_id = runtime_session_id
             row.device_id = device_id
             row.source_device_id = source_device_id

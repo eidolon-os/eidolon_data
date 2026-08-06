@@ -1,16 +1,16 @@
-"""The single, contract-carrying way to construct an event row.
+"""Contract-carrying construction for the authority-local audit outbox.
 
 ``build_event`` validates against the registry and fills classification
 defaults (tier/source/severity/outcome) from the :class:`EventSpec`, so callers
 only supply what is business-specific. Two entry points share it:
 
-- ``build_event(...)`` returns an unpersisted :class:`EventRow` — use it for
-  **same-transaction** governance/state-transition events: ``session.add(build_event(...))``.
+- ``build_event(...)`` returns an unpersisted :class:`AuditOutboxRow` — use it
+  for **same-transaction** governance/state-transition receipts.
 - ``EventsRepository.record_event(...)`` builds and persists in its own session —
   use it for standalone / fire-and-forget emits.
 
-Do not construct ``EventRow`` by hand elsewhere; that reintroduces the scattered
-writes this facade exists to remove (see docs §5).
+Do not construct audit-outbox rows by hand elsewhere; that reintroduces the
+scattered writes this facade exists to remove (see docs §5).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import uuid4
 
-from eidolon_data.db.base import utc_now
+from eidolon_data.audit.outbox import AuditOutboxRepository
 from eidolon_data.events.registry import (
     OUTCOMES,
     SEVERITIES,
@@ -26,7 +26,7 @@ from eidolon_data.events.registry import (
     TIERS,
     spec_for,
 )
-from eidolon_data.schema.models import EventRow
+from eidolon_data.schema.models import AuditOutboxRow
 
 
 def new_event_id() -> str:
@@ -42,8 +42,6 @@ def build_event(
     subject_id: str,
     event_id: str | None = None,
     companion_id: str | None = None,
-    actor_type: str = "system",
-    actor_id: str | None = None,
     event_class: str | None = None,
     source: str | None = None,
     severity: str | None = None,
@@ -55,8 +53,8 @@ def build_event(
     payload_json: dict | None = None,
     occurred_at: datetime | None = None,
     strict: bool = True,
-) -> EventRow:
-    """Build a validated, defaults-filled :class:`EventRow` (not persisted).
+) -> AuditOutboxRow:
+    """Build a validated audit-outbox row for the caller's transaction.
 
     Unregistered ``event_type`` raises when ``strict`` (register it in the
     catalog first). Classification fields default from the spec when omitted.
@@ -87,25 +85,31 @@ def build_event(
         if value not in allowed:
             raise ValueError(f"invalid {label} {value!r}; expected one of {allowed}")
 
-    return EventRow(
+    # Runtime activity belongs in authority telemetry, not the immutable audit
+    # plane. Data's current writers are governance actions; reject accidental
+    # activity use here instead of turning audit-index into a telemetry sink.
+    if resolved_class == "activity":
+        raise ValueError(
+            f"activity event {event_type!r} must use authority-local telemetry"
+        )
+    if companion_id:
+        payload.setdefault("companion_id", companion_id)
+    return AuditOutboxRepository.build_row(
+        producer="eidolon-data",
+        category="governance",
         event_id=event_id or new_event_id(),
         owner_id=owner_id,
-        companion_id=companion_id,
         subject_type=subject_type,
         subject_id=subject_id,
-        event_type=event_type,
-        event_class=resolved_class,
-        source=resolved_source,
+        action=event_type,
         severity=resolved_severity,
         outcome=resolved_outcome,
         reason=reason,
-        actor_type=actor_type,
-        actor_id=actor_id,
         trace_id=trace_id,
         data_classification=data_classification,
         schema_version=schema_version,
-        payload_json=payload,
-        occurred_at=occurred_at or utc_now(),
+        payload=payload,
+        occurred_at=occurred_at,
     )
 
 

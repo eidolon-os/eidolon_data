@@ -6,32 +6,33 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from eidolon_data.db.engine import create_engine, create_session_factory, init_schema
+from eidolon_data.audit.outbox import AuditOutboxRepository
+from eidolon_data.db.engine import (
+    create_engine,
+    create_session_factory,
+    init_schema,
+    validate_schema,
+)
 from eidolon_data.ports.memory_engine import MemoryEnginePort
 from eidolon_data.repositories import (
     BodyCommandsRepository,
     CompanionFaceAssetsRepository,
     CompanionsRepository,
-    ConversationsRepository,
     DevicesRepository,
     EventsRepository,
     GuardBindingsRepository,
     GuardOwnerFaceProfileDeliveriesRepository,
     GuardPolicyActionsRepository,
     GuardRuntimeDeliveriesRepository,
-    JobsRepository,
     MemoryRepository,
     OwnerFaceProfilesRepository,
     OwnersRepository,
     PersonaRepository,
-    RuntimeCallersRepository,
-    RuntimeSessionsRepository,
 )
 from eidolon_data.services.companion import CompanionDeletionService
 from eidolon_data.services.maintenance import MaintenanceService
 from eidolon_data.services.memory_service import MemoryService
 from eidolon_data.services.object_storage import LocalObjectStorage
-from eidolon_data.services.owner_data import OwnerDataService
 from eidolon_data.services.owner_workspace import CompanionWorkspaceService, OwnerService
 from eidolon_data.services.persona_service import PersonaService
 from eidolon_data.settings import DataSettings
@@ -39,7 +40,11 @@ from eidolon_data.settings import DataSettings
 
 @dataclass
 class DataStore:
-    """Convenience facade used by agent/admin/hub/channel hot paths."""
+    """System-data authority facade hosted by the Admin control plane.
+
+    Device/event accessors are transitional removal targets; Agent runtime has
+    already moved to its own authority store.
+    """
 
     settings: DataSettings
     engine: AsyncEngine
@@ -65,6 +70,10 @@ class DataStore:
 
     async def init_schema(self) -> None:
         await init_schema(self.engine)
+
+    async def validate_schema(self) -> None:
+        """Validate an Alembic-managed production schema without mutating it."""
+        await validate_schema(self.engine)
 
     async def close(self) -> None:
         await self.engine.dispose()
@@ -120,28 +129,18 @@ class DataStore:
         return BodyCommandsRepository(self.session_factory)
 
     @property
-    def runtime_callers(self) -> RuntimeCallersRepository:
-        return RuntimeCallersRepository(self.session_factory)
-
-    @property
-    def runtime_sessions(self) -> RuntimeSessionsRepository:
-        return RuntimeSessionsRepository(self.session_factory)
-
-    @property
-    def conversations(self) -> ConversationsRepository:
-        return ConversationsRepository(self.session_factory)
-
-    @property
     def memory_repo(self) -> MemoryRepository:
         return MemoryRepository(self.session_factory)
 
     @property
-    def jobs(self) -> JobsRepository:
-        return JobsRepository(self.session_factory)
-
-    @property
     def events(self) -> EventsRepository:
         return EventsRepository(self.session_factory)
+
+    @property
+    def audit_outbox(self) -> AuditOutboxRepository:
+        """Durable producer-local hand-off to the independent audit plane."""
+
+        return AuditOutboxRepository(self.session_factory)
 
     @property
     def persona(self) -> PersonaService:
@@ -150,10 +149,6 @@ class DataStore:
     @property
     def memory(self) -> MemoryService:
         return MemoryService(repository=self.memory_repo, engine=self.memory_engine)
-
-    @property
-    def owner_data_ops(self) -> OwnerDataService:
-        return OwnerDataService(self.session_factory)
 
     @property
     def owner_service(self) -> OwnerService:
@@ -170,12 +165,6 @@ class DataStore:
     @property
     def companion_deletion(self) -> CompanionDeletionService:
         return CompanionDeletionService(self.session_factory)
-
-    @property
-    def owner_data(self) -> OwnerDataService:
-        """Compatibility alias for owner-scoped data governance operations."""
-
-        return self.owner_data_ops
 
     @property
     def companion_workspace(self) -> CompanionWorkspaceService:

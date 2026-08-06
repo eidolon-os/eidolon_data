@@ -519,11 +519,8 @@ class BodyCommandRow(Base):
         String(64), ForeignKey("owners.owner_id", ondelete="SET NULL"), nullable=True, index=True
     )
     companion_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    runtime_caller_id: Mapped[str | None] = mapped_column(
-        String(96), ForeignKey("runtime_callers.caller_id", ondelete="SET NULL"), index=True
-    )
     runtime_session_id: Mapped[str | None] = mapped_column(
-        String(128), ForeignKey("runtime_sessions.session_id", ondelete="SET NULL"), index=True
+        String(128), index=True
     )
     device_id: Mapped[str] = mapped_column(String(128), index=True)
     source_device_id: Mapped[str | None] = mapped_column(String(128), index=True)
@@ -549,165 +546,6 @@ class BodyCommandRow(Base):
     __table_args__ = (
         Index("ix_body_commands_device_created", "device_id", "created_at"),
         Index("ix_body_commands_owner_created", "owner_id", "created_at"),
-    )
-
-
-class RuntimeCallerRow(Base):
-    __tablename__ = "runtime_callers"
-
-    caller_id: Mapped[str] = mapped_column(String(96), primary_key=True)
-    owner_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
-    )
-    companion_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    actor_kind: Mapped[str] = mapped_column(String(64), index=True)
-    actor_id: Mapped[str] = mapped_column(String(128), index=True)
-    display_name: Mapped[str] = mapped_column(String(128), default="")
-    source_device_id: Mapped[str | None] = mapped_column(String(128), index=True)
-    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
-    metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, index=True
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "owner_id",
-            "actor_kind",
-            "actor_id",
-            "companion_id",
-            name="uq_runtime_callers_identity",
-        ),
-        ForeignKeyConstraint(
-            ["owner_id", "companion_id"],
-            ["companions.owner_id", "companions.companion_id"],
-            name="fk_runtime_callers_owner_companion",
-        ),
-    )
-
-
-class RuntimeSessionRow(Base):
-    __tablename__ = "runtime_sessions"
-
-    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    runtime_caller_id: Mapped[str | None] = mapped_column(
-        String(96), ForeignKey("runtime_callers.caller_id", ondelete="SET NULL"), index=True
-    )
-    owner_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
-    )
-    companion_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    source_device_id: Mapped[str | None] = mapped_column(String(128), index=True)
-    transport: Mapped[str] = mapped_column(String(64), default="", index=True)
-    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
-    metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, index=True
-    )
-    last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, index=True
-    )
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["owner_id", "companion_id"],
-            ["companions.owner_id", "companions.companion_id"],
-            name="fk_runtime_sessions_owner_companion",
-        ),
-        Index("ix_runtime_sessions_owner_last_seen", "owner_id", "last_seen_at"),
-    )
-
-
-class ConversationRow(Base):
-    __tablename__ = "conversations"
-
-    conversation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    owner_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
-    )
-    companion_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("companions.companion_id", ondelete="CASCADE"), index=True
-    )
-    runtime_caller_id: Mapped[str | None] = mapped_column(
-        String(96), ForeignKey("runtime_callers.caller_id", ondelete="SET NULL"), index=True
-    )
-    runtime_session_id: Mapped[str | None] = mapped_column(
-        String(128), ForeignKey("runtime_sessions.session_id", ondelete="SET NULL"), index=True
-    )
-    source_device_id: Mapped[str | None] = mapped_column(String(128), index=True)
-    title: Mapped[str | None] = mapped_column(String(256))
-    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
-
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["owner_id", "companion_id"],
-            ["companions.owner_id", "companions.companion_id"],
-            name="fk_conversations_owner_companion",
-            ondelete="CASCADE",
-        ),
-        Index("ix_conversations_owner_started", "owner_id", "started_at"),
-        Index("ix_conversations_owner_updated", "owner_id", "updated_at"),
-    )
-
-
-class TurnRow(Base):
-    __tablename__ = "turns"
-
-    turn_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("conversations.conversation_id", ondelete="CASCADE"), index=True
-    )
-    seq: Mapped[int] = mapped_column(Integer)
-    runtime_caller_id: Mapped[str | None] = mapped_column(
-        String(96), ForeignKey("runtime_callers.caller_id", ondelete="SET NULL"), index=True
-    )
-    runtime_session_id: Mapped[str | None] = mapped_column(
-        String(128), ForeignKey("runtime_sessions.session_id", ondelete="SET NULL"), index=True
-    )
-    source_device_id: Mapped[str | None] = mapped_column(String(128), index=True)
-    trigger: Mapped[str] = mapped_column(String(32), default="user")
-    status: Mapped[str] = mapped_column(String(32), default="completed", index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Cross-hop correlation id (channel->agent->memory), indexed for querying a
-    # turn by trace. The full trace also lives in trace_json; this promotes the
-    # id to a first-class filterable column.
-    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    trace_json: Mapped[JsonDict] = mapped_column(default=dict)
-    metrics_json: Mapped[JsonDict] = mapped_column(default=dict)
-    metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
-
-    __table_args__ = (UniqueConstraint("conversation_id", "seq", name="uq_turns_conversation_seq"),)
-
-
-class MessageRow(Base):
-    __tablename__ = "messages"
-
-    message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    turn_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("turns.turn_id", ondelete="CASCADE"), index=True
-    )
-    seq: Mapped[int] = mapped_column(Integer)
-    role: Mapped[str] = mapped_column(String(32), index=True)
-    content: Mapped[str] = mapped_column(Text)
-    content_type: Mapped[str] = mapped_column(String(64), default="text/plain")
-    visibility: Mapped[str] = mapped_column(String(32), default="normal", index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
-
-    __table_args__ = (
-        UniqueConstraint("turn_id", "seq", name="uq_messages_turn_seq"),
-        Index("ix_messages_turn_created", "turn_id", "created_at"),
     )
 
 
@@ -738,72 +576,79 @@ class MemoryRealmRow(Base):
     )
 
 
-class JobRow(Base):
-    __tablename__ = "jobs"
+class AuditOutboxRow(Base):
+    """Minimal durable hand-off from a Data transaction to the audit plane.
 
-    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    owner_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
-    )
-    companion_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    conversation_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    turn_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    provider: Mapped[str] = mapped_column(String(64), index=True)
-    kind: Mapped[str] = mapped_column(String(64), index=True)
-    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
-    input_json: Mapped[JsonDict] = mapped_column(default=dict)
-    provider_ref_json: Mapped[JsonDict] = mapped_column(default=dict)
-    progress_json: Mapped[JsonDict] = mapped_column(default=dict)
-    result_json: Mapped[JsonDict] = mapped_column(default=dict)
-    error_json: Mapped[JsonDict] = mapped_column(default=dict)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, index=True
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, index=True
-    )
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    This table is not the global audit ledger and is never queried by Mission
+    Control. Rows only live here until a transport adapter durably acknowledges
+    the event. ``outbox_id`` is the producer-local sequence; global total order
+    is deliberately not promised.
+    """
+
+    __tablename__ = "audit_outbox"
+
+    outbox_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(64), unique=True)
+    producer: Mapped[str] = mapped_column(String(64))
+    category: Mapped[str] = mapped_column(String(16))
+    owner_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    subject_type: Mapped[str] = mapped_column(String(64))
+    subject_id: Mapped[str] = mapped_column(String(128))
+    action: Mapped[str] = mapped_column(String(128))
+    outcome: Mapped[str] = mapped_column(String(16), default="success")
+    severity: Mapped[str] = mapped_column(String(16), default="info")
+    reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_classification: Mapped[str] = mapped_column(String(16), default="safe")
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    payload_json: Mapped[JsonDict] = mapped_column(default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["owner_id", "companion_id"],
-            ["companions.owner_id", "companions.companion_id"],
-            name="fk_jobs_owner_companion",
+        CheckConstraint(
+            "category IN ('governance', 'receipt')",
+            name="ck_audit_outbox_category",
+        ),
+        CheckConstraint(
+            "outcome IN ('success', 'failure', 'denied', 'deferred')",
+            name="ck_audit_outbox_outcome",
+        ),
+        CheckConstraint(
+            "severity IN ('info', 'warn', 'error', 'critical')",
+            name="ck_audit_outbox_severity",
+        ),
+        CheckConstraint("attempt_count >= 0", name="ck_audit_outbox_attempt_count"),
+        Index(
+            "ix_audit_outbox_pending",
+            "published_at",
+            "next_attempt_at",
+            "outbox_id",
         ),
     )
 
+    # Compatibility properties for the Data-local event facade. They are not
+    # persisted twice and do not reintroduce a second event authority.
+    @property
+    def event_type(self) -> str:
+        return self.action
 
-class EventRow(Base):
-    __tablename__ = "events"
+    @property
+    def event_class(self) -> str:
+        return "audit"
 
-    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    owner_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
-    )
-    companion_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    subject_type: Mapped[str] = mapped_column(String(32), index=True)
-    subject_id: Mapped[str] = mapped_column(String(128), index=True)
-    event_type: Mapped[str] = mapped_column(String(96), index=True)
-    # Classification (see eidolon_data.events.registry): tier + subsystem + result.
-    event_class: Mapped[str] = mapped_column(String(8), default="audit", index=True)
-    source: Mapped[str] = mapped_column(String(16), default="data", index=True)
-    severity: Mapped[str] = mapped_column(String(8), default="info", index=True)
-    outcome: Mapped[str] = mapped_column(String(12), default="success", index=True)
-    reason: Mapped[str | None] = mapped_column(String(256))
-    actor_type: Mapped[str] = mapped_column(String(32), default="system", index=True)
-    actor_id: Mapped[str | None] = mapped_column(String(128), index=True)
-    # Correlation. trace_id is constant across a distributed operation.
-    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    data_classification: Mapped[str] = mapped_column(String(10), default="safe")
-    schema_version: Mapped[int] = mapped_column(Integer, default=1)
-    payload_json: Mapped[JsonDict] = mapped_column(default=dict)
-    # occurred_at = when the real-world event happened; created_at = when the row was recorded.
-    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=utc_now)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, index=True
-    )
+    @property
+    def source(self) -> str:
+        from eidolon_data.events.registry import spec_for
 
-    __table_args__ = (
-        Index("ix_events_subject_created", "subject_type", "subject_id", "created_at"),
-        Index("ix_events_owner_created", "owner_id", "created_at"),
-    )
+        spec = spec_for(self.action)
+        return spec.source if spec is not None else "data"
+
+    @property
+    def companion_id(self) -> str | None:
+        value = (self.payload_json or {}).get("companion_id")
+        return str(value) if value else None

@@ -21,12 +21,7 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
                     for table in (
                         "owners",
                         "devices",
-                        "runtime_callers",
-                        "runtime_sessions",
                         "body_commands",
-                        "conversations",
-                        "turns",
-                        "messages",
                     )
                 }
             )
@@ -36,8 +31,8 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
                     for column in inspect(sync_conn).get_columns("persona_genomes")
                 }
             )
-            unique_constraints = await conn.run_sync(
-                lambda sync_conn: inspect(sync_conn).get_unique_constraints("messages")
+            body_command_foreign_keys = await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).get_foreign_keys("body_commands")
             )
 
         assert {
@@ -45,14 +40,7 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
             "companions",
             "persona_genomes",
             "devices",
-            "conversations",
-            "turns",
-            "messages",
             "memory_realms",
-            "jobs",
-            "events",
-            "runtime_callers",
-            "runtime_sessions",
             "body_commands",
             "owner_face_profile_revisions",
             "owner_face_references",
@@ -64,6 +52,14 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
         assert "memory_items" not in table_names
         assert "memory_projections" not in table_names
         assert "storage_objects" not in table_names
+        assert {
+            "runtime_sessions",
+            "conversations",
+            "turns",
+            "messages",
+            "jobs",
+            "events",
+        }.isdisjoint(table_names)
         column_names = {table: {column["name"] for column in table_columns} for table, table_columns in columns.items()}
         devices_owner = next(column for column in columns["devices"] if column["name"] == "owner_id")
         assert "status" in column_names["owners"]
@@ -78,24 +74,12 @@ async def test_init_schema_creates_core_tables(tmp_path) -> None:
             "change_summary",
         }.issubset(persona_columns)
         assert "prompt_markdown" not in persona_columns
-        assert "updated_at" in column_names["conversations"]
-        assert "actor_kind" in column_names["runtime_callers"]
-        assert "actor_id" in column_names["runtime_callers"]
-        assert "runtime_caller_id" in column_names["runtime_sessions"]
+        assert "runtime_callers" not in table_names
         assert "runtime_session_id" in column_names["body_commands"]
-        assert "runtime_caller_id" in column_names["body_commands"]
-        assert "runtime_caller_id" in column_names["conversations"]
-        assert "runtime_session_id" in column_names["conversations"]
-        assert "source_device_id" in column_names["conversations"]
-        assert "device_id" not in column_names["conversations"]
-        assert "runtime_caller_id" in column_names["turns"]
-        assert "runtime_session_id" in column_names["turns"]
-        assert "source_device_id" in column_names["turns"]
-        assert "device_id" not in column_names["turns"]
-        assert "seq" in column_names["messages"]
-        assert any(
-            constraint["name"] == "uq_messages_turn_seq"
-            for constraint in unique_constraints
+        assert "runtime_caller_id" not in column_names["body_commands"]
+        assert all(
+            foreign_key["referred_table"] != "runtime_sessions"
+            for foreign_key in body_command_foreign_keys
         )
     finally:
         await store.close()

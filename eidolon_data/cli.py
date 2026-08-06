@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_db.add_argument(
         "--sqlite-path",
         default=None,
-        help="Override SQLite path. Defaults to ~/eidolon/data/eidolon.sqlite3.",
+        help="Override SQLite path. Defaults to ~/eidolon/data/eidolon-system.sqlite3.",
     )
     init_db.set_defaults(func=_init_db)
 
@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     delete_owner.add_argument(
         "--sqlite-path",
         default=None,
-        help="Override SQLite path. Defaults to ~/eidolon/data/eidolon.sqlite3.",
+        help="Override SQLite path. Defaults to ~/eidolon/data/eidolon-system.sqlite3.",
     )
     delete_owner.set_defaults(func=_delete_owner)
 

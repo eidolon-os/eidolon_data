@@ -5,8 +5,8 @@ the same way instead of hand-rolling list comprehensions:
 
     from eidolon_data.testing import assert_event, assert_event_types
 
-Kept dependency-light (operates on already-fetched ``EventRow`` lists, no DB
-coupling) so it works with any ``events.list_for_*`` result.
+Kept dependency-light (operates on already-fetched ``AuditOutboxRow`` lists, no
+DB coupling) so it works with any ``events.list_for_*`` result.
 """
 
 from __future__ import annotations
@@ -14,15 +14,17 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from eidolon_data.schema.models import EventRow
+from eidolon_data.schema.models import AuditOutboxRow
 
 
-def assert_event(events: Sequence[EventRow], *, event_type: str, **fields: Any) -> EventRow:
+def assert_event(
+    events: Sequence[AuditOutboxRow], *, event_type: str, **fields: Any
+) -> AuditOutboxRow:
     """Assert exactly one event of ``event_type`` (optionally matching ``fields``) exists.
 
-    ``fields`` are matched against attributes of :class:`EventRow`
-    (``subject_type``, ``subject_id``, ``actor_type``, ``owner_id``, and — once
-    added — ``source``/``outcome``/``companion_id``/…). Returns the match.
+    ``fields`` are matched against attributes of :class:`AuditOutboxRow`
+    (``subject_type``, ``subject_id``, ``owner_id``, ``source``, ``outcome``,
+    ``companion_id``, …). Returns the match.
     """
     matches = [
         e
@@ -42,7 +44,9 @@ def assert_event(events: Sequence[EventRow], *, event_type: str, **fields: Any) 
     return matches[0]
 
 
-def assert_event_types(events: Sequence[EventRow], expected: Sequence[str]) -> None:
+def assert_event_types(
+    events: Sequence[AuditOutboxRow], expected: Sequence[str]
+) -> None:
     """Assert the ordered sequence of ``event_type`` values equals ``expected``."""
     actual = [e.event_type for e in events]
     if actual != list(expected):

@@ -20,7 +20,6 @@ async def create_owner(payload: OwnerCreateRequest, request: Request) -> OwnerRe
             kind=payload.kind,
             profile_json=payload.profile_json,
             settings_json=payload.settings_json,
-            actor_type="api",
         )
     except OwnerWorkspaceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

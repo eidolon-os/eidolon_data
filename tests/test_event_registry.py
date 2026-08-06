@@ -32,22 +32,20 @@ def test_channel_phase_requires_ordered_projection_fields() -> None:
             payload_json={"channel_turn_id": "turn-1", "phase": "user_speech_open"},
         )
 
-    event = build_event(
-        event_type="channel.turn.phase_changed",
-        owner_id="owner-1",
-        companion_id="companion-1",
-        subject_type="turn",
-        subject_id="turn-1",
-        trace_id="turn-1",
-        payload_json={
-            "channel_turn_id": "turn-1",
-            "phase": "user_speech_open",
-            "previous_phase": "idle",
-            "transition_seq": 1,
-            "side_effect": "none",
-            "elapsed_ms": 0,
-        },
-    )
-    assert event.event_class == "activity"
-    assert event.source == "channel"
-    assert event.trace_id == "turn-1"
+    with pytest.raises(ValueError, match="authority-local telemetry"):
+        build_event(
+            event_type="channel.turn.phase_changed",
+            owner_id="owner-1",
+            companion_id="companion-1",
+            subject_type="turn",
+            subject_id="turn-1",
+            trace_id="turn-1",
+            payload_json={
+                "channel_turn_id": "turn-1",
+                "phase": "user_speech_open",
+                "previous_phase": "idle",
+                "transition_seq": 1,
+                "side_effect": "none",
+                "elapsed_ms": 0,
+            },
+        )

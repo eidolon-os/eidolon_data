@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pytest
 from eidolon_sdk.biz.persona import (
     PersonaEvidenceRef,
@@ -129,32 +127,13 @@ async def test_repository_workflow_round_trips_core_entities(store: DataStore) -
     assert device.secret_ref == "secret://device-1"
     assert device.access_policy_json["capability"] == "speak"
 
-    caller = await store.runtime_callers.upsert_caller(
-        caller_id="rc-test",
-        owner_id=owner.owner_id,
-        companion_id=companion.companion_id,
-        actor_kind="web_chat",
-        actor_id="browser-1",
-        display_name="Browser",
-        source_device_id=device.device_id,
-    )
-    assert caller.actor_kind == "web_chat"
-    session = await store.runtime_sessions.upsert_session(
-        session_id="session-1",
-        owner_id=owner.owner_id,
-        companion_id=companion.companion_id,
-        runtime_caller_id=caller.caller_id,
-        source_device_id=device.device_id,
-        transport="grpc_chat",
-    )
-    assert session.runtime_caller_id == caller.caller_id
-
     command = await store.body_commands.upsert_command(
         command_id="command-1",
         owner_id=owner.owner_id,
         companion_id=companion.companion_id,
-        runtime_caller_id=caller.caller_id,
-        runtime_session_id=session.session_id,
+        # Runtime session ids are opaque correlation values in System Data;
+        # their authority lives in eidolon-agent.sqlite3.
+        runtime_session_id="session-1",
         device_id=device.device_id,
         source_device_id=device.device_id,
         topic="eidolon.control",
@@ -164,8 +143,7 @@ async def test_repository_workflow_round_trips_core_entities(store: DataStore) -
         envelope_json={"id": "command-1"},
     )
     assert command.status == "sent"
-    assert command.runtime_caller_id == caller.caller_id
-    assert command.runtime_session_id == session.session_id
+    assert command.runtime_session_id == "session-1"
     updated_command = await store.body_commands.update_status(
         "command-1",
         status="accepted",
@@ -181,42 +159,6 @@ async def test_repository_workflow_round_trips_core_entities(store: DataStore) -
     assert [
         item.command_id for item in await store.body_commands.list_for_device(device.device_id)
     ] == ["command-1"]
-
-    conversation = await store.conversations.create_conversation(
-        conversation_id="conversation-1",
-        owner_id=owner.owner_id,
-        companion_id=companion.companion_id,
-        runtime_caller_id=caller.caller_id,
-        runtime_session_id=session.session_id,
-        source_device_id=device.device_id,
-    )
-    turn = await store.conversations.append_turn(
-        turn_id="turn-1",
-        conversation_id=conversation.conversation_id,
-        seq=1,
-        runtime_caller_id=caller.caller_id,
-        runtime_session_id=session.session_id,
-        source_device_id=device.device_id,
-        finished_at=datetime.now(timezone.utc),
-        metrics_json={"tokens_in": 3},
-    )
-    assert conversation.runtime_caller_id == caller.caller_id
-    assert conversation.runtime_session_id == session.session_id
-    assert turn.runtime_caller_id == caller.caller_id
-    assert turn.runtime_session_id == session.session_id
-    assert turn.source_device_id == device.device_id
-    await store.conversations.append_message(
-        message_id="message-1",
-        turn_id=turn.turn_id,
-        seq=0,
-        role="user",
-        content="hello",
-    )
-    messages = await store.conversations.list_messages_for_conversation(
-        conversation.conversation_id
-    )
-    assert [message.content for message in messages] == ["hello"]
-    assert [message.seq for message in messages] == [0]
 
     realm = await store.memory_repo.create_realm(
         realm_id="realm-1",
@@ -235,29 +177,15 @@ async def test_repository_workflow_round_trips_core_entities(store: DataStore) -
     assert result.memory_id == "memory-1"
     assert result.external_key == "fake://realm-1/memory-1"
 
-    job = await store.jobs.create(
-        job_id="job-1",
-        owner_id=owner.owner_id,
-        companion_id=companion.companion_id,
-        provider="mementos",
-        kind="research",
-        input_json={"task": "summarize"},
-    )
-    await store.jobs.complete(
-        job.job_id,
-        result_json={"ok": True},
-        completed_at=datetime.now(timezone.utc),
-    )
-
     await store.events.append(
         event_id="event-job-1",
         owner_id=owner.owner_id,
         subject_type="job",
-        subject_id=job.job_id,
+        subject_id="job-1",
         event_type="job.completed",
         payload_json={"ok": True},
     )
-    events = await store.events.list_for_subject(subject_type="job", subject_id=job.job_id)
+    events = await store.events.list_for_subject(subject_type="job", subject_id="job-1")
     assert [event.event_type for event in events] == ["job.completed"]
 
 
@@ -309,7 +237,7 @@ async def test_maintenance_deletes_owner_default_tree_only(store: DataStore) -> 
     assert result.deleted is True
     assert result.devices == 1
     assert result.companions == 1
-    assert result.events == 1
+    assert result.events == 0
     assert await store.owners.get("owner-default") is None
     assert await store.devices.get_device("device-default") is None
     assert await store.owners.get("owner-keep") is not None
@@ -339,13 +267,10 @@ async def test_companion_workspace_initialization_is_atomic(store: DataStore) ->
     assert companion.default_memory_realm_id == result.memory_realm.realm_id
 
     events = await store.events.list_for_owner("owner-workspace", limit=10)
-    assert {
+    assert {event.event_type for event in events} == {
         "owner.created",
-        "companion.created",
-        "persona.genome.committed",
-        "memory_realm.created",
         "companion.workspace.initialized",
-    }.issubset({event.event_type for event in events})
+    }
 
     second = await store.workspace_provisioning.provision_workspace(
         owner_id="owner-workspace",
@@ -425,7 +350,7 @@ async def test_companion_can_bind_multiple_bodies(store: DataStore) -> None:
     assert {d.device_id for d in bodies} == {"web-companion-multi", "esp-companion-multi"}
 
 
-async def test_provision_master_creates_web_body(store: DataStore) -> None:
+async def test_provision_master_does_not_implicitly_create_a_device(store: DataStore) -> None:
     await store.owner_service.create_owner(owner_id="owner-master", display_name="Owner")
 
     result = await store.workspace_provisioning.provision_workspace(
@@ -435,17 +360,10 @@ async def test_provision_master_creates_web_body(store: DataStore) -> None:
     )
     assert result.companion.is_master is True
 
-    bodies = await store.devices.list_devices_for_companion(result.companion.companion_id)
-    web_bodies = [d for d in bodies if d.kind == "web"]
-    assert len(web_bodies) == 1
-    web = web_bodies[0]
-    assert web.bound_companion_id == result.companion.companion_id
-    assert web.status == "active"
-    assert web.metadata_json.get("role") == "local_web"
-    assert web.metadata_json.get("auto_provisioned") is True
+    assert await store.devices.list_devices_for_companion(result.companion.companion_id) == []
 
     events = await store.events.list_for_owner("owner-master", limit=20)
-    assert "device.web_body.provisioned" in {event.event_type for event in events}
+    assert "device.web_body.provisioned" not in {event.event_type for event in events}
 
     # A non-master companion provisions no web body.
     non_master = await store.workspace_provisioning.provision_workspace(
@@ -483,26 +401,21 @@ async def test_ensure_web_body_is_idempotent(store: DataStore) -> None:
     assert len(web_bodies) == 1
 
 
-async def test_conversation_source_device_is_independent_from_body_binding(
-    store: DataStore,
-) -> None:
-    await store.owners.create(owner_id="owner-conv", display_name="Owner")
-    await store.companions.create(companion_id="companion-a", owner_id="owner-conv")
-    await store.companions.create(companion_id="companion-b", owner_id="owner-conv")
-    await store.devices.create_device(
-        device_id="device-conv",
-        owner_id="owner-conv",
-        bound_companion_id="companion-a",
+async def test_promote_to_master_does_not_implicitly_create_a_device(store: DataStore) -> None:
+    await store.owners.create(owner_id="owner-promote", display_name="Owner")
+    await store.companions.create(
+        companion_id="companion-promote",
+        owner_id="owner-promote",
+        display_name="Companion",
     )
 
-    conversation = await store.conversations.create_conversation(
-        conversation_id="conversation-ok",
-        owner_id="owner-conv",
-        companion_id="companion-b",
-        source_device_id="device-conv",
+    promoted = await store.workspace_provisioning.promote_to_master(
+        owner_id="owner-promote",
+        companion_id="companion-promote",
     )
-    assert conversation.companion_id == "companion-b"
-    assert conversation.source_device_id == "device-conv"
+
+    assert promoted.is_master is True
+    assert await store.devices.list_devices_for_companion("companion-promote") == []
 
 
 async def test_default_memory_realm_must_belong_to_companion(store: DataStore) -> None:
