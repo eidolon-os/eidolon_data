@@ -9,6 +9,11 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from eidolon_sdk.biz.system_data import (
+    SystemDataNotFound,
+    SystemDataRuntimeClient,
+    SystemDataUpstreamError,
+)
 
 from eidolon_data import DataSettings, DataStore
 
@@ -70,13 +75,45 @@ async def test_real_authority_process_serves_authenticated_concurrent_reads(tmp_
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://data.local",
-            headers={"Authorization": f"Bearer {token}"},
         ) as client:
             path = "/api/companion-authority/v1/companions/companion-e2e"
-            responses = await asyncio.gather(*(client.get(path) for _ in range(30)))
+            headers = {"Authorization": f"Bearer {token}"}
+            responses = await asyncio.gather(
+                *(client.get(path, headers=headers) for _ in range(30))
+            )
             assert {response.status_code for response in responses} == {200}
             assert {response.json()["owner_id"] for response in responses} == {"owner-e2e"}
-            assert (await client.get(path.replace("companion-e2e", "missing"))).status_code == 404
+            assert (
+                await client.get(
+                    path.replace("companion-e2e", "missing"),
+                    headers=headers,
+                )
+            ).status_code == 404
+
+            runtime = SystemDataRuntimeClient(
+                client,
+                "http://data.local",
+                service_token=token,
+            )
+            snapshots = await asyncio.gather(
+                *(runtime.get_companion_runtime("companion-e2e") for _ in range(30))
+            )
+            assert {snapshot.owner_id for snapshot in snapshots} == {"owner-e2e"}
+            assert {snapshot.memory_realm.realm_id for snapshot in snapshots} == {"realm-e2e"}
+            assert {snapshot.persona_genome.genome_id for snapshot in snapshots} == {"genome-e2e"}
+            assert (await runtime.get_owner_primary_runtime("owner-e2e")) == snapshots[0]
+            assert await runtime.get_companion_face("companion-e2e") is None
+            with pytest.raises(SystemDataNotFound):
+                await runtime.get_companion_runtime("missing")
+
+            unauthorized = SystemDataRuntimeClient(
+                client,
+                "http://data.local",
+                service_token="wrong-e2e-token",
+            )
+            with pytest.raises(SystemDataUpstreamError) as exc_info:
+                await unauthorized.get_companion_runtime("companion-e2e")
+            assert exc_info.value.status_code == 403
     finally:
         process.terminate()
         try:
