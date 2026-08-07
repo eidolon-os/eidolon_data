@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hmac
-import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -11,6 +9,8 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon_data import DataSettings, DataStore, load_settings
+
+from .service_auth import authorize_service, required_service_token
 
 
 class CompanionIdentityResponse(BaseModel):
@@ -24,24 +24,6 @@ class CompanionIdentityResponse(BaseModel):
     lifecycle_state: Literal["active", "inactive"]
 
 
-def _required_service_token(configured: str | None) -> str:
-    token = (configured or os.environ.get("EIDOLON_DATA_COMPANION_AUTHORITY_TOKEN") or "").strip()
-    if len(token) < 24:
-        raise RuntimeError(
-            "EIDOLON_DATA_COMPANION_AUTHORITY_TOKEN must contain at least 24 characters"
-        )
-    return token
-
-
-def _authorize(authorization: str | None, expected_token: str) -> None:
-    authorization = authorization or ""
-    scheme, separator, supplied_token = authorization.partition(" ")
-    if not separator or scheme.lower() != "bearer" or not supplied_token:
-        raise HTTPException(status_code=401, detail="Bearer service credential required")
-    if not hmac.compare_digest(supplied_token, expected_token):
-        raise HTTPException(status_code=403, detail="invalid service credential")
-
-
 def create_app(
     settings: DataSettings | None = None,
     *,
@@ -49,7 +31,10 @@ def create_app(
 ) -> FastAPI:
     """Create the narrow authority app; legacy Data CRUD routes are not mounted."""
 
-    token = _required_service_token(service_token)
+    token = required_service_token(
+        service_token,
+        environment_name="EIDOLON_DATA_COMPANION_AUTHORITY_TOKEN",
+    )
     store = DataStore.open(settings or load_settings())
 
     @asynccontextmanager
@@ -79,7 +64,7 @@ def create_app(
         companion_id: str,
         authorization: str | None = Header(default=None, alias="Authorization"),
     ) -> CompanionIdentityResponse:
-        _authorize(authorization, token)
+        authorize_service(authorization, token)
         row = await store.companions.get(companion_id)
         if row is None:
             raise HTTPException(status_code=404, detail="companion not found")

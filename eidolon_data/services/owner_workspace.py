@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from eidolon_sdk.biz.persona import (
     PERSONA_GENOME_SCHEMA,
@@ -34,7 +34,9 @@ from eidolon_data.schema import (
 
 OWNER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$")
 GENERATED_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+REQUEST_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 COMPANION_ROLES = frozenset({"primary", "standard", "guard"})
+ONBOARDING_METADATA_KEY = "_eidolon_onboarding"
 
 
 class OwnerWorkspaceError(ValueError):
@@ -51,6 +53,14 @@ class CompanionWorkspaceResult:
     companion: CompanionRow
     persona_genome: PersonaGenomeRow
     memory_realm: MemoryRealmRow
+
+
+@dataclass(frozen=True)
+class OwnerWorkspaceInitializationResult:
+    operation_id: str
+    request_fingerprint: str
+    owner: OwnerRow
+    workspace: CompanionWorkspaceResult
 
 
 class OwnerService:
@@ -197,6 +207,113 @@ class CompanionWorkspaceService:
     def __init__(self, session_factory: async_sessionmaker) -> None:
         self._session_factory = session_factory
 
+    async def initialize_owner_workspace(
+        self,
+        *,
+        operation_id: str,
+        request_fingerprint: str,
+        owner_display_name: str,
+        companion_display_name: str,
+    ) -> OwnerWorkspaceInitializationResult:
+        """Atomically initialize the first Owner workspace for one operation.
+
+        The operation UUID determines every aggregate identifier. The immutable
+        request fingerprint is stored as Companion provenance, so retries can
+        reconstruct the same result without a second workflow database.
+        """
+
+        canonical_operation_id = _validate_operation_id(operation_id)
+        if not REQUEST_FINGERPRINT_RE.fullmatch(request_fingerprint):
+            raise OwnerWorkspaceError("request_fingerprint must be a sha256 digest")
+        owner_name = owner_display_name.strip()
+        companion_name = companion_display_name.strip()
+        if not owner_name:
+            raise OwnerWorkspaceError("owner_display_name cannot be blank")
+        if not companion_name:
+            raise OwnerWorkspaceError("companion_display_name cannot be blank")
+        ids = _onboarding_ids(canonical_operation_id)
+
+        async with self._session_factory() as session, session.begin():
+            existing_owner = await session.get(OwnerRow, ids["owner_id"])
+            if existing_owner is not None:
+                return await _load_onboarding_result(
+                    session,
+                    operation_id=canonical_operation_id,
+                    request_fingerprint=request_fingerprint,
+                )
+
+            owner = OwnerRow(
+                owner_id=ids["owner_id"],
+                display_name=owner_name,
+                kind="person",
+                status="active",
+                profile_json={},
+                settings_json={},
+            )
+            session.add(owner)
+            session.add(
+                governance_fact(
+                    owner_id=owner.owner_id,
+                    subject_type="owner",
+                    subject_id=owner.owner_id,
+                    action="owner.created",
+                    payload={"kind": owner.kind, "display_name": owner.display_name},
+                    trace_id=canonical_operation_id,
+                )
+            )
+            await session.flush()
+            workspace = await _provision_workspace_in_session(
+                session,
+                owner_id=owner.owner_id,
+                companion_id=ids["companion_id"],
+                companion_display_name=companion_name,
+                role="primary",
+                companion_profile_json={},
+                companion_runtime_config_json={},
+                companion_metadata_json={
+                    "source": "owner_onboarding",
+                    ONBOARDING_METADATA_KEY: {
+                        "operation_id": canonical_operation_id,
+                        "request_fingerprint": request_fingerprint,
+                    },
+                },
+                genome_id=ids["genome_id"],
+                genome_source_json={
+                    "source_type": "owner_onboarding",
+                    "owner_id": owner.owner_id,
+                    "operation_id": canonical_operation_id,
+                },
+                genome_json=None,
+                realm_id=ids["realm_id"],
+                memory_engine="mempalace",
+                memory_engine_config_json={},
+                memory_policy_json=None,
+                trace_id=canonical_operation_id,
+            )
+            return OwnerWorkspaceInitializationResult(
+                operation_id=canonical_operation_id,
+                request_fingerprint=request_fingerprint,
+                owner=owner,
+                workspace=workspace,
+            )
+
+    async def get_owner_workspace_initialization(
+        self,
+        operation_id: str,
+    ) -> OwnerWorkspaceInitializationResult | None:
+        """Reconstruct one durable initialization result from its aggregates."""
+
+        canonical_operation_id = _validate_operation_id(operation_id)
+        ids = _onboarding_ids(canonical_operation_id)
+        async with self._session_factory() as session:
+            if await session.get(OwnerRow, ids["owner_id"]) is None:
+                return None
+            return await _load_onboarding_result(
+                session,
+                operation_id=canonical_operation_id,
+                request_fingerprint=None,
+            )
+
     async def ensure_memory_realm(
         self,
         *,
@@ -319,107 +436,182 @@ class CompanionWorkspaceService:
             _validate_generated_id(label, value)
 
         async with self._session_factory() as session, session.begin():
-            owner = await session.get(OwnerRow, owner_id)
-            if owner is None:
-                raise OwnerWorkspaceError("owner not found")
-            if owner.status != "active":
-                raise OwnerWorkspaceError("owner is not active")
-            if any(
-                (
-                    await session.get(CompanionRow, resolved_companion_id),
-                    await session.get(PersonaGenomeRow, resolved_genome_id),
-                    await session.get(MemoryRealmRow, resolved_realm_id),
-                )
-            ):
-                raise OwnerWorkspaceError("workspace identifier already exists")
-            if role == "primary" and await session.scalar(
-                select(CompanionRow.companion_id).where(
-                    CompanionRow.owner_id == owner_id,
-                    CompanionRow.role == "primary",
-                    CompanionRow.status == "active",
-                )
-            ):
-                raise OwnerWorkspaceError("owner already has an active primary companion")
-
-            companion_name = (
-                companion_display_name.strip() or f"{owner.display_name or owner_id} Companion"
-            )
-            companion = CompanionRow(
-                companion_id=resolved_companion_id,
+            return await _provision_workspace_in_session(
+                session,
                 owner_id=owner_id,
-                display_name=companion_name,
+                companion_id=resolved_companion_id,
+                companion_display_name=companion_display_name,
                 role=role,
-                status="active",
-                profile_json=dict(companion_profile_json or {}),
-                runtime_config_json=dict(companion_runtime_config_json or {}),
-                metadata_json=dict(companion_metadata_json or {}),
-            )
-            session.add(companion)
-            await session.flush()
-
-            normalized = _normalize_genome(
-                genome_json,
-                companion_name,
-                source_type=str(
-                    (genome_source_json or {}).get("source_type") or "workspace_initialize"
-                ),
-            )
-            normalized_json = persona_genome_to_json(normalized)
-            normalized_json["provenance"] = {
-                **dict(normalized_json.get("provenance") or {}),
-                "owner_id": owner_id,
-                "companion_id": resolved_companion_id,
-            }
-            genome = PersonaGenomeRow(
+                companion_profile_json=companion_profile_json,
+                companion_runtime_config_json=companion_runtime_config_json,
+                companion_metadata_json=companion_metadata_json,
                 genome_id=resolved_genome_id,
-                companion_id=resolved_companion_id,
-                version=1,
-                status="committed",
-                base_genome_id=None,
-                schema_version=PERSONA_GENOME_SCHEMA,
-                genome_hash=persona_genome_hash(normalized_json),
-                realizer_version=PERSONA_REALIZER,
-                source_json=dict(
-                    genome_source_json
-                    or {"source_type": "workspace_initialize", "owner_id": owner_id}
-                ),
-                genome_json=normalized_json,
-                change_summary="Initial persona genome",
-            )
-            realm = MemoryRealmRow(
+                genome_source_json=genome_source_json,
+                genome_json=genome_json,
                 realm_id=resolved_realm_id,
-                owner_id=owner_id,
-                companion_id=resolved_companion_id,
-                engine=memory_engine.strip() or "mempalace",
-                engine_config_json=dict(memory_engine_config_json or {}),
-                policy_json=dict(
-                    memory_policy_json or {"scope": "owner", "recall": "companion_default"}
-                ),
-                status="active",
+                memory_engine=memory_engine,
+                memory_engine_config_json=memory_engine_config_json,
+                memory_policy_json=memory_policy_json,
             )
-            session.add_all((genome, realm))
-            await session.flush()
-            companion.current_genome_id = genome.genome_id
-            companion.default_memory_realm_id = realm.realm_id
-            fact = governance_fact(
-                owner_id=owner_id,
-                subject_type="companion",
-                subject_id=resolved_companion_id,
-                action="companion.workspace.initialized",
-                payload={
-                    "role": role,
-                    "genome_id": genome.genome_id,
-                    "realm_id": realm.realm_id,
-                },
-            )
-            genome.applied_event_id = fact.event_id
-            session.add(fact)
 
-        return CompanionWorkspaceResult(
+
+async def _provision_workspace_in_session(
+    session,
+    *,
+    owner_id: str,
+    companion_id: str,
+    companion_display_name: str,
+    role: str,
+    companion_profile_json: dict | None,
+    companion_runtime_config_json: dict | None,
+    companion_metadata_json: dict | None,
+    genome_id: str,
+    genome_source_json: dict | None,
+    genome_json: dict | None,
+    realm_id: str,
+    memory_engine: str,
+    memory_engine_config_json: dict | None,
+    memory_policy_json: dict | None,
+    trace_id: str | None = None,
+) -> CompanionWorkspaceResult:
+    owner = await session.get(OwnerRow, owner_id)
+    if owner is None:
+        raise OwnerWorkspaceError("owner not found")
+    if owner.status != "active":
+        raise OwnerWorkspaceError("owner is not active")
+    if any(
+        (
+            await session.get(CompanionRow, companion_id),
+            await session.get(PersonaGenomeRow, genome_id),
+            await session.get(MemoryRealmRow, realm_id),
+        )
+    ):
+        raise OwnerWorkspaceError("workspace identifier already exists")
+    if role == "primary" and await session.scalar(
+        select(CompanionRow.companion_id).where(
+            CompanionRow.owner_id == owner_id,
+            CompanionRow.role == "primary",
+            CompanionRow.status == "active",
+        )
+    ):
+        raise OwnerWorkspaceError("owner already has an active primary companion")
+
+    companion_name = companion_display_name.strip() or f"{owner.display_name or owner_id} Companion"
+    companion = CompanionRow(
+        companion_id=companion_id,
+        owner_id=owner_id,
+        display_name=companion_name,
+        role=role,
+        status="active",
+        profile_json=dict(companion_profile_json or {}),
+        runtime_config_json=dict(companion_runtime_config_json or {}),
+        metadata_json=dict(companion_metadata_json or {}),
+    )
+    session.add(companion)
+    await session.flush()
+
+    normalized = _normalize_genome(
+        genome_json,
+        companion_name,
+        source_type=str((genome_source_json or {}).get("source_type") or "workspace_initialize"),
+    )
+    normalized_json = persona_genome_to_json(normalized)
+    normalized_json["provenance"] = {
+        **dict(normalized_json.get("provenance") or {}),
+        "owner_id": owner_id,
+        "companion_id": companion_id,
+    }
+    genome = PersonaGenomeRow(
+        genome_id=genome_id,
+        companion_id=companion_id,
+        version=1,
+        status="committed",
+        base_genome_id=None,
+        schema_version=PERSONA_GENOME_SCHEMA,
+        genome_hash=persona_genome_hash(normalized_json),
+        realizer_version=PERSONA_REALIZER,
+        source_json=dict(
+            genome_source_json or {"source_type": "workspace_initialize", "owner_id": owner_id}
+        ),
+        genome_json=normalized_json,
+        change_summary="Initial persona genome",
+    )
+    realm = MemoryRealmRow(
+        realm_id=realm_id,
+        owner_id=owner_id,
+        companion_id=companion_id,
+        engine=memory_engine.strip() or "mempalace",
+        engine_config_json=dict(memory_engine_config_json or {}),
+        policy_json=dict(memory_policy_json or {"scope": "owner", "recall": "companion_default"}),
+        status="active",
+    )
+    session.add_all((genome, realm))
+    await session.flush()
+    companion.current_genome_id = genome.genome_id
+    companion.default_memory_realm_id = realm.realm_id
+    fact = governance_fact(
+        owner_id=owner_id,
+        subject_type="companion",
+        subject_id=companion_id,
+        action="companion.workspace.initialized",
+        payload={
+            "role": role,
+            "genome_id": genome.genome_id,
+            "realm_id": realm.realm_id,
+        },
+        trace_id=trace_id,
+    )
+    genome.applied_event_id = fact.event_id
+    session.add(fact)
+    return CompanionWorkspaceResult(
+        companion=companion,
+        persona_genome=genome,
+        memory_realm=realm,
+    )
+
+
+async def _load_onboarding_result(
+    session,
+    *,
+    operation_id: str,
+    request_fingerprint: str | None,
+) -> OwnerWorkspaceInitializationResult:
+    ids = _onboarding_ids(operation_id)
+    owner = await session.get(OwnerRow, ids["owner_id"])
+    companion = await session.get(CompanionRow, ids["companion_id"])
+    genome = await session.get(PersonaGenomeRow, ids["genome_id"])
+    realm = await session.get(MemoryRealmRow, ids["realm_id"])
+    if owner is None or companion is None or genome is None or realm is None:
+        raise OwnerWorkspaceError("workspace initialization resources are incomplete")
+    metadata = (companion.metadata_json or {}).get(ONBOARDING_METADATA_KEY)
+    if not isinstance(metadata, dict):
+        raise OwnerWorkspaceError("workspace identifiers belong to another operation")
+    stored_operation_id = metadata.get("operation_id")
+    stored_fingerprint = metadata.get("request_fingerprint")
+    if stored_operation_id != operation_id or not isinstance(stored_fingerprint, str):
+        raise OwnerWorkspaceError("workspace identifiers belong to another operation")
+    if request_fingerprint is not None and stored_fingerprint != request_fingerprint:
+        raise OwnerWorkspaceError("operation_id is already in use for another request")
+    if (
+        companion.owner_id != owner.owner_id
+        or companion.role != "primary"
+        or companion.current_genome_id != genome.genome_id
+        or companion.default_memory_realm_id != realm.realm_id
+        or genome.companion_id != companion.companion_id
+        or realm.owner_id != owner.owner_id
+        or realm.companion_id != companion.companion_id
+    ):
+        raise OwnerWorkspaceError("workspace initialization resources are inconsistent")
+    return OwnerWorkspaceInitializationResult(
+        operation_id=operation_id,
+        request_fingerprint=stored_fingerprint,
+        owner=owner,
+        workspace=CompanionWorkspaceResult(
             companion=companion,
             persona_genome=genome,
             memory_realm=realm,
-        )
+        ),
+    )
 
 
 async def _owned_active_companion(session, owner_id: str, companion_id: str) -> CompanionRow:
@@ -480,6 +672,26 @@ def _validate_owner_id(owner_id: str) -> str:
             "owner_id must be 1-48 chars and contain only letters, numbers, _, ., or -"
         )
     return value
+
+
+def _validate_operation_id(operation_id: str) -> str:
+    try:
+        canonical = str(UUID(operation_id))
+    except (ValueError, AttributeError) as exc:
+        raise OwnerWorkspaceError("operation_id must be a UUID") from exc
+    if canonical != operation_id:
+        raise OwnerWorkspaceError("operation_id must use canonical UUID encoding")
+    return canonical
+
+
+def _onboarding_ids(operation_id: str) -> dict[str, str]:
+    operation_hex = UUID(operation_id).hex
+    return {
+        "owner_id": f"owner_{operation_hex}",
+        "companion_id": f"c_{operation_hex}",
+        "genome_id": f"g_{operation_hex}_origin",
+        "realm_id": f"r_{operation_hex}",
+    }
 
 
 def _validate_generated_id(label: str, value: str) -> None:

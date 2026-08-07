@@ -128,8 +128,9 @@ domain command ──same transaction──> local `audit_outbox`
 - services own multi-row transactions, current-pointer changes, lifecycle
   transitions, and deletions.
 - `DataStore` is the composition root. Its public surface has no legacy aliases.
-- the API is narrow, authenticated, versioned, and read-only; no generic CRUD
-  app is mounted.
+- every API is narrow, authenticated, and versioned; Companion authority is
+  read-only, while the separately credentialed Workspace authority exposes
+  only idempotent first-use initialization. No generic CRUD app is mounted.
 - tests enforce dependency direction and the exact table/accessor boundary.
 
 ## Atomic invariants
@@ -137,8 +138,11 @@ domain command ──same transaction──> local `audit_outbox`
 - An Owner has at most one active primary Companion.
 - A Guard binding must point to an active Guard-role Companion owned by the
   same Owner, but its external `device_id` has no Data foreign key.
-- Workspace initialization atomically creates Companion, initial immutable
-  Persona Genome, Memory Realm catalog row, both pointers, and one audit fact.
+- First-use Workspace initialization atomically creates the Owner, primary
+  Companion, initial immutable Persona Genome, Memory Realm catalog row, both
+  pointers, and audit facts. A canonical operation UUID determines stable IDs;
+  its immutable request fingerprint lives in Companion provenance so retries
+  reconstruct the result without another workflow database.
 - Persona proposal approval uses the expected base/current pointer and marks a
   conflicting proposal stale rather than overwriting concurrent evolution.
 - Face assets and Owner face profiles use versioned desired/superseded state;

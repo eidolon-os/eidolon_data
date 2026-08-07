@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidolon.live/contracts/system-data/workspace/onboarding-operation-v1.schema.json",
+  "title": "Owner workspace onboarding operation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "operation",
+    "operation_id",
+    "request_fingerprint",
+    "status",
+    "owner",
+    "workspace"
+  ],
+  "properties": {
+    "contract_version": { "const": "1" },
+    "operation": { "const": "owner-workspace.initialize" },
+    "operation_id": { "type": "string", "format": "uuid" },
+    "request_fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "status": { "const": "succeeded" },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner_id", "display_name", "lifecycle_state"],
+      "properties": {
+        "owner_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "lifecycle_state": { "const": "active" }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "primary_companion_id",
+        "persona_genome_id",
+        "memory_realm_id"
+      ],
+      "properties": {
+        "state": { "const": "ready" },
+        "primary_companion_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "persona_genome_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "memory_realm_id": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    }
+  }
+}

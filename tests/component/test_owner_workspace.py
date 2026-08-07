@@ -74,6 +74,73 @@ async def test_workspace_is_one_atomic_identity_persona_memory_transaction(store
     ]
 
 
+async def test_owner_workspace_onboarding_is_atomic_durable_and_idempotent(store) -> None:
+    operation_id = "f8b886ff-d2e5-4d73-bb10-53d4a43f319e"
+    fingerprint = "sha256:" + "a" * 64
+    first = await store.companion_workspaces.initialize_owner_workspace(
+        operation_id=operation_id,
+        request_fingerprint=fingerprint,
+        owner_display_name="Manson",
+        companion_display_name="Eidolon",
+    )
+    assert first.owner.owner_id == "owner_f8b886ffd2e54d73bb1053d4a43f319e"
+    assert first.workspace.companion.companion_id == "c_f8b886ffd2e54d73bb1053d4a43f319e"
+    assert first.workspace.companion.role == "primary"
+    assert first.workspace.companion.metadata_json["_eidolon_onboarding"] == {
+        "operation_id": operation_id,
+        "request_fingerprint": fingerprint,
+    }
+
+    replay = await store.companion_workspaces.initialize_owner_workspace(
+        operation_id=operation_id,
+        request_fingerprint=fingerprint,
+        owner_display_name="Manson",
+        companion_display_name="Eidolon",
+    )
+    queried = await store.companion_workspaces.get_owner_workspace_initialization(operation_id)
+    assert replay.owner.owner_id == first.owner.owner_id
+    assert replay.workspace.persona_genome.genome_id == first.workspace.persona_genome.genome_id
+    assert queried is not None
+    assert queried.request_fingerprint == fingerprint
+    assert len(await store.owners.list()) == 1
+    assert len(await store.companions.list_for_owner(first.owner.owner_id)) == 1
+    assert [event.trace_id for event in await store.audit_outbox.list_pending()] == [
+        operation_id,
+        operation_id,
+    ]
+
+    with pytest.raises(OwnerWorkspaceError, match="already in use"):
+        await store.companion_workspaces.initialize_owner_workspace(
+            operation_id=operation_id,
+            request_fingerprint="sha256:" + "b" * 64,
+            owner_display_name="Another Owner",
+            companion_display_name="Another Companion",
+        )
+
+
+async def test_owner_workspace_onboarding_rolls_back_owner_on_workspace_collision(store) -> None:
+    operation_id = "731de841-bc18-422c-9a92-34c4ebcb8bd8"
+    operation_hex = "731de841bc18422c9a9234c4ebcb8bd8"
+    await store.owner_commands.create_owner(owner_id="existing-owner")
+    await store.companion_workspaces.provision_workspace(
+        owner_id="existing-owner",
+        companion_id="existing-companion",
+        genome_id="existing-genome",
+        realm_id=f"r_{operation_hex}",
+    )
+
+    with pytest.raises(OwnerWorkspaceError, match="identifier already exists"):
+        await store.companion_workspaces.initialize_owner_workspace(
+            operation_id=operation_id,
+            request_fingerprint="sha256:" + "c" * 64,
+            owner_display_name="Interrupted Owner",
+            companion_display_name="Eidolon",
+        )
+
+    assert await store.owners.get(f"owner_{operation_hex}") is None
+    assert await store.companions.get(f"c_{operation_hex}") is None
+
+
 async def test_workspace_collision_rolls_back_without_partial_companion(store) -> None:
     await store.owner_commands.create_owner(owner_id="owner-1")
     await store.companion_workspaces.provision_workspace(

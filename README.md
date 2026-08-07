@@ -79,9 +79,9 @@ The default path is `~/eidolon/data/eidolon-system.sqlite3`. Runtime startup
 validates the canonical schema and fails closed on missing, extra, or retired
 tables; it does not repair or import an old database.
 
-## Companion authority contract
+## Authority contracts
 
-The existing Kernel integration consumes only the stable identity subset:
+The Kernel integration consumes only the stable Companion identity subset:
 
 ```bash
 export EIDOLON_DATA_COMPANION_AUTHORITY_TOKEN='<at-least-24-random-characters>'
@@ -93,6 +93,27 @@ uv run --extra api uvicorn eidolon_data.api.companion_authority:create_app \
 and described by
 [`identity.schema.json`](eidolon_data/contracts/schemas/companion/identity.schema.json).
 The app exposes no mutation or broad CRUD endpoint.
+
+First-use orchestration uses a separate write credential and process:
+
+```bash
+export EIDOLON_DATA_WORKSPACE_AUTHORITY_TOKEN='<different-at-least-24-random-characters>'
+uv run --extra api uvicorn eidolon_data.api.workspace_authority:create_app \
+  --factory --host 127.0.0.1 --port 8086
+```
+
+`PUT /api/workspace-authority/v1/operations/{operation_id}` atomically creates
+the Owner, primary Companion, initial Persona Genome, and Memory Realm catalog
+pointer. The canonical UUID determines stable aggregate IDs; an immutable
+request fingerprint is stored with the Companion provenance. Replaying the
+same request returns the same result, while reusing the UUID for another
+request returns `409`. `GET` on the same path reconstructs the durable result.
+The exact response is described by
+[`onboarding-operation.schema.json`](eidolon_data/contracts/schemas/workspace/onboarding-operation.schema.json).
+
+The read and write tokens must not be shared: Kernel receives only the
+Companion authority token; Admin onboarding receives only the Workspace
+authority token. Neither app mounts legacy CRUD routes.
 
 ## Verification
 
