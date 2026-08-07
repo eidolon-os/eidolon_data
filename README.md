@@ -99,7 +99,7 @@ First-use orchestration uses a separate write credential and process:
 ```bash
 export EIDOLON_DATA_WORKSPACE_AUTHORITY_TOKEN='<different-at-least-24-random-characters>'
 uv run --extra api uvicorn eidolon_data.api.workspace_authority:create_app \
-  --factory --host 127.0.0.1 --port 8086
+  --factory --host 127.0.0.1 --port 8085
 ```
 
 `PUT /api/workspace-authority/v1/operations/{operation_id}` atomically creates

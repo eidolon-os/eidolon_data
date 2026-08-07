@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 from eidolon_data import DataSettings, DataStore
 from eidolon_data.api.companion_authority import create_app
 
 pytestmark = pytest.mark.integration
 
-KERNEL_ROOT = Path(__file__).resolve().parents[3] / "eidolon_kernel"
+KERNEL_ROOT = Path(
+    os.environ.get(
+        "EIDOLON_TEST_KERNEL_SOURCE_ROOT",
+        Path(__file__).resolve().parents[3] / "eidolon_kernel",
+    )
+).resolve()
 if not (KERNEL_ROOT / "eidolon_kernel").is_dir():
     pytest.skip("eidolon_kernel sibling is required", allow_module_level=True)
 sys.path.insert(0, str(KERNEL_ROOT))
@@ -23,6 +30,53 @@ EidolonDataHttpCompanionAuthority = importlib.import_module(
     "eidolon_kernel.adapters.companion.eidolon_data_http"
 ).EidolonDataHttpCompanionAuthority
 ContractRegistry = importlib.import_module("eidolon_kernel.contracts.registry").ContractRegistry
+
+
+def test_kernel_manifest_publishes_exact_data_authority_contracts() -> None:
+    manifest = yaml.safe_load(
+        (KERNEL_ROOT / "config/system-services.yaml").read_text(encoding="utf-8")
+    )
+    services = {item["service_id"]: item for item in manifest["services"]}
+
+    assert services["data"] == {
+        "service_id": "data",
+        "description": "System Data and Companion identity authority",
+        "required": True,
+        "enabled_by_default": True,
+        "dependencies": [],
+        "host_targets": {"supervisord": "data:data-api"},
+        "endpoints": [
+            {
+                "endpoint_id": "companion-authority.http",
+                "protocol": "http",
+                "address": "http://127.0.0.1:8084",
+                "contract": (
+                    "https://eidolon.dev/data/contracts/v1/companion/identity.schema.json"
+                ),
+                "health_url": "http://127.0.0.1:8084/health",
+            }
+        ],
+    }
+    assert services["data-workspace"] == {
+        "service_id": "data-workspace",
+        "description": "System Data workspace onboarding write authority",
+        "required": True,
+        "enabled_by_default": True,
+        "dependencies": ["data"],
+        "host_targets": {"supervisord": "data:data-workspace-api"},
+        "endpoints": [
+            {
+                "endpoint_id": "workspace-authority.http",
+                "protocol": "http",
+                "address": "http://127.0.0.1:8085",
+                "contract": (
+                    "https://eidolon.live/contracts/system-data/workspace/"
+                    "onboarding-operation-v1.schema.json"
+                ),
+                "health_url": "http://127.0.0.1:8085/health",
+            }
+        ],
+    }
 
 
 async def test_kernel_adapter_parses_real_companion_authority_response(tmp_path) -> None:
