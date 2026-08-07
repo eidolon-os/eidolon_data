@@ -4,6 +4,7 @@ import pytest
 from eidolon_sdk.biz.persona import (
     PersonaEvidenceRef,
     PersonaEvolutionProposalEvent,
+    PersonaObservationEvent,
     build_default_persona_genome,
 )
 
@@ -74,6 +75,31 @@ async def test_propose_approve_and_read_immutable_history(store) -> None:
         1,
         2,
     ]
+
+
+async def test_record_observation_is_owner_scoped_and_audited(store) -> None:
+    await _workspace(store)
+    event = PersonaObservationEvent(
+        observation_id="observation-1",
+        owner_id="owner-1",
+        companion_id="companion-1",
+        kind="interaction",
+        source="agent",
+        summary="Owner prefers concise replies.",
+    )
+
+    await store.persona_commands.record_observation(event)
+
+    pending = await store.audit_outbox.list_pending()
+    observation = next(row for row in pending if row.event_id == "observation-1")
+    assert observation.owner_id == "owner-1"
+    assert observation.action == "persona.observation.created"
+    assert observation.payload["companion_id"] == "companion-1"
+
+    with pytest.raises(KeyError, match="not found for owner"):
+        await store.persona_commands.record_observation(
+            event.model_copy(update={"owner_id": "owner-other"})
+        )
 
 
 async def test_proposal_rejects_stale_base_hash_and_wrong_owner(store) -> None:

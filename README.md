@@ -81,7 +81,8 @@ tables; it does not repair or import an old database.
 
 ## Authority contracts
 
-The Kernel integration consumes only the stable Companion identity subset:
+Kernel consumes the stable Companion identity subset. Agent and Channel consume
+the versioned runtime snapshot through the same narrow authority process:
 
 ```bash
 export EIDOLON_DATA_COMPANION_AUTHORITY_TOKEN='<at-least-24-random-characters>'
@@ -92,7 +93,18 @@ uv run --extra api uvicorn eidolon_data.api.companion_authority:create_app \
 `GET /api/companion-authority/v1/companions/{companion_id}` is authenticated
 and described by
 [`identity.schema.json`](eidolon_data/contracts/schemas/companion/identity.schema.json).
-The app exposes no mutation or broad CRUD endpoint.
+The runtime consumers use:
+
+- `GET /api/companion-authority/v1/companions/{companion_id}/runtime-snapshot`;
+- `GET /api/companion-authority/v1/owners/{owner_id}/primary-runtime-snapshot`;
+- `GET /api/companion-authority/v1/companions/{companion_id}/face`.
+
+The JSON response contract is
+[`runtime-snapshot.schema.json`](eidolon_data/contracts/schemas/companion/runtime-snapshot.schema.json).
+It contains only active Companion/runtime configuration, active Memory Realm,
+and a committed Persona Genome snapshot. The face endpoint verifies stored
+size/hash before returning JPEG bytes. The app exposes no mutation or broad
+CRUD endpoint.
 
 First-use orchestration uses a separate write credential and process:
 

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidolon.dev/data/contracts/v1/companion/runtime-snapshot.schema.json",
+  "title": "Companion Runtime Snapshot V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "operation",
+    "owner_id",
+    "companion_id",
+    "lifecycle_state",
+    "runtime_config",
+    "memory_realm",
+    "persona_genome"
+  ],
+  "properties": {
+    "contract_version": {"const": "1"},
+    "operation": {"const": "companion.runtime-snapshot"},
+    "owner_id": {"type": "string", "minLength": 1, "maxLength": 64},
+    "companion_id": {"type": "string", "minLength": 1, "maxLength": 64},
+    "lifecycle_state": {"const": "active"},
+    "runtime_config": {"type": "object"},
+    "memory_realm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["realm_id", "lifecycle_state"],
+      "properties": {
+        "realm_id": {"type": "string", "minLength": 1, "maxLength": 64},
+        "lifecycle_state": {"const": "active"}
+      }
+    },
+    "persona_genome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "genome_id",
+        "version",
+        "lifecycle_state",
+        "schema_version",
+        "genome_hash",
+        "realizer_version",
+        "genome"
+      ],
+      "properties": {
+        "genome_id": {"type": "string", "minLength": 1, "maxLength": 64},
+        "version": {"type": "integer", "minimum": 1},
+        "lifecycle_state": {"const": "committed"},
+        "schema_version": {"type": "string", "minLength": 1, "maxLength": 64},
+        "genome_hash": {"type": "string", "minLength": 1, "maxLength": 80},
+        "realizer_version": {"type": "string", "minLength": 1, "maxLength": 64},
+        "genome": {"type": "object"}
+      }
+    }
+  }
+}

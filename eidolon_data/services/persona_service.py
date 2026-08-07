@@ -6,6 +6,7 @@ from eidolon_sdk.biz.persona import (
     PERSONA_GENOME_SCHEMA,
     PERSONA_REALIZER,
     PersonaEvolutionProposalEvent,
+    PersonaObservationEvent,
     build_default_persona_genome,
     normalize_persona_genome,
     persona_genome_hash,
@@ -100,6 +101,26 @@ class PersonaService:
             if companion is None or not companion.current_genome_id:
                 return None
             return await session.get(PersonaGenomeRow, companion.current_genome_id)
+
+    async def record_observation(self, event: PersonaObservationEvent) -> None:
+        """Record Agent evidence in the authority-local audit transaction."""
+        async with self._session_factory() as session, session.begin():
+            await _owned_companion(
+                session,
+                event.owner_id,
+                event.companion_id,
+                lock=False,
+            )
+            session.add(
+                governance_fact(
+                    event_id=event.observation_id,
+                    owner_id=event.owner_id,
+                    subject_type="persona_observation",
+                    subject_id=event.observation_id,
+                    action="persona.observation.created",
+                    payload=event.model_dump(mode="json", exclude_none=True),
+                )
+            )
 
     async def create_evolution_proposal(
         self,
