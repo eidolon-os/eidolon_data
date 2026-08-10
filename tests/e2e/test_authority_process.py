@@ -41,6 +41,9 @@ async def test_real_authority_process_serves_authenticated_concurrent_reads(tmp_
         **os.environ,
         "EIDOLON_DATA_SQLITE_PATH": str(database),
         "EIDOLON_DATA_COMPANION_AUTHORITY_TOKEN": token,
+        "EIDOLON_DATA_MEMORY_RUNTIME_ROSTER_TOKEN": (
+            "e2e-memory-runtime-roster-token-0001"
+        ),
     }
     process = subprocess.Popen(
         [

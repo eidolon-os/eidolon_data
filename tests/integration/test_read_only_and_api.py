@@ -32,6 +32,15 @@ RUNTIME_SCHEMA = (
     / "companion"
     / "runtime-snapshot.schema.json"
 )
+MEMORY_ROSTER_SCHEMA = (
+    Path(__file__).resolve().parents[2]
+    / "eidolon_data"
+    / "contracts"
+    / "schemas"
+    / "memory"
+    / "runtime-roster.schema.json"
+)
+MEMORY_ROSTER_TOKEN = "memory-runtime-roster-token-0001"
 
 
 async def _seed(path) -> DataSettings:
@@ -70,7 +79,11 @@ async def test_query_only_connection_reads_but_cannot_initialize_or_write(tmp_pa
 async def test_companion_authority_auth_and_exact_contract(tmp_path) -> None:
     settings = await _seed(tmp_path / "authority.sqlite3")
     token = "companion-authority-token-000001"
-    app = create_app(settings, service_token=token)
+    app = create_app(
+        settings,
+        service_token=token,
+        memory_roster_token=MEMORY_ROSTER_TOKEN,
+    )
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -103,6 +116,87 @@ async def test_companion_authority_auth_and_exact_contract(tmp_path) -> None:
         ).status_code == 404
 
 
+async def test_memory_runtime_roster_has_distinct_auth_and_exact_contract(tmp_path) -> None:
+    settings = await _seed(tmp_path / "memory-roster.sqlite3")
+    companion_token = "companion-authority-token-000001"
+    app = create_app(
+        settings,
+        service_token=companion_token,
+        memory_roster_token=MEMORY_ROSTER_TOKEN,
+    )
+    path = "/api/companion-authority/v1/memory-runtime-roster"
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://data.test",
+        ) as client,
+    ):
+        assert (await client.get(path)).status_code == 401
+        assert (
+            await client.get(
+                path,
+                headers={"Authorization": f"Bearer {companion_token}"},
+            )
+        ).status_code == 403
+        response = await client.get(
+            path,
+            headers={"Authorization": f"Bearer {MEMORY_ROSTER_TOKEN}"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "contract_version": "1",
+            "operation": "memory.runtime-roster",
+            "realms": [
+                {
+                    "realm_id": "realm-1",
+                    "owner_id": "owner-1",
+                    "companion_id": "companion-1",
+                    "engine": "mempalace",
+                    "engine_config": {},
+                }
+            ],
+        }
+        Draft202012Validator(
+            json.loads(MEMORY_ROSTER_SCHEMA.read_text(encoding="utf-8"))
+        ).validate(response.json())
+        assert (
+            await client.get(
+                "/api/companion-authority/v1/companions/companion-1",
+                headers={"Authorization": f"Bearer {MEMORY_ROSTER_TOKEN}"},
+            )
+        ).status_code == 403
+
+
+async def test_memory_runtime_roster_is_empty_for_fresh_or_archived_data(tmp_path) -> None:
+    database = tmp_path / "empty-roster.sqlite3"
+    settings = DataSettings(
+        sqlite_path=str(database),
+        object_store_path=str(tmp_path / "objects"),
+    )
+    store = DataStore.open(settings)
+    await store.init_schema()
+    await store.close()
+    app = create_app(
+        settings,
+        service_token="companion-authority-token-000001",
+        memory_roster_token=MEMORY_ROSTER_TOKEN,
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://data.test",
+        ) as client,
+    ):
+        response = await client.get(
+            "/api/companion-authority/v1/memory-runtime-roster",
+            headers={"Authorization": f"Bearer {MEMORY_ROSTER_TOKEN}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["realms"] == []
+
+
 async def test_companion_authority_serves_runtime_snapshot_and_face(tmp_path) -> None:
     settings = await _seed(tmp_path / "runtime-authority.sqlite3")
     image = b"\xff\xd8runtime-face\xff\xd9"
@@ -129,7 +223,11 @@ async def test_companion_authority_serves_runtime_snapshot_and_face(tmp_path) ->
         await writer.close()
 
     token = "companion-authority-token-000001"
-    app = create_app(settings, service_token=token)
+    app = create_app(
+        settings,
+        service_token=token,
+        memory_roster_token=MEMORY_ROSTER_TOKEN,
+    )
     headers = {"Authorization": f"Bearer {token}"}
     async with (
         app.router.lifespan_context(app),
@@ -239,7 +337,11 @@ async def test_runtime_authority_fails_closed_for_archived_workspace(tmp_path) -
         await writer.close()
 
     token = "companion-authority-token-000001"
-    app = create_app(settings, service_token=token)
+    app = create_app(
+        settings,
+        service_token=token,
+        memory_roster_token=MEMORY_ROSTER_TOKEN,
+    )
     headers = {"Authorization": f"Bearer {token}"}
     async with (
         app.router.lifespan_context(app),
@@ -301,7 +403,11 @@ async def test_runtime_authority_fails_closed_for_corrupt_references(
         connection.commit()
 
     token = "companion-authority-token-000001"
-    app = create_app(settings, service_token=token)
+    app = create_app(
+        settings,
+        service_token=token,
+        memory_roster_token=MEMORY_ROSTER_TOKEN,
+    )
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -320,4 +426,18 @@ async def test_runtime_authority_fails_closed_for_corrupt_references(
 @pytest.mark.parametrize("token", ["", "short", " " * 30])
 def test_companion_authority_rejects_weak_service_tokens(token: str) -> None:
     with pytest.raises(RuntimeError, match="at least 24"):
-        create_app(DataSettings(sqlite_path=":memory:"), service_token=token)
+        create_app(
+            DataSettings(sqlite_path=":memory:"),
+            service_token=token,
+            memory_roster_token=MEMORY_ROSTER_TOKEN,
+        )
+
+
+@pytest.mark.parametrize("token", ["", "short", " " * 30])
+def test_companion_authority_rejects_weak_memory_roster_tokens(token: str) -> None:
+    with pytest.raises(RuntimeError, match="EIDOLON_DATA_MEMORY_RUNTIME_ROSTER_TOKEN"):
+        create_app(
+            DataSettings(sqlite_path=":memory:"),
+            service_token="companion-authority-token-000001",
+            memory_roster_token=token,
+        )
