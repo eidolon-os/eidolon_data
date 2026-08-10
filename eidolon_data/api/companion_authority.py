@@ -59,16 +59,43 @@ class CompanionRuntimeSnapshotResponse(BaseModel):
     persona_genome: PersonaGenomeSnapshot
 
 
+class MemoryRuntimeRealm(BaseModel):
+    """One active Memory Realm and the authority facts needed to run it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    realm_id: str = Field(min_length=1, max_length=64)
+    owner_id: str = Field(min_length=1, max_length=64)
+    companion_id: str = Field(min_length=1, max_length=64)
+    engine: str = Field(min_length=1, max_length=64)
+    engine_config: dict[str, Any]
+
+
+class MemoryRuntimeRosterResponse(BaseModel):
+    """Active Memory runtime roster projected by the System Data authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["1"] = "1"
+    operation: Literal["memory.runtime-roster"] = "memory.runtime-roster"
+    realms: list[MemoryRuntimeRealm]
+
+
 def create_app(
     settings: DataSettings | None = None,
     *,
     service_token: str | None = None,
+    memory_roster_token: str | None = None,
 ) -> FastAPI:
     """Create the narrow authority app; legacy Data CRUD routes are not mounted."""
 
     token = required_service_token(
         service_token,
         environment_name="EIDOLON_DATA_COMPANION_AUTHORITY_TOKEN",
+    )
+    roster_token = required_service_token(
+        memory_roster_token,
+        environment_name="EIDOLON_DATA_MEMORY_RUNTIME_ROSTER_TOKEN",
     )
     store = DataStore.open(settings or load_settings())
 
@@ -89,6 +116,38 @@ def create_app(
     @app.get("/health", tags=["operations"])
     async def health() -> dict[str, str]:
         return {"status": "ready"}
+
+    @app.get(
+        "/api/companion-authority/v1/memory-runtime-roster",
+        response_model=MemoryRuntimeRosterResponse,
+        tags=["memory-runtime-authority"],
+    )
+    async def get_memory_runtime_roster(
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> MemoryRuntimeRosterResponse:
+        authorize_service(authorization, roster_token)
+        realms: list[MemoryRuntimeRealm] = []
+        for owner in await store.owners.list():
+            if owner.status != "active":
+                continue
+            companions = {
+                companion.companion_id: companion
+                for companion in await store.companions.list_for_owner(owner.owner_id)
+                if companion.status == "active"
+            }
+            for realm in await store.memory_realms.list_for_owner(owner.owner_id):
+                if realm.status != "active" or realm.companion_id not in companions:
+                    continue
+                realms.append(
+                    MemoryRuntimeRealm(
+                        realm_id=realm.realm_id,
+                        owner_id=realm.owner_id,
+                        companion_id=realm.companion_id,
+                        engine=realm.engine,
+                        engine_config=dict(realm.engine_config_json or {}),
+                    )
+                )
+        return MemoryRuntimeRosterResponse(realms=realms)
 
     @app.get(
         "/api/companion-authority/v1/companions/{companion_id}",

@@ -130,7 +130,10 @@ domain command ──same transaction──> local `audit_outbox`
 - `DataStore` is the composition root. Its public surface has no legacy aliases.
 - every API is narrow, authenticated, and versioned; Companion authority is
   read-only, while the separately credentialed Workspace authority exposes
-  only idempotent first-use initialization. No generic CRUD app is mounted.
+  only idempotent first-use initialization. The Memory runtime roster is a
+  single read-only projection of active Owner/Companion/Realm authority facts;
+  it uses a Memory-specific service credential and exposes neither generic
+  Owner queries nor Memory payloads. No generic CRUD app is mounted.
 - tests enforce dependency direction and the exact table/accessor boundary.
 
 ## Atomic invariants

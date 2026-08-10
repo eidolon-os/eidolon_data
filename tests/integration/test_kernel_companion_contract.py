@@ -54,7 +54,27 @@ def test_kernel_manifest_publishes_exact_data_authority_contracts() -> None:
                     "https://eidolon.dev/data/contracts/v1/companion/identity.schema.json"
                 ),
                 "health_url": "http://127.0.0.1:8084/health",
-            }
+            },
+            {
+                "endpoint_id": "companion-runtime-authority.http",
+                "protocol": "http",
+                "address": "http://127.0.0.1:8084",
+                "contract": (
+                    "https://eidolon.dev/data/contracts/v1/companion/"
+                    "runtime-snapshot.schema.json"
+                ),
+                "health_url": "http://127.0.0.1:8084/health",
+            },
+            {
+                "endpoint_id": "memory-runtime-roster.http",
+                "protocol": "http",
+                "address": "http://127.0.0.1:8084",
+                "contract": (
+                    "https://eidolon.dev/data/contracts/v1/memory/"
+                    "runtime-roster.schema.json"
+                ),
+                "health_url": "http://127.0.0.1:8084/health",
+            },
         ],
     }
     assert services["data-workspace"] == {
@@ -93,7 +113,11 @@ async def test_kernel_adapter_parses_real_companion_authority_response(tmp_path)
     await seed.close()
 
     token = "joint-companion-authority-token-0001"
-    app = create_app(settings, service_token=token)
+    app = create_app(
+        settings,
+        service_token=token,
+        memory_roster_token="memory-runtime-roster-token-0001",
+    )
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
