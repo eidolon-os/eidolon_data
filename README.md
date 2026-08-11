@@ -75,7 +75,8 @@ Production creates a fresh database from the tracked baseline:
 uv run alembic upgrade head
 ```
 
-The default path is `~/eidolon/data/eidolon-system.sqlite3`. Runtime startup
+The default path is `$EIDOLON_STATE_ROOT/eidolon-system.sqlite3`. The Mac Host
+profile maps that root to `~/eidolon/data`. Runtime startup
 validates the canonical schema and fails closed on missing, extra, or retired
 tables; it does not repair or import an old database.
 

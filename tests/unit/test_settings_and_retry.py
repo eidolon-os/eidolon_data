@@ -6,7 +6,7 @@ import pytest
 
 from eidolon_data.audit.dispatcher import _retry_delay
 from eidolon_data.cli import build_parser
-from eidolon_data.settings import DataSettings, load_settings
+from eidolon_data.settings import DataSettings, default_data_dir, load_settings
 
 pytestmark = pytest.mark.unit
 
@@ -48,6 +48,37 @@ def test_load_settings_merges_yaml_and_environment(tmp_path, monkeypatch) -> Non
     loaded = load_settings(settings_yaml=yaml_path, env_file=tmp_path / "missing.env")
     assert loaded.sqlite_path == "/env/system.sqlite3"
     assert loaded.sqlite_busy_timeout_ms == 1234
+
+
+def test_host_state_root_owns_default_data_paths(tmp_path, monkeypatch) -> None:
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("EIDOLON_STATE_ROOT", str(state_root))
+
+    settings = DataSettings()
+
+    assert default_data_dir() == state_root
+    assert settings.sqlite_path == str(state_root / "eidolon-system.sqlite3")
+    assert settings.object_store_path == str(state_root / "objects")
+
+
+def test_yaml_paths_expand_host_contract_environment(tmp_path, monkeypatch) -> None:
+    state_root = tmp_path / "state"
+    settings_yaml = tmp_path / "settings.yaml"
+    settings_yaml.write_text(
+        "data:\n"
+        '  sqlite_path: "$EIDOLON_STATE_ROOT/eidolon-system.sqlite3"\n'
+        '  object_store_path: "$EIDOLON_STATE_ROOT/objects"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EIDOLON_STATE_ROOT", str(state_root))
+
+    settings = load_settings(
+        settings_yaml=settings_yaml,
+        env_file=tmp_path / "missing.env",
+    )
+
+    assert settings.sqlite_path == str(state_root / "eidolon-system.sqlite3")
+    assert settings.object_store_path == str(state_root / "objects")
 
 
 def test_management_cli_exposes_no_schema_creation_compatibility_command() -> None:

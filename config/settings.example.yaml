@@ -1,3 +1,4 @@
 data:
-  sqlite_path: "~/eidolon/data/eidolon-system.sqlite3"
+  sqlite_path: "$EIDOLON_STATE_ROOT/eidolon-system.sqlite3"
+  object_store_path: "$EIDOLON_STATE_ROOT/objects"
   echo_sql: false

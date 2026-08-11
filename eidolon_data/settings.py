@@ -16,7 +16,7 @@ _DEFAULT_ENV = _REPO_ROOT / "config" / ".env"
 
 
 def default_data_dir() -> Path:
-    return Path.home() / "eidolon" / "data"
+    return Path(os.environ.get("EIDOLON_STATE_ROOT", "~/eidolon/data")).expanduser()
 
 
 def default_sqlite_path() -> Path:
@@ -94,7 +94,12 @@ def _load_yaml(settings_yaml: str | Path | None) -> dict[str, Any]:
     data_section = data.get("data", data)
     if not isinstance(data_section, dict):
         raise ValueError(f"data settings yaml 'data' section must be a mapping: {path}")
-    return dict(data_section)
+    values = dict(data_section)
+    for key in ("sqlite_path", "object_store_path"):
+        value = values.get(key)
+        if isinstance(value, str):
+            values[key] = os.path.expandvars(os.path.expanduser(value))
+    return values
 
 
 def _apply_env_overrides(data: dict[str, Any]) -> None:

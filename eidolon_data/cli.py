@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     delete_owner.add_argument(
         "--sqlite-path",
         default=None,
-        help="Override SQLite path. Defaults to ~/eidolon/data/eidolon-system.sqlite3.",
+        help="Override SQLite path. Defaults to $EIDOLON_STATE_ROOT/eidolon-system.sqlite3.",
     )
     delete_owner.set_defaults(func=_delete_owner)
 
