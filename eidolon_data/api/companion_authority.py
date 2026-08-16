@@ -22,7 +22,17 @@ class CompanionIdentityResponse(BaseModel):
     operation: Literal["companion.identity"] = "companion.identity"
     companion_id: str = Field(min_length=1, max_length=64)
     owner_id: str = Field(min_length=1, max_length=64)
+    #: What the Owner calls this Eidolon. Written at onboarding and, until now,
+    #: never read back — the product showed an identifier where a person had
+    #: given it a name.
+    display_name: str = Field(default="", max_length=128)
     lifecycle_state: Literal["active", "inactive"]
+
+
+class CompanionRenameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=128)
 
 
 class MemoryRealmSnapshot(BaseModel):
@@ -165,6 +175,39 @@ def create_app(
         return CompanionIdentityResponse(
             companion_id=row.companion_id,
             owner_id=row.owner_id,
+            display_name=row.display_name,
+            lifecycle_state="active" if row.status == "active" else "inactive",
+        )
+
+    @app.patch(
+        "/api/companion-authority/v1/companions/{companion_id}",
+        response_model=CompanionIdentityResponse,
+        tags=["companion-authority"],
+    )
+    async def rename_companion(
+        companion_id: str,
+        payload: CompanionRenameRequest,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> CompanionIdentityResponse:
+        """The one thing about a Companion its Owner may set directly.
+
+        This authority stays closed to everything else: it answers to Admin and
+        to nobody else, and Admin is where an Owner's authority is judged. The
+        surface widens by one field because a person naming their Eidolon and
+        never seeing that name again is not a product working as intended.
+        """
+
+        authorize_service(authorization, token)
+        display_name = payload.display_name.strip()
+        if not display_name:
+            raise HTTPException(status_code=422, detail="display_name cannot be blank")
+        row = await store.companions.rename(companion_id, display_name)
+        if row is None:
+            raise HTTPException(status_code=404, detail="companion not found")
+        return CompanionIdentityResponse(
+            companion_id=row.companion_id,
+            owner_id=row.owner_id,
+            display_name=row.display_name,
             lifecycle_state="active" if row.status == "active" else "inactive",
         )
 

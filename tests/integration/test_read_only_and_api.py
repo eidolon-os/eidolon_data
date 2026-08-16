@@ -103,6 +103,9 @@ async def test_companion_authority_auth_and_exact_contract(tmp_path) -> None:
             "operation": "companion.identity",
             "companion_id": "companion-1",
             "owner_id": "owner-1",
+            # The name its Owner gave it, which this authority has stored all
+            # along and did not answer with until now.
+            "display_name": "owner-1 Companion",
             "lifecycle_state": "active",
         }
         Draft202012Validator(json.loads(IDENTITY_SCHEMA.read_text(encoding="utf-8"))).validate(
@@ -441,3 +444,75 @@ def test_companion_authority_rejects_weak_memory_roster_tokens(token: str) -> No
             service_token="companion-authority-token-000001",
             memory_roster_token=token,
         )
+
+
+@pytest.mark.asyncio
+async def _companion_authority(tmp_path):
+    settings = await _seed(tmp_path / "authority.sqlite3")
+    token = "companion-authority-token-000001"
+    app = create_app(
+        settings,
+        service_token=token,
+        memory_roster_token=MEMORY_ROSTER_TOKEN,
+    )
+    return app, token
+
+
+@pytest.mark.asyncio
+async def test_an_owner_may_name_their_companion(tmp_path) -> None:
+    """The one thing about a Companion its Owner sets directly.
+
+    The name was written at onboarding and never read back, so the product
+    showed c_683f9… where a person had said what to call it. Naming it is
+    therefore both the read and the write this authority was missing.
+    """
+
+    app, token = await _companion_authority(tmp_path)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+        path = "/api/companion-authority/v1/companions/companion-1"
+
+        renamed = await client.patch(path, json={"display_name": "小忆"}, headers=headers)
+
+        assert renamed.status_code == 200
+        assert renamed.json()["display_name"] == "小忆"
+        # It is the authority's answer that changed, not just this reply.
+        assert (await client.get(path, headers=headers)).json()["display_name"] == "小忆"
+
+
+@pytest.mark.asyncio
+async def test_naming_refuses_what_it_cannot_carry_out(tmp_path) -> None:
+    app, token = await _companion_authority(tmp_path)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+
+        blank = await client.patch(
+            "/api/companion-authority/v1/companions/companion-1",
+            json={"display_name": "   "},
+            headers=headers,
+        )
+        missing = await client.patch(
+            "/api/companion-authority/v1/companions/nobody",
+            json={"display_name": "小忆"},
+            headers=headers,
+        )
+        unauthorized = await client.patch(
+            "/api/companion-authority/v1/companions/companion-1",
+            json={"display_name": "小忆"},
+        )
+
+        # A name of only spaces would erase the one the Owner has.
+        assert blank.status_code == 422
+        # Answering "which Companion?" rather than reporting a rename of nothing.
+        assert missing.status_code == 404
+        assert unauthorized.status_code == 401
