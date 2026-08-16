@@ -110,3 +110,59 @@ async def test_workspace_authority_rejects_unknown_or_invalid_operations(tmp_pat
         assert missing.status_code == 404
         assert invalid.status_code == 422
         assert extra.status_code == 422
+
+
+async def test_owner_name_is_readable_and_correctable(tmp_path) -> None:
+    """The name a person gives at first use is theirs to fix later."""
+
+    settings = DataSettings(sqlite_path=str(tmp_path / "owner-rename.sqlite3"))
+    store = DataStore.open(settings)
+    await store.init_schema()
+    await store.close()
+    token = "workspace-authority-token-000002"
+    operation_id = "0f1d0a5c-2f2e-4a1e-9a4a-1a2b3c4d5e6f"
+    headers = {"Authorization": f"Bearer {token}"}
+    app = create_app(settings, service_token=token)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://data.test",
+        ) as client,
+    ):
+        created = await client.put(
+            f"/api/workspace-authority/v1/operations/{operation_id}",
+            json={"owner_display_name": "Manson", "companion_display_name": "小忆"},
+            headers=headers,
+        )
+        assert created.status_code == 200
+        owner_id = created.json()["owner"]["owner_id"]
+        path = f"/api/workspace-authority/v1/owners/{owner_id}"
+
+        assert (await client.get(path)).status_code == 401
+        assert (await client.patch(path, json={"display_name": "x"})).status_code == 401
+
+        read = await client.get(path, headers=headers)
+        assert read.status_code == 200
+        assert read.json()["display_name"] == "Manson"
+        assert read.json()["lifecycle_state"] == "active"
+
+        renamed = await client.patch(
+            path, json={"display_name": "  曼森  "}, headers=headers
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["display_name"] == "曼森"
+        assert renamed.json()["owner_id"] == owner_id
+        assert (await client.get(path, headers=headers)).json()["display_name"] == "曼森"
+
+        # A name is not something this surface may take away.
+        blank = await client.patch(path, json={"display_name": "   "}, headers=headers)
+        assert blank.status_code == 422
+        assert (await client.get(path, headers=headers)).json()["display_name"] == "曼森"
+
+        missing = await client.patch(
+            "/api/workspace-authority/v1/owners/owner-nobody",
+            json={"display_name": "谁"},
+            headers=headers,
+        )
+        assert missing.status_code == 404

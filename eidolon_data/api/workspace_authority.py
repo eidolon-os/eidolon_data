@@ -29,6 +29,21 @@ class WorkspaceInitializeRequest(BaseModel):
     companion_display_name: str = Field(default="Eidolon", min_length=1, max_length=128)
 
 
+class OwnerRenameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=128)
+
+
+class OwnerIdentityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["1"] = "1"
+    owner_id: str
+    display_name: str
+    lifecycle_state: Literal["active", "inactive"]
+
+
 class OwnerResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -132,7 +147,58 @@ def create_app(
             raise HTTPException(status_code=404, detail="workspace operation not found")
         return _response(result)
 
+    @app.get(
+        "/api/workspace-authority/v1/owners/{owner_id}",
+        response_model=OwnerIdentityResponse,
+        tags=["workspace-authority"],
+    )
+    async def get_owner_identity(
+        owner_id: str,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> OwnerIdentityResponse:
+        authorize_service(authorization, token)
+        row = await store.owners.get(owner_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="owner not found")
+        return _owner_identity(row)
+
+    @app.patch(
+        "/api/workspace-authority/v1/owners/{owner_id}",
+        response_model=OwnerIdentityResponse,
+        tags=["workspace-authority"],
+    )
+    async def rename_owner(
+        owner_id: str,
+        payload: OwnerRenameRequest,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> OwnerIdentityResponse:
+        """The one thing about an Owner its own person may set directly.
+
+        This authority is where an Owner is born, so it is also where the name
+        given at that moment is corrected. It stays closed to everything but
+        Admin, and whether the caller *is* this Owner is decided at the Local
+        API boundary, where an Owner's authority is known — deciding it twice
+        would mean deciding it differently one day.
+        """
+
+        authorize_service(authorization, token)
+        display_name = payload.display_name.strip()
+        if not display_name:
+            raise HTTPException(status_code=422, detail="display_name cannot be blank")
+        row = await store.owners.rename(owner_id, display_name)
+        if row is None:
+            raise HTTPException(status_code=404, detail="owner not found")
+        return _owner_identity(row)
+
     return app
+
+
+def _owner_identity(row) -> OwnerIdentityResponse:
+    return OwnerIdentityResponse(
+        owner_id=row.owner_id,
+        display_name=row.display_name,
+        lifecycle_state="active" if row.status == "active" else "inactive",
+    )
 
 
 def _request_fingerprint(payload: WorkspaceInitializeRequest) -> str:
