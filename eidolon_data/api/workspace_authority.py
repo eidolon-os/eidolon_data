@@ -36,9 +36,11 @@ class OwnerRenameRequest(BaseModel):
 
 
 class OwnerIdentityResponse(BaseModel):
+    """Stable identity subset consumed by OS control-plane services."""
+
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["1"] = "1"
+    operation: Literal["owner.identity"] = "owner.identity"
     owner_id: str
     display_name: str
     lifecycle_state: Literal["active", "inactive"]

@@ -146,6 +146,7 @@ async def test_owner_name_is_readable_and_correctable(tmp_path) -> None:
         assert read.status_code == 200
         assert read.json()["display_name"] == "Manson"
         assert read.json()["lifecycle_state"] == "active"
+        assert read.json()["operation"] == "owner.identity"
 
         renamed = await client.patch(
             path, json={"display_name": "  曼森  "}, headers=headers
