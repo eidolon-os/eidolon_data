@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon_data import DataSettings, DataStore, load_settings
+from eidolon_data.repositories.persona import PersonaGenomeConflict
 
 from .service_auth import authorize_service, required_service_token
 
@@ -27,6 +28,41 @@ class CompanionIdentityResponse(BaseModel):
     #: given it a name.
     display_name: str = Field(default="", max_length=128)
     lifecycle_state: Literal["active", "inactive"]
+
+
+class PersonaChapterResponse(BaseModel):
+    """One thing this Companion has been, and why it changed.
+
+    The version and hash are here because an authority answers precisely, not
+    because anyone should be shown them. What a person reads is when it
+    changed and what changed — `change_summary`, which the Companion writes
+    about itself.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    genome_id: str = Field(min_length=1, max_length=64)
+    version: int = Field(ge=1)
+    lifecycle_state: Literal["committed", "proposed", "rejected", "stale"]
+    change_summary: str = Field(default="", max_length=4096)
+    restored_from_version: int | None = None
+    is_current: bool = False
+    created_at: str
+
+
+class PersonaTimelineResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["companion.persona-timeline"] = "companion.persona-timeline"
+    companion_id: str = Field(min_length=1, max_length=64)
+    chapters: list[PersonaChapterResponse] = Field(default_factory=list)
+
+
+class PersonaRestoreRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    genome_id: str = Field(min_length=1, max_length=64)
+    change_summary: str = Field(default="", max_length=4096)
 
 
 class CompanionRenameRequest(BaseModel):
@@ -209,6 +245,78 @@ def create_app(
             owner_id=row.owner_id,
             display_name=row.display_name,
             lifecycle_state="active" if row.status == "active" else "inactive",
+        )
+
+    @app.get(
+        "/api/companion-authority/v1/companions/{companion_id}/persona-timeline",
+        response_model=PersonaTimelineResponse,
+        tags=["companion-authority"],
+    )
+    async def get_persona_timeline(
+        companion_id: str,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> PersonaTimelineResponse:
+        """What this Companion has been, newest first.
+
+        Proposals are included as they are stored, because this authority
+        reports what exists. Whether a person is shown them is a decision for
+        the layer facing that person, and it is no.
+        """
+
+        authorize_service(authorization, token)
+        companion = await store.companions.get(companion_id)
+        if companion is None:
+            raise HTTPException(status_code=404, detail="companion not found")
+        rows = await store.persona_genomes.list_for_companion(companion_id)
+        by_id = {row.genome_id: row for row in rows}
+        chapters = [
+            PersonaChapterResponse(
+                genome_id=row.genome_id,
+                version=row.version,
+                lifecycle_state=row.status,
+                change_summary=row.change_summary,
+                restored_from_version=(
+                    by_id[row.base_genome_id].version
+                    if (row.source_json or {}).get("source_type") == "owner_restore"
+                    and row.base_genome_id in by_id
+                    else None
+                ),
+                is_current=row.genome_id == companion.current_genome_id,
+                created_at=row.created_at.isoformat(),
+            )
+            for row in sorted(rows, key=lambda value: value.version, reverse=True)
+        ]
+        return PersonaTimelineResponse(companion_id=companion_id, chapters=chapters)
+
+    @app.post(
+        "/api/companion-authority/v1/companions/{companion_id}/persona-restorations",
+        response_model=PersonaChapterResponse,
+        tags=["companion-authority"],
+    )
+    async def restore_persona(
+        companion_id: str,
+        payload: PersonaRestoreRequest,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> PersonaChapterResponse:
+        """Make this Companion what it was, as a new chapter rather than an undo."""
+
+        authorize_service(authorization, token)
+        try:
+            restored = await store.persona_genomes.restore(
+                companion_id=companion_id,
+                genome_id=payload.genome_id,
+                change_summary=payload.change_summary,
+            )
+        except PersonaGenomeConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return PersonaChapterResponse(
+            genome_id=restored.genome_id,
+            version=restored.version,
+            lifecycle_state=restored.status,
+            change_summary=restored.change_summary,
+            restored_from_version=(restored.source_json or {}).get("restored_version"),
+            is_current=True,
+            created_at=restored.created_at.isoformat(),
         )
 
     @app.get(

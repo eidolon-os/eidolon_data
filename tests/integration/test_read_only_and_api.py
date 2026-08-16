@@ -516,3 +516,72 @@ async def test_naming_refuses_what_it_cannot_carry_out(tmp_path) -> None:
         # Answering "which Companion?" rather than reporting a rename of nothing.
         assert missing.status_code == 404
         assert unauthorized.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_going_back_is_a_new_chapter_not_an_undo(tmp_path) -> None:
+    """A history you can rewrite is not a history.
+
+    Returning a Companion to what it was appends a version carrying that older
+    content, so the months in between stay on the record — and so does the act
+    of going back, which is the part someone will want to find later when they
+    wonder what happened.
+    """
+
+    app, token = await _companion_authority(tmp_path)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+        base = "/api/companion-authority/v1/companions/companion-1"
+        before = (await client.get(f"{base}/persona-timeline", headers=headers)).json()
+        original = before["chapters"][0]
+
+        # Nothing to go back to yet: it is already what it was.
+        already = await client.post(
+            f"{base}/persona-restorations",
+            json={"genome_id": original["genome_id"]},
+            headers=headers,
+        )
+
+        assert already.status_code == 409
+        assert original["is_current"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_timeline_says_when_and_why_rather_than_what_hash(tmp_path) -> None:
+    app, token = await _companion_authority(tmp_path)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+        timeline = await client.get(
+            "/api/companion-authority/v1/companions/companion-1/persona-timeline",
+            headers=headers,
+        )
+
+        assert timeline.status_code == 200
+        chapter = timeline.json()["chapters"][0]
+        # What a person reads: when it changed, and what changed in its own
+        # words. The genome hash is deliberately not part of this answer.
+        assert set(chapter) == {
+            "genome_id",
+            "version",
+            "lifecycle_state",
+            "change_summary",
+            "restored_from_version",
+            "is_current",
+            "created_at",
+        }
+        assert (
+            await client.get(
+                "/api/companion-authority/v1/companions/nobody/persona-timeline",
+                headers=headers,
+            )
+        ).status_code == 404
