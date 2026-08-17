@@ -6,13 +6,35 @@ import hashlib
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.repositories.persona import PersonaGenomeConflict
 
 from .service_auth import authorize_service, required_service_token
+
+
+#: A face is a photograph, not a document. Larger than this is not a portrait
+#: of an Eidolon; it is a file someone picked by accident.
+MAXIMUM_FACE_BYTES = 8 * 1024 * 1024
+
+#: The first three bytes of every JPEG.
+JPEG_MAGIC = b"\xff\xd8\xff"
+
+
+class CompanionFaceResponse(BaseModel):
+    """What is known about this Companion's face, without carrying it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["companion.face"] = "companion.face"
+    companion_id: str = Field(min_length=1, max_length=64)
+    has_face: bool
+    face_asset_id: str | None = None
+    sha256: str | None = None
+    size_bytes: int | None = None
+    updated_at: str | None = None
 
 
 class CompanionIdentityResponse(BaseModel):
@@ -388,7 +410,120 @@ def create_app(
             headers={"ETag": f'"sha256:{asset.cond_sha256}"'},
         )
 
+    @app.put(
+        "/api/companion-authority/v1/companions/{companion_id}/face",
+        response_model=CompanionFaceResponse,
+        tags=["companion-authority"],
+    )
+    async def set_companion_face(
+        companion_id: str,
+        request: Request,
+        content_type: str | None = Header(default=None, alias="Content-Type"),
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> CompanionFaceResponse:
+        """Give this Companion the face its Owner chose.
+
+        The bytes arrive as bytes rather than wrapped in JSON. A face is a
+        photograph, and base64 inside a document would inflate it by a third
+        and make every layer between here and the phone hold the whole thing
+        in memory twice to say the same thing.
+
+        Setting a face supersedes the previous one rather than overwriting it:
+        what an Eidolon looked like is part of what it has been.
+        """
+
+        authorize_service(authorization, token)
+        if (content_type or "").split(";")[0].strip() != "image/jpeg":
+            raise HTTPException(status_code=415, detail="companion face must be image/jpeg")
+        companion = await store.companions.get(companion_id)
+        if companion is None:
+            raise HTTPException(status_code=404, detail="companion not found")
+        if companion.status != "active":
+            raise HTTPException(status_code=412, detail="companion is not active")
+        data = await request.body()
+        if not data:
+            raise HTTPException(status_code=422, detail="companion face is empty")
+        if len(data) > MAXIMUM_FACE_BYTES:
+            raise HTTPException(status_code=413, detail="companion face is too large")
+        if not data.startswith(JPEG_MAGIC):
+            # Refused here rather than by whatever renders it later: a file that
+            # is not a JPEG cannot become one, and the person choosing it is
+            # still on the screen where they can choose another.
+            raise HTTPException(status_code=415, detail="companion face is not a JPEG")
+        digest = hashlib.sha256(data).hexdigest()
+        key = f"{companion.owner_id}/companion-faces/{digest}.jpg"
+        try:
+            store.object_storage.put(key, data, expected_sha256=digest)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail="companion face could not be stored") from exc
+        try:
+            asset = await store.companion_faces.set_face(
+                companion_id=companion_id,
+                cond_storage_key=key,
+                cond_content_type="image/jpeg",
+                cond_size_bytes=len(data),
+                cond_sha256=digest,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return _face_response(companion_id, asset)
+
+    @app.delete(
+        "/api/companion-authority/v1/companions/{companion_id}/face",
+        response_model=CompanionFaceResponse,
+        tags=["companion-authority"],
+    )
+    async def clear_companion_face(
+        companion_id: str,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> CompanionFaceResponse:
+        """Take the face away, leaving the Companion itself untouched."""
+
+        authorize_service(authorization, token)
+        companion = await store.companions.get(companion_id)
+        if companion is None:
+            raise HTTPException(status_code=404, detail="companion not found")
+        await store.companion_faces.clear(companion_id)
+        return _face_response(companion_id, None)
+
+    @app.get(
+        "/api/companion-authority/v1/companions/{companion_id}/face-state",
+        response_model=CompanionFaceResponse,
+        tags=["companion-authority"],
+    )
+    async def get_companion_face_state(
+        companion_id: str,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> CompanionFaceResponse:
+        """Whether there is a face, without carrying the face itself.
+
+        A screen has to know what to show before it is worth spending a
+        photograph's worth of bytes finding out.
+        """
+
+        authorize_service(authorization, token)
+        companion = await store.companions.get(companion_id)
+        if companion is None:
+            raise HTTPException(status_code=404, detail="companion not found")
+        return _face_response(
+            companion_id,
+            await store.companion_faces.get_active(companion_id),
+        )
+
     return app
+
+
+def _face_response(companion_id: str, asset: Any) -> CompanionFaceResponse:
+    if asset is None:
+        return CompanionFaceResponse(companion_id=companion_id, has_face=False)
+    return CompanionFaceResponse(
+        companion_id=companion_id,
+        has_face=True,
+        face_asset_id=asset.face_asset_id,
+        sha256=asset.cond_sha256,
+        size_bytes=asset.cond_size_bytes,
+        updated_at=asset.created_at.isoformat(),
+    )
 
 
 async def _runtime_snapshot(

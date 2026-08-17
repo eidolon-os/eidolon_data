@@ -585,3 +585,77 @@ async def test_the_timeline_says_when_and_why_rather_than_what_hash(tmp_path) ->
                 headers=headers,
             )
         ).status_code == 404
+
+
+async def test_an_owner_gives_their_eidolon_a_face_and_takes_it_back(tmp_path) -> None:
+    """The face is set, replaced and cleared over the same one authority."""
+
+    settings = await _seed(tmp_path / "face-write-authority.sqlite3")
+    token = "companion-authority-token-000002"
+    app = create_app(
+        settings,
+        service_token=token,
+        memory_roster_token=MEMORY_ROSTER_TOKEN,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    jpeg = {"Content-Type": "image/jpeg", **headers}
+    first = b"\xff\xd8\xff first face \xff\xd9"
+    second = b"\xff\xd8\xff second face \xff\xd9"
+    path = "/api/companion-authority/v1/companions/companion-1/face"
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://data.test",
+        ) as client,
+    ):
+        assert (await client.put(path, content=first)).status_code == 401
+
+        blank = await client.get(f"{path}-state", headers=headers)
+        assert blank.status_code == 200
+        assert blank.json()["has_face"] is False
+
+        stored = await client.put(path, content=first, headers=jpeg)
+        assert stored.status_code == 200
+        assert stored.json()["has_face"] is True
+        assert stored.json()["sha256"] == hashlib.sha256(first).hexdigest()
+
+        served = await client.get(path, headers=headers)
+        assert served.status_code == 200
+        assert served.content == first
+        assert served.headers["content-type"] == "image/jpeg"
+
+        # A new face supersedes the old one: what it looked like is part of
+        # what it has been, so the row is added rather than overwritten.
+        replaced = await client.put(path, content=second, headers=jpeg)
+        assert replaced.status_code == 200
+        assert replaced.json()["face_asset_id"] != stored.json()["face_asset_id"]
+        assert (await client.get(path, headers=headers)).content == second
+
+        # Not a JPEG, and refused where the person can still choose another.
+        assert (
+            await client.put(path, content=b"GIF89a", headers=jpeg)
+        ).status_code == 415
+        assert (
+            await client.put(path, content=second, headers=headers)
+        ).status_code == 415
+        assert (await client.put(path, content=b"", headers=jpeg)).status_code == 422
+        # The refusals changed nothing.
+        assert (await client.get(path, headers=headers)).content == second
+
+        cleared = await client.delete(path, headers=headers)
+        assert cleared.status_code == 200
+        assert cleared.json()["has_face"] is False
+        assert (await client.get(path, headers=headers)).status_code == 204
+        # Clearing a face that is already gone is not an error: the Owner
+        # asked for no face, and there is no face.
+        assert (await client.delete(path, headers=headers)).status_code == 200
+
+        assert (
+            await client.put(
+                "/api/companion-authority/v1/companions/missing/face",
+                content=first,
+                headers=jpeg,
+            )
+        ).status_code == 404
