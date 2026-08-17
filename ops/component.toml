@@ -1,0 +1,80 @@
+# How Data is operated, stated by Data.
+#
+# Ops reads this instead of carrying its own copy of these facts. The schema is
+# eidolon_ops's contracts/component-ops/v1.schema.json, and
+# tests/contract/test_operations_contract.py checks each claim against the
+# code and configuration in this repository.
+
+schema_version = 1
+component_id = "eidolon_data"
+contract_version = "1"
+
+[[units]]
+id = "eidolon-data"
+kind = "service"
+exec = ".venv/bin/uvicorn"
+user = "eidolon"
+serves = ["data"]
+after = ["local-fs.target"]
+
+[[units]]
+id = "eidolon-data-workspace"
+kind = "service"
+exec = ".venv/bin/uvicorn"
+user = "eidolon"
+serves = ["data_workspace"]
+after = ["local-fs.target"]
+
+[ports.data]
+default = 8084
+bind = "loopback"
+purpose = "companion authority"
+
+[ports.data_workspace]
+default = 8085
+bind = "loopback"
+purpose = "workspace authority"
+
+[[inputs]]
+name = "data_env"
+install_path = "/etc/eidolon/data.env"
+kind = "secret"
+source = "operator"
+owner = "root"
+group = "root"
+mode = "0600"
+required_by = ["eidolon-data", "eidolon-data-workspace"]
+
+[schema]
+# Data owns its migrations; Ops only runs this, with the Host path contract in
+# the environment, and knows nothing about what a migration does. Run from
+# this repository's root, which is why alembic.ini is named relatively.
+gate = ".venv/bin/alembic -c alembic.ini upgrade head"
+
+[[state.authority]]
+path = "/var/lib/eidolon/eidolon-system.sqlite3"
+owner = "eidolon"
+group = "eidolon"
+backup = "sqlite-online"
+# Owners, Companions, personas, and the relationships between them. This is
+# the file that makes a Host somebody's rather than anybody's.
+
+[[state.authority]]
+path = "/var/lib/eidolon/objects"
+owner = "eidolon"
+group = "eidolon"
+backup = "none"
+uncovered_reason = """\
+normalized media is large and has no declared snapshot; carrying it would need \
+a decision about size limits and about whether a restore may reuse the digests \
+in the database it is restored beside\
+"""
+# Named rather than quietly omitted. A backup that skips this restores a
+# database full of references to media that is not there, which reads as
+# corruption rather than as the known gap it is.
+
+[state]
+runtime = []
+
+[reset]
+factory = ["/var/lib/eidolon/eidolon-system.sqlite3", "/var/lib/eidolon/objects"]
