@@ -142,3 +142,15 @@ uv run ruff format --check .
 
 The E2E layer binds a temporary Unix socket and may require permission to create
 local sockets in a restricted sandbox.
+
+## License
+
+Copyright © 2026 Li Jinsong.
+
+This project is available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE) for permitted noncommercial
+use. Commercial use requires a separate written license; contact
+[lijinsong@aimanthor.com](mailto:lijinsong@aimanthor.com).
+
+See [LICENSING.md](LICENSING.md) and [NOTICE](NOTICE) for scope, exceptions,
+and required notices.
