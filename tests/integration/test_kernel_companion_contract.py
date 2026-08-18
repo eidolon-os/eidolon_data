@@ -44,7 +44,13 @@ def test_kernel_manifest_publishes_exact_data_authority_contracts() -> None:
         "required": True,
         "enabled_by_default": True,
         "dependencies": [],
-        "host_targets": {"supervisord": "data:data-api"},
+        # One manifest now carries every host driver; Data cares that its own
+        # entry names both, because a driver left out is a Host where Data does
+        # not run at all.
+        "host_targets": {
+            "systemd": "eidolon-data.service",
+            "supervisord": "data:data-api",
+        },
         "endpoints": [
             {
                 "endpoint_id": "companion-authority.http",
@@ -83,7 +89,10 @@ def test_kernel_manifest_publishes_exact_data_authority_contracts() -> None:
         "required": True,
         "enabled_by_default": True,
         "dependencies": ["data"],
-        "host_targets": {"supervisord": "data:data-workspace-api"},
+        "host_targets": {
+            "systemd": "eidolon-data-workspace.service",
+            "supervisord": "data:data-workspace-api",
+        },
         "endpoints": [
             {
                 "endpoint_id": "workspace-authority.http",
