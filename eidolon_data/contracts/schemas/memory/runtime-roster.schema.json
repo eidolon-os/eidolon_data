@@ -13,11 +13,10 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["realm_id", "owner_id", "companion_id", "engine", "engine_config"],
+        "required": ["realm_id", "owner_id", "engine", "engine_config"],
         "properties": {
           "realm_id": {"type": "string", "minLength": 1, "maxLength": 64},
           "owner_id": {"type": "string", "minLength": 1, "maxLength": 64},
-          "companion_id": {"type": "string", "minLength": 1, "maxLength": 64},
           "engine": {"type": "string", "minLength": 1, "maxLength": 64},
           "engine_config": {"type": "object"}
         }

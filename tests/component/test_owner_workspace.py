@@ -67,7 +67,7 @@ async def test_workspace_is_one_atomic_identity_persona_memory_transaction(store
     assert result.persona_genome.applied_event_id is not None
     assert result.memory_realm.engine == "mempalace"
     assert (await store.persona_genomes.get_current("companion-1")).genome_id == "genome-1"
-    assert (await store.memory_realms.get("realm-1")).companion_id == "companion-1"
+    assert (await store.memory_realms.get("realm-1")).owner_id == "owner-workspace"
     assert [event.action for event in await store.audit_outbox.list_pending()] == [
         "owner.created",
         "companion.workspace.initialized",

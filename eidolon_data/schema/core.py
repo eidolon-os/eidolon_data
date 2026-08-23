@@ -9,7 +9,6 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
-    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -142,16 +141,23 @@ class PersonaGenomeRow(Base):
 
 
 class MemoryRealmRow(Base):
-    """Catalog pointer to a Memory-owned realm; no memory payload lives here."""
+    """Catalog pointer to a Memory-owned realm; no memory payload lives here.
+
+    A realm belongs to an Owner, not to a Companion. Memory is the Owner's
+    asset — "one owner, one memory" — and every Companion that Owner has reads
+    and writes the same one; what separates them is the ``audience`` layer
+    inside Memory, not a database per Companion. See
+    ``docs/跨系统/多Companion记忆隔离机制裁决.md``.
+
+    The consequence worth stating here, because it is easy to get wrong at the
+    call site: deleting a Companion must not delete a realm.
+    """
 
     __tablename__ = "memory_realms"
 
     realm_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
-    )
-    companion_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("companions.companion_id", ondelete="CASCADE"), index=True
     )
     engine: Mapped[str] = mapped_column(String(64), default="mempalace", index=True)
     engine_config_json: Mapped[JsonDict] = mapped_column(default=dict)
@@ -161,11 +167,16 @@ class MemoryRealmRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["owner_id", "companion_id"],
-            ["companions.owner_id", "companions.companion_id"],
-            name="fk_memory_realms_owner_companion",
-            ondelete="CASCADE",
+        # One Owner, one memory. Enforced here rather than in the callers,
+        # because a second active realm is not a state anything downstream can
+        # resolve: routing would have to pick one, and picking is a coin flip
+        # between two halves of the same person's memory.
+        Index(
+            "uq_memory_realms_owner_active",
+            "owner_id",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
         ),
         CheckConstraint(
             "status IN ('active', 'inactive', 'deleting')",

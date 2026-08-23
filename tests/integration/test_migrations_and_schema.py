@@ -112,10 +112,30 @@ def test_database_constraints_enforce_role_and_cross_owner_integrity(tmp_path, m
             "INSERT INTO companions(companion_id, owner_id, role) "
             "VALUES ('companion-a', 'owner-a', 'standard')"
         )
+        # A realm belongs to an Owner, so there is no cross-owner companion
+        # pairing left to forbid. What the schema forbids instead is a second
+        # active realm for one Owner — the state nothing downstream can resolve,
+        # because routing would have to pick between two halves of one memory.
+        connection.execute(
+            "INSERT INTO memory_realms(realm_id, owner_id) VALUES ('realm-a', 'owner-a')"
+        )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "INSERT INTO memory_realms(realm_id, owner_id, companion_id) "
-                "VALUES ('realm-cross-owner', 'owner-b', 'companion-a')"
+                "INSERT INTO memory_realms(realm_id, owner_id) "
+                "VALUES ('realm-a-second', 'owner-a')"
+            )
+        # Retiring the first one frees the Owner to have another.
+        connection.execute(
+            "UPDATE memory_realms SET status = 'inactive' WHERE realm_id = 'realm-a'"
+        )
+        connection.execute(
+            "INSERT INTO memory_realms(realm_id, owner_id) "
+            "VALUES ('realm-a-second', 'owner-a')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO memory_realms(realm_id, owner_id) "
+                "VALUES ('realm-no-owner', 'owner-missing')"
             )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(

@@ -12,7 +12,6 @@ from eidolon_data.schema import (
     CompanionFaceAssetRow,
     CompanionRow,
     GuardBindingRow,
-    MemoryRealmRow,
     PersonaGenomeRow,
 )
 
@@ -25,7 +24,6 @@ class CompanionDeletionError(ValueError):
 class CompanionDeletionResult:
     owner_id: str
     companion_id: str
-    realm_ids: tuple[str, ...]
     face_asset_storage_keys: tuple[str, ...]
     deleted_rows: dict[str, int]
 
@@ -52,13 +50,6 @@ class CompanionDeletionService:
                     "refusing to delete the primary companion without allow_primary"
                 )
 
-            realm_ids = tuple(
-                await session.scalars(
-                    select(MemoryRealmRow.realm_id).where(
-                        MemoryRealmRow.companion_id == companion_id
-                    )
-                )
-            )
             face_rows = (
                 await session.execute(
                     select(
@@ -77,7 +68,11 @@ class CompanionDeletionService:
                     PersonaGenomeRow.genome_id,
                     PersonaGenomeRow.companion_id == companion_id,
                 ),
-                "memory_realms": len(realm_ids),
+                # Deliberately absent: memory_realms. The realm belongs to the
+                # Owner and outlives any one Companion, so deleting a Companion
+                # deletes no memory. Removing this Companion's own statements
+                # from the Owner's memory is a separate, audited act with its
+                # own surface (forget), not a side effect of deletion.
                 "companion_face_assets": len(face_rows),
                 "guard_bindings": await _count(
                     session,
@@ -99,17 +94,13 @@ class CompanionDeletionService:
                     subject_type="companion",
                     subject_id=companion_id,
                     action="companion.deleted",
-                    payload={
-                        "realm_ids": list(realm_ids),
-                        "deleted_rows": deleted_rows,
-                    },
+                    payload={"deleted_rows": deleted_rows},
                 )
             )
 
         return CompanionDeletionResult(
             owner_id=owner_id,
             companion_id=companion_id,
-            realm_ids=realm_ids,
             face_asset_storage_keys=storage_keys,
             deleted_rows=deleted_rows,
         )

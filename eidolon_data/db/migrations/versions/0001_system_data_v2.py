@@ -133,7 +133,6 @@ def upgrade() -> None:
         "memory_realms",
         sa.Column("realm_id", sa.String(64), primary_key=True),
         sa.Column("owner_id", sa.String(64), nullable=False),
-        sa.Column("companion_id", sa.String(64), nullable=False),
         sa.Column("engine", sa.String(64), nullable=False, server_default="mempalace"),
         sa.Column("engine_config_json", sa.JSON(), nullable=False, server_default=EMPTY_JSON),
         sa.Column("policy_json", sa.JSON(), nullable=False, server_default=EMPTY_JSON),
@@ -141,19 +140,23 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
         sa.ForeignKeyConstraint(["owner_id"], ["owners.owner_id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["companion_id"], ["companions.companion_id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(
-            ["owner_id", "companion_id"],
-            ["companions.owner_id", "companions.companion_id"],
-            name="fk_memory_realms_owner_companion",
-            ondelete="CASCADE",
-        ),
         sa.CheckConstraint(
             "status IN ('active', 'inactive', 'deleting')", name="memory_realm_status"
         ),
     )
-    for column in ("owner_id", "companion_id", "engine", "status"):
+    for column in ("owner_id", "engine", "status"):
         op.create_index(f"ix_memory_realms_{column}", "memory_realms", [column])
+    # One Owner, one memory. A second active realm is unresolvable downstream:
+    # routing would have to pick, and picking is a coin flip between two halves
+    # of the same person's memory.
+    op.create_index(
+        "uq_memory_realms_owner_active",
+        "memory_realms",
+        ["owner_id"],
+        unique=True,
+        sqlite_where=sa.text("status = 'active'"),
+        postgresql_where=sa.text("status = 'active'"),
+    )
 
     op.create_table(
         "companion_face_assets",

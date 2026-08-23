@@ -49,18 +49,23 @@ async def test_companion_delete_cascades_owned_rows_and_returns_external_keys(st
     result = await store.companion_deletion.delete_companion(
         owner_id="owner-1", companion_id="guard-1"
     )
-    assert result.realm_ids == (workspace.memory_realm.realm_id,)
+    # Deleting a Companion returns no realms to clean up: the realm is the
+    # Owner's and outlives this Companion, so it is neither deleted nor handed
+    # back as an external cleanup reference.
+    assert not hasattr(result, "realm_ids")
+    assert "memory_realms" not in result.deleted_rows
     assert result.face_asset_storage_keys == (face.cond_storage_key,)
     assert result.deleted_rows == {
         "companions": 1,
         "persona_genomes": 1,
-        "memory_realms": 1,
         "companion_face_assets": 1,
         "guard_bindings": 1,
     }
     assert await store.companions.get("guard-1") is None
     assert await store.persona_genomes.get(workspace.persona_genome.genome_id) is None
-    assert await store.memory_realms.get(workspace.memory_realm.realm_id) is None
+    # The Owner's memory survives its Companion.
+    surviving = await store.memory_realms.get(workspace.memory_realm.realm_id)
+    assert surviving is not None and surviving.status == "active"
     assert await store.guard_bindings.list_for_owner("owner-1") == []
     assert (await store.audit_outbox.list_pending())[-1].action == "companion.deleted"
 

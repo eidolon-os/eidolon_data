@@ -536,19 +536,21 @@ async def _provision_workspace_in_session(
         genome_json=normalized_json,
         change_summary="Initial persona genome",
     )
-    realm = MemoryRealmRow(
-        realm_id=realm_id,
-        owner_id=owner_id,
-        companion_id=companion_id,
-        engine=memory_engine.strip() or "mempalace",
-        engine_config_json=dict(memory_engine_config_json or {}),
-        policy_json=dict(memory_policy_json or {"scope": "owner", "recall": "companion_default"}),
-        status="active",
-    )
-    session.add_all((genome, realm))
+    session.add(genome)
     await session.flush()
     companion.current_genome_id = genome.genome_id
-    companion.default_memory_realm_id = realm.realm_id
+    # The Owner's memory, created on the first Companion and shared by every
+    # one after it. One code path for "point this Companion at its Owner's
+    # memory" — a second one here is how you end up with a realm per Companion
+    # again, and the unique index would only tell you afterwards.
+    realm, _created = await _ensure_memory_realm_in_session(
+        session,
+        companion=companion,
+        realm_id=realm_id,
+        memory_engine=memory_engine,
+        memory_engine_config_json=memory_engine_config_json,
+        memory_policy_json=memory_policy_json,
+    )
     fact = governance_fact(
         owner_id=owner_id,
         subject_type="companion",
@@ -599,7 +601,6 @@ async def _load_onboarding_result(
         or companion.default_memory_realm_id != realm.realm_id
         or genome.companion_id != companion.companion_id
         or realm.owner_id != owner.owner_id
-        or realm.companion_id != companion.companion_id
     ):
         raise OwnerWorkspaceError("workspace initialization resources are inconsistent")
     return OwnerWorkspaceInitializationResult(
@@ -632,10 +633,17 @@ async def _ensure_memory_realm_in_session(
     memory_engine_config_json: dict | None = None,
     memory_policy_json: dict | None = None,
 ) -> tuple[MemoryRealmRow, bool]:
+    """Point this Companion at its Owner's memory, creating it only once.
+
+    The Owner has one realm and every Companion shares it, so this creates a
+    realm for the Owner's first Companion and then only repoints. There is no
+    per-Companion realm to create — an Owner's second Companion adds a name and
+    a persona, not a second memory.
+    """
     existing = await session.scalar(
         select(MemoryRealmRow)
         .where(
-            MemoryRealmRow.companion_id == companion.companion_id,
+            MemoryRealmRow.owner_id == companion.owner_id,
             MemoryRealmRow.status == "active",
         )
         .order_by(MemoryRealmRow.created_at)
@@ -652,7 +660,6 @@ async def _ensure_memory_realm_in_session(
     realm = MemoryRealmRow(
         realm_id=resolved_realm_id,
         owner_id=companion.owner_id,
-        companion_id=companion.companion_id,
         engine=memory_engine.strip() or "mempalace",
         engine_config_json=dict(memory_engine_config_json or {}),
         policy_json=dict(memory_policy_json or {"scope": "owner", "recall": "companion_default"}),

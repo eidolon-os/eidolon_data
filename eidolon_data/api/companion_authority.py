@@ -134,7 +134,6 @@ class MemoryRuntimeRealm(BaseModel):
 
     realm_id: str = Field(min_length=1, max_length=64)
     owner_id: str = Field(min_length=1, max_length=64)
-    companion_id: str = Field(min_length=1, max_length=64)
     engine: str = Field(min_length=1, max_length=64)
     engine_config: dict[str, Any]
 
@@ -198,19 +197,16 @@ def create_app(
         for owner in await store.owners.list():
             if owner.status != "active":
                 continue
-            companions = {
-                companion.companion_id: companion
-                for companion in await store.companions.list_for_owner(owner.owner_id)
-                if companion.status == "active"
-            }
+            # A realm runs because its Owner is active, not because some
+            # Companion is: memory belongs to the Owner, and an Owner between
+            # Companions has not stopped having a memory.
             for realm in await store.memory_realms.list_for_owner(owner.owner_id):
-                if realm.status != "active" or realm.companion_id not in companions:
+                if realm.status != "active":
                     continue
                 realms.append(
                     MemoryRuntimeRealm(
                         realm_id=realm.realm_id,
                         owner_id=realm.owner_id,
-                        companion_id=realm.companion_id,
                         engine=realm.engine,
                         engine_config=dict(realm.engine_config_json or {}),
                     )
@@ -542,11 +538,7 @@ async def _runtime_snapshot(
     realm = await store.memory_realms.get(companion.default_memory_realm_id)
     if realm is None:
         raise HTTPException(status_code=409, detail="default memory realm is missing")
-    if (
-        realm.owner_id != companion.owner_id
-        or realm.companion_id != companion.companion_id
-        or realm.status != "active"
-    ):
+    if realm.owner_id != companion.owner_id or realm.status != "active":
         raise HTTPException(status_code=412, detail="default memory realm is not active in scope")
 
     selected_genome_id = (genome_id or companion.current_genome_id or "").strip()

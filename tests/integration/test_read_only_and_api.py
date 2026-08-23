@@ -154,7 +154,6 @@ async def test_memory_runtime_roster_has_distinct_auth_and_exact_contract(tmp_pa
                 {
                     "realm_id": "realm-1",
                     "owner_id": "owner-1",
-                    "companion_id": "companion-1",
                     "engine": "mempalace",
                     "engine_config": {},
                 }
