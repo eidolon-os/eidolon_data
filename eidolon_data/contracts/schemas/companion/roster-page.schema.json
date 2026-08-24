@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidolon.dev/data/contracts/v1/companion/roster-page.schema.json",
+  "title": "Companion Roster Page V1",
+  "description": "One Owner's Companions. The default is named once for the page, not as a flag on each row: a per-row boolean would make 'two rows both claim it' representable, and this authority owns exactly one answer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "operation", "owner_id", "default_companion_id", "companions", "next_cursor"],
+  "properties": {
+    "contract_version": {"const": "1"},
+    "operation": {"const": "companion.roster-page"},
+    "owner_id": {"type": "string", "minLength": 1, "maxLength": 64},
+    "default_companion_id": {
+      "description": "The Owner's pointer, verbatim. Null is a real state — the only Companion is a guard, or the default was archived — and a caller must not resolve it by choosing a row.",
+      "oneOf": [{"type": "string", "minLength": 1, "maxLength": 64}, {"type": "null"}]
+    },
+    "companions": {
+      "type": "array",
+      "description": "Oldest first, then by id. Never ordered by which one is the default: that would be a second place saying so.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["companion_id", "display_name", "kind", "lifecycle_state", "revision", "created_at", "updated_at"],
+        "properties": {
+          "companion_id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "display_name": {"type": "string", "maxLength": 128},
+          "kind": {"type": "string", "minLength": 1, "maxLength": 32},
+          "lifecycle_state": {"enum": ["active", "retiring", "archived", "deleting"]},
+          "revision": {"type": "integer", "minimum": 1},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    "next_cursor": {
+      "description": "Opaque and server-issued. A caller stores and returns it; parsing it would make the page boundary part of the contract. Null means this is the last page — said explicitly rather than inferred from a short page.",
+      "oneOf": [{"type": "string", "minLength": 1, "maxLength": 256}, {"type": "null"}]
+    }
+  }
+}

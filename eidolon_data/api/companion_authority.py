@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
@@ -135,6 +138,44 @@ class CompanionRuntimeSnapshotResponse(BaseModel):
     persona_genome: PersonaGenomeSnapshot
 
 
+class CompanionSummaryResponse(BaseModel):
+    """One Companion as a roster row: the three identity axes and its name.
+
+    Deliberately without ``is_default``. Which Companion an Owner falls back to
+    is one field on the Owner, and a boolean repeated on every row would be a
+    second place saying it — with "two rows both claim it" as a representable
+    state. The page carries the pointer once; a reader compares.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    companion_id: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(default="", max_length=128)
+    kind: str = Field(min_length=1, max_length=32)
+    lifecycle_state: Literal["active", "retiring", "archived", "deleting"]
+    revision: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class CompanionPageResponse(BaseModel):
+    """This Owner's Companions, oldest first, with the default named once."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["1"] = "1"
+    operation: Literal["companion.roster-page"] = "companion.roster-page"
+    owner_id: str = Field(min_length=1, max_length=64)
+    #: The Owner's pointer, verbatim. ``None`` means this Owner has no default —
+    #: a real state (their only Companion is a guard, or the default was
+    #: archived), and one a caller must not paper over by choosing a row.
+    default_companion_id: str | None = Field(default=None, max_length=64)
+    companions: list[CompanionSummaryResponse]
+    #: Opaque. A caller stores and returns it; parsing it would make the page
+    #: boundary part of the contract.
+    next_cursor: str | None = Field(default=None, max_length=256)
+
+
 class MemoryRuntimeRealm(BaseModel):
     """One active Memory Realm and the authority facts needed to run it."""
 
@@ -154,6 +195,32 @@ class MemoryRuntimeRosterResponse(BaseModel):
     contract_version: Literal["1"] = "1"
     operation: Literal["memory.runtime-roster"] = "memory.runtime-roster"
     realms: list[MemoryRuntimeRealm]
+
+
+ROSTER_PAGE_LIMIT = 50
+
+
+def _encode_cursor(row) -> str:
+    raw = f"{row.created_at.isoformat()}\x1f{row.companion_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+    """A cursor the server issued, or a refusal.
+
+    Silently restarting from the beginning on a cursor we cannot read would
+    hand a caller a page it has already seen and call it progress.
+    """
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        created_at, _, companion_id = (
+            base64.urlsafe_b64decode(padded).decode().partition("\x1f")
+        )
+        if not companion_id:
+            raise ValueError("cursor is missing its tiebreak")
+        return datetime.fromisoformat(created_at), companion_id
+    except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail="cursor is not readable") from exc
 
 
 def create_app(
@@ -220,6 +287,91 @@ def create_app(
                     )
                 )
         return MemoryRuntimeRosterResponse(realms=realms)
+
+    async def _owned_companion(owner_id: str, companion_id: str):
+        """This Owner's Companion, or 404.
+
+        The only place ownership is decided in this authority. A caller that
+        holds a companion_id has not thereby proved whose it is, and a Companion
+        of another Owner is reported as absent rather than as forbidden so an id
+        cannot be probed for existence.
+        """
+        row = await store.companions.get(companion_id)
+        if row is None or row.owner_id != owner_id:
+            raise HTTPException(status_code=404, detail="companion not found for owner")
+        return row
+
+    @app.get(
+        "/api/companion-authority/v1/owners/{owner_id}/companions",
+        response_model=CompanionPageResponse,
+        tags=["companion-authority"],
+    )
+    async def list_owner_companions(
+        owner_id: str,
+        cursor: str | None = None,
+        limit: int = ROSTER_PAGE_LIMIT,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> CompanionPageResponse:
+        authorize_service(authorization, token)
+        if not 1 <= limit <= ROSTER_PAGE_LIMIT:
+            raise HTTPException(
+                status_code=422, detail=f"limit must be between 1 and {ROSTER_PAGE_LIMIT}"
+            )
+        owner = await store.owners.get(owner_id)
+        if owner is None:
+            raise HTTPException(status_code=404, detail="owner not found")
+        after = _decode_cursor(cursor) if cursor else None
+        # One extra row answers "is there another page" without a second query
+        # that could see a different write.
+        rows = await store.companions.page_for_owner(
+            owner_id, limit=limit + 1, after=after
+        )
+        page, has_more = rows[:limit], len(rows) > limit
+        return CompanionPageResponse(
+            owner_id=owner_id,
+            default_companion_id=owner.default_companion_id,
+            companions=[
+                CompanionSummaryResponse(
+                    companion_id=row.companion_id,
+                    display_name=row.display_name,
+                    kind=row.kind,
+                    lifecycle_state=row.lifecycle_state,
+                    revision=row.revision,
+                    created_at=row.created_at,
+                    updated_at=row.updated_at,
+                )
+                for row in page
+            ],
+            next_cursor=_encode_cursor(page[-1]) if has_more and page else None,
+        )
+
+    @app.get(
+        "/api/companion-authority/v1/owners/{owner_id}/companions/{companion_id}",
+        response_model=CompanionIdentityResponse,
+        tags=["companion-authority"],
+    )
+    async def get_owner_companion(
+        owner_id: str,
+        companion_id: str,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> CompanionIdentityResponse:
+        """The same row as the exact resolver, with ownership proved here.
+
+        The resolver beside this one takes only a companion_id, because its
+        caller (Kernel) is asking "may this be assigned" and does its own owner
+        comparison. A product surface must not be trusted to do that comparison,
+        so this route requires the Owner in the path and the authority checks it.
+        """
+        authorize_service(authorization, token)
+        row = await _owned_companion(owner_id, companion_id)
+        return CompanionIdentityResponse(
+            companion_id=row.companion_id,
+            owner_id=row.owner_id,
+            display_name=row.display_name,
+            lifecycle_state=row.lifecycle_state,
+            kind=row.kind,
+            revision=row.revision,
+        )
 
     @app.get(
         "/api/companion-authority/v1/companions/{companion_id}",

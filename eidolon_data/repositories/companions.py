@@ -7,7 +7,9 @@ create and run it.
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from datetime import datetime
+
+from sqlalchemy import select, tuple_
 
 from eidolon_data.repositories.base import Repository
 from eidolon_data.schema import CompanionRow, OwnerRow
@@ -27,6 +29,38 @@ class CompanionsRepository(Repository):
                     .order_by(CompanionRow.created_at)
                 )
             )
+
+    async def page_for_owner(
+        self,
+        owner_id: str,
+        *,
+        limit: int,
+        after: tuple[datetime, str] | None = None,
+    ) -> list[CompanionRow]:
+        """One page of this Owner's Companions, oldest first.
+
+        Ordered by creation and then id — never by whether one is the default.
+        Which Companion is the default is a single field on the Owner, and if
+        the order encoded it too there would be two places saying so and a way
+        for them to disagree. A caller that wants the default first has the
+        pointer and can put it first.
+
+        ``after`` is the sort key of the last row already seen, so a page
+        boundary lands between two rows rather than at an offset that shifts
+        when a Companion is created.
+        """
+        async with self._session_factory() as session:
+            query = select(CompanionRow).where(CompanionRow.owner_id == owner_id)
+            if after is not None:
+                created_at, companion_id = after
+                query = query.where(
+                    tuple_(CompanionRow.created_at, CompanionRow.companion_id)
+                    > (created_at, companion_id)
+                )
+            query = query.order_by(
+                CompanionRow.created_at, CompanionRow.companion_id
+            ).limit(limit)
+            return list(await session.scalars(query))
 
     async def rename(self, companion_id: str, display_name: str) -> CompanionRow | None:
         """Give this Companion the name its Owner chose.
