@@ -20,7 +20,7 @@ async def _workspace(store, *, owner_id: str = "owner-1", companion_id: str = "c
         companion_id=companion_id,
         genome_id="genome-origin",
         realm_id="realm-1",
-        role="primary",
+        kind="conversational",
     )
 
 

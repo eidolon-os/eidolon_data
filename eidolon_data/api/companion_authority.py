@@ -49,7 +49,15 @@ class CompanionIdentityResponse(BaseModel):
     #: never read back — the product showed an identifier where a person had
     #: given it a name.
     display_name: str = Field(default="", max_length=128)
-    lifecycle_state: Literal["active", "inactive"]
+    #: Straight from the column. It used to be folded into two values here,
+    #: which meant a consumer could not tell "the Owner archived it" from
+    #: "it cannot run right now" — and that conflation is what the identity
+    #: schema was changed to remove.
+    lifecycle_state: Literal["active", "retiring", "archived", "deleting"]
+    #: The product type, independent of which Companion is the default.
+    kind: str = Field(min_length=1, max_length=32)
+    #: Aggregate version, for compare-and-swap on writes.
+    revision: int = Field(ge=1)
 
 
 class PersonaChapterResponse(BaseModel):
@@ -230,7 +238,9 @@ def create_app(
             companion_id=row.companion_id,
             owner_id=row.owner_id,
             display_name=row.display_name,
-            lifecycle_state="active" if row.status == "active" else "inactive",
+            lifecycle_state=row.lifecycle_state,
+            kind=row.kind,
+            revision=row.revision,
         )
 
     @app.patch(
@@ -262,7 +272,9 @@ def create_app(
             companion_id=row.companion_id,
             owner_id=row.owner_id,
             display_name=row.display_name,
-            lifecycle_state="active" if row.status == "active" else "inactive",
+            lifecycle_state=row.lifecycle_state,
+            kind=row.kind,
+            revision=row.revision,
         )
 
     @app.get(
@@ -291,6 +303,9 @@ def create_app(
             PersonaChapterResponse(
                 genome_id=row.genome_id,
                 version=row.version,
+                # A genome's status is a proposal state (proposed / committed /
+                # rejected / stale), not a Companion lifecycle. Same wire name,
+                # different axis.
                 lifecycle_state=row.status,
                 change_summary=row.change_summary,
                 restored_from_version=(
@@ -354,11 +369,11 @@ def create_app(
         return await _runtime_snapshot(store, companion, genome_id=genome_id)
 
     @app.get(
-        "/api/companion-authority/v1/owners/{owner_id}/primary-runtime-snapshot",
+        "/api/companion-authority/v1/owners/{owner_id}/default-runtime-snapshot",
         response_model=CompanionRuntimeSnapshotResponse,
         tags=["companion-authority"],
     )
-    async def get_owner_primary_runtime_snapshot(
+    async def get_owner_default_runtime_snapshot(
         owner_id: str,
         authorization: str | None = Header(default=None, alias="Authorization"),
     ) -> CompanionRuntimeSnapshotResponse:
@@ -368,9 +383,14 @@ def create_app(
             raise HTTPException(status_code=404, detail="owner not found")
         if owner.status != "active":
             raise HTTPException(status_code=412, detail="owner is not active")
-        companion = await store.companions.get_primary_for_owner(owner_id)
+        companion = await store.companions.get_default_for_owner(owner_id)
         if companion is None:
-            raise HTTPException(status_code=412, detail="owner has no active primary companion")
+            # Either the pointer is unset or it points at a Companion that is no
+            # longer active. Both mean the same thing to a caller asking "who
+            # answers when nobody was named": nobody, and it must not guess.
+            raise HTTPException(
+                status_code=412, detail="owner has no active default companion"
+            )
         return await _runtime_snapshot(store, companion, genome_id=None)
 
     @app.get(
@@ -386,7 +406,7 @@ def create_app(
         companion = await store.companions.get(companion_id)
         if companion is None:
             raise HTTPException(status_code=404, detail="companion not found")
-        if companion.status != "active":
+        if companion.lifecycle_state != "active":
             raise HTTPException(status_code=412, detail="companion is not active")
         asset = await store.companion_faces.get_active(companion_id)
         if asset is None:
@@ -434,7 +454,7 @@ def create_app(
         companion = await store.companions.get(companion_id)
         if companion is None:
             raise HTTPException(status_code=404, detail="companion not found")
-        if companion.status != "active":
+        if companion.lifecycle_state != "active":
             raise HTTPException(status_code=412, detail="companion is not active")
         data = await request.body()
         if not data:
@@ -531,7 +551,7 @@ async def _runtime_snapshot(
     owner = await store.owners.get(companion.owner_id)
     if owner is None:
         raise HTTPException(status_code=409, detail="companion owner is missing")
-    if owner.status != "active" or companion.status != "active":
+    if owner.status != "active" or companion.lifecycle_state != "active":
         raise HTTPException(status_code=412, detail="owner or companion is not active")
     if not companion.default_memory_realm_id:
         raise HTTPException(status_code=412, detail="companion has no default memory realm")

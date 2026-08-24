@@ -174,10 +174,10 @@ class GuardBindingsRepository(Repository):
 def _validate_guard_companion(companion: CompanionRow | None, owner_id: str) -> None:
     if companion is None or companion.owner_id != owner_id:
         raise ValueError("guard companion not found for owner")
-    if companion.status != "active":
+    if companion.lifecycle_state != "active":
         raise ValueError("guard companion is not active")
-    if companion.role != "guard":
-        raise ValueError("companion role must be guard")
+    if companion.kind != "guard":
+        raise ValueError("companion kind must be guard")
 
 
 def _validate_opaque_id(label: str, value: str) -> None:

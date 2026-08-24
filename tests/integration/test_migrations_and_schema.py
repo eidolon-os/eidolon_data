@@ -94,7 +94,15 @@ async def test_schema_validation_rejects_retired_or_unknown_tables(tmp_path) -> 
         await drifted.close()
 
 
-def test_database_constraints_enforce_role_and_cross_owner_integrity(tmp_path, monkeypatch) -> None:
+def test_database_constraints_enforce_the_three_identity_axes(tmp_path, monkeypatch) -> None:
+    """kind, lifecycle_state and the Owner's default pointer are independent.
+
+    They used to be one column. ``role='primary'`` meant both "this is the
+    default" and "this is a plain conversational companion", so a guard could
+    not be a default and changing the default rewrote a type. The schema now
+    refuses values in each axis on its own, and "which one is the default" is a
+    pointer on the Owner rather than a flag needing a cross-row uniqueness rule.
+    """
     path = tmp_path / "constraints.sqlite3"
     monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
     command.upgrade(Config("alembic.ini"), "head")
@@ -103,15 +111,34 @@ def test_database_constraints_enforce_role_and_cross_owner_integrity(tmp_path, m
         connection.execute(
             "INSERT INTO owners(owner_id, display_name) VALUES ('owner-a', 'A'), ('owner-b', 'B')"
         )
+        for column, bad in (("kind", "primary"), ("lifecycle_state", "inactive")):
+            # 'primary' and 'inactive' are the two values the old column
+            # carried that no longer mean anything: one was a routing fact, the
+            # other conflated "cannot run" with "the Owner archived it".
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    f"INSERT INTO companions(companion_id, owner_id, {column}) "
+                    f"VALUES ('bad-{column}', 'owner-a', '{bad}')"
+                )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "INSERT INTO companions(companion_id, owner_id, role) "
-                "VALUES ('bad-role', 'owner-a', 'master')"
+                "INSERT INTO companions(companion_id, owner_id, revision) "
+                "VALUES ('bad-revision', 'owner-a', 0)"
             )
         connection.execute(
-            "INSERT INTO companions(companion_id, owner_id, role) "
-            "VALUES ('companion-a', 'owner-a', 'standard')"
+            "INSERT INTO companions(companion_id, owner_id, kind) "
+            "VALUES ('companion-a', 'owner-a', 'guard')"
         )
+        # A guard is a kind, so storing one is fine; whether it may be a default
+        # is a rule above this layer, not a column value.
+        connection.execute(
+            "UPDATE owners SET default_companion_id = 'companion-a' WHERE owner_id = 'owner-a'"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE owners SET default_companion_id = 'no-such-companion' "
+                "WHERE owner_id = 'owner-b'"
+            )
         # A realm belongs to an Owner, so there is no cross-owner companion
         # pairing left to forbid. What the schema forbids instead is a second
         # active realm for one Owner — the state nothing downstream can resolve,

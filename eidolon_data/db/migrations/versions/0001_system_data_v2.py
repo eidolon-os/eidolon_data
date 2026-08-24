@@ -25,23 +25,45 @@ def upgrade() -> None:
         sa.Column("display_name", sa.String(128), nullable=False, server_default=""),
         sa.Column("kind", sa.String(32), nullable=False, server_default="person"),
         sa.Column("status", sa.String(32), nullable=False, server_default="active"),
+        # Which Companion answers when nothing named one. A pointer here rather
+        # than a flag on a Companion: one place to write, one answer to read.
+        sa.Column("default_companion_id", sa.String(64)),
+        sa.Column("revision", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("profile_json", sa.JSON(), nullable=False, server_default=EMPTY_JSON),
         sa.Column("settings_json", sa.JSON(), nullable=False, server_default=EMPTY_JSON),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
         sa.CheckConstraint("kind IN ('person', 'family', 'team')", name="owner_kind"),
+        # Forward-declared, like companions' pointers at its genome and realm:
+        # the two tables point at each other, so one of them is always created
+        # first.
+        sa.ForeignKeyConstraint(
+            ["default_companion_id"],
+            ["companions.companion_id"],
+            name="fk_owners_default_companion",
+            ondelete="SET NULL",
+        ),
         sa.CheckConstraint("status IN ('active', 'archived', 'deleting')", name="owner_status"),
+        sa.CheckConstraint("revision > 0", name="owner_revision_positive"),
     )
     op.create_index("ix_owners_kind", "owners", ["kind"])
     op.create_index("ix_owners_status", "owners", ["status"])
+    op.create_index(
+        "ix_owners_default_companion_id", "owners", ["default_companion_id"]
+    )
 
     op.create_table(
         "companions",
         sa.Column("companion_id", sa.String(64), primary_key=True),
         sa.Column("owner_id", sa.String(64), nullable=False),
         sa.Column("display_name", sa.String(128), nullable=False, server_default=""),
-        sa.Column("role", sa.String(16), nullable=False, server_default="standard"),
-        sa.Column("status", sa.String(16), nullable=False, server_default="active"),
+        # A product type, and nothing to do with which one is the default. The
+        # column these two replace carried both meanings at once.
+        sa.Column("kind", sa.String(32), nullable=False, server_default="conversational"),
+        sa.Column(
+            "lifecycle_state", sa.String(16), nullable=False, server_default="active"
+        ),
+        sa.Column("revision", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("current_genome_id", sa.String(64)),
         sa.Column("default_memory_realm_id", sa.String(64)),
         sa.Column("profile_json", sa.JSON(), nullable=False, server_default=EMPTY_JSON),
@@ -63,25 +85,26 @@ def upgrade() -> None:
             ondelete="SET NULL",
         ),
         sa.UniqueConstraint("owner_id", "companion_id", name="uq_companions_owner_companion"),
-        sa.CheckConstraint("role IN ('primary', 'standard', 'guard')", name="companion_role"),
-        sa.CheckConstraint("status IN ('active', 'inactive', 'deleting')", name="companion_status"),
+        sa.CheckConstraint(
+            "kind IN ('conversational', 'guard', 'specialist', 'system')",
+            name="companion_kind",
+        ),
+        sa.CheckConstraint(
+            "lifecycle_state IN ('active', 'retiring', 'archived', 'deleting')",
+            name="companion_lifecycle_state",
+        ),
+        sa.CheckConstraint("revision > 0", name="companion_revision_positive"),
     )
     op.create_index("ix_companions_owner_id", "companions", ["owner_id"])
-    op.create_index("ix_companions_role", "companions", ["role"])
-    op.create_index("ix_companions_status", "companions", ["status"])
+    op.create_index("ix_companions_kind", "companions", ["kind"])
+    op.create_index(
+        "ix_companions_lifecycle_state", "companions", ["lifecycle_state"]
+    )
     op.create_index("ix_companions_current_genome_id", "companions", ["current_genome_id"])
     op.create_index(
         "ix_companions_default_memory_realm_id",
         "companions",
         ["default_memory_realm_id"],
-    )
-    op.create_index(
-        "uq_companions_owner_primary",
-        "companions",
-        ["owner_id"],
-        unique=True,
-        sqlite_where=sa.text("role = 'primary' AND status = 'active'"),
-        postgresql_where=sa.text("role = 'primary' AND status = 'active'"),
     )
 
     op.create_table(

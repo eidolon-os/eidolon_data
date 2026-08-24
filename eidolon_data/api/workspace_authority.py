@@ -199,7 +199,7 @@ def _owner_identity(row) -> OwnerIdentityResponse:
     return OwnerIdentityResponse(
         owner_id=row.owner_id,
         display_name=row.display_name,
-        lifecycle_state="active" if row.status == "active" else "inactive",
+        lifecycle_state=row.status,
     )
 
 

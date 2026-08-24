@@ -13,7 +13,7 @@ async def _guard(store, *, owner_id: str = "owner-1", companion_id: str = "guard
         companion_id=companion_id,
         genome_id=f"genome-{companion_id}",
         realm_id=f"realm-{companion_id}",
-        role="guard",
+        kind="guard",
     )
 
 
@@ -44,13 +44,13 @@ async def test_binding_requires_same_owner_active_guard_companion(store) -> None
         companion_id="standard-a",
         genome_id="genome-standard",
         realm_id="realm-standard",
-        role="standard",
+        kind="conversational",
     )
     with pytest.raises(ValueError, match="not found for owner"):
         await store.guard_bindings.bind(
             owner_id="owner-a", guard_companion_id="guard-b", device_id="device-1"
         )
-    with pytest.raises(ValueError, match="role must be guard"):
+    with pytest.raises(ValueError, match="kind must be guard"):
         await store.guard_bindings.bind(
             owner_id="owner-a",
             guard_companion_id=standard.companion.companion_id,

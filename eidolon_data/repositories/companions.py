@@ -10,7 +10,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from eidolon_data.repositories.base import Repository
-from eidolon_data.schema import CompanionRow
+from eidolon_data.schema import CompanionRow, OwnerRow
 
 
 class CompanionsRepository(Repository):
@@ -44,12 +44,24 @@ class CompanionsRepository(Repository):
             await session.refresh(row)
             return row
 
-    async def get_primary_for_owner(self, owner_id: str) -> CompanionRow | None:
+    async def get_default_for_owner(self, owner_id: str) -> CompanionRow | None:
+        """The Companion this Owner's unaddressed requests go to.
+
+        Read through the Owner's pointer rather than by scanning Companions for
+        a flag: there is exactly one answer because there is exactly one place
+        it is written. A ``lifecycle_state`` check still applies — a pointer at
+        an archived Companion is a broken pointer, and answering with it would
+        route new sessions into something that refuses them.
+        """
         async with self._session_factory() as session:
-            return await session.scalar(
-                select(CompanionRow).where(
-                    CompanionRow.owner_id == owner_id,
-                    CompanionRow.role == "primary",
-                    CompanionRow.status == "active",
-                )
-            )
+            owner = await session.get(OwnerRow, owner_id)
+            if owner is None or not owner.default_companion_id:
+                return None
+            companion = await session.get(CompanionRow, owner.default_companion_id)
+            if (
+                companion is None
+                or companion.owner_id != owner_id
+                or companion.lifecycle_state != "active"
+            ):
+                return None
+            return companion

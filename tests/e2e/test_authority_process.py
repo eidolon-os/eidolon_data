@@ -32,7 +32,7 @@ async def test_real_authority_process_serves_authenticated_concurrent_reads(tmp_
         companion_id="companion-e2e",
         genome_id="genome-e2e",
         realm_id="realm-e2e",
-        role="primary",
+        kind="conversational",
     )
     await seed.close()
 
@@ -104,7 +104,7 @@ async def test_real_authority_process_serves_authenticated_concurrent_reads(tmp_
             assert {snapshot.owner_id for snapshot in snapshots} == {"owner-e2e"}
             assert {snapshot.memory_realm.realm_id for snapshot in snapshots} == {"realm-e2e"}
             assert {snapshot.persona_genome.genome_id for snapshot in snapshots} == {"genome-e2e"}
-            assert (await runtime.get_owner_primary_runtime("owner-e2e")) == snapshots[0]
+            assert (await runtime.get_owner_default_runtime("owner-e2e")) == snapshots[0]
             assert await runtime.get_companion_face("companion-e2e") is None
             with pytest.raises(SystemDataNotFound):
                 await runtime.get_companion_runtime("missing")
@@ -208,7 +208,8 @@ async def test_real_workspace_authority_process_is_concurrently_idempotent(tmp_p
         assert len(owners) == 1
         companions = await persisted.companions.list_for_owner(owners[0].owner_id)
         assert len(companions) == 1
-        assert companions[0].role == "primary"
+        assert companions[0].kind == "conversational"
+        assert owners[0].default_companion_id == companions[0].companion_id
         assert len(await persisted.memory_realms.list_for_owner(owners[0].owner_id)) == 1
     finally:
         await persisted.close()

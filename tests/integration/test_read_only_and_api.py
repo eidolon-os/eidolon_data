@@ -56,7 +56,7 @@ async def _seed(path) -> DataSettings:
         companion_id="companion-1",
         genome_id="genome-1",
         realm_id="realm-1",
-        role="primary",
+        kind="conversational",
     )
     await writer.close()
     return settings
@@ -107,6 +107,10 @@ async def test_companion_authority_auth_and_exact_contract(tmp_path) -> None:
             # along and did not answer with until now.
             "display_name": "owner-1 Companion",
             "lifecycle_state": "active",
+            # The two axes the old ``role`` column hid: what kind of companion
+            # this is, and the version a writer compares against.
+            "kind": "conversational",
+            "revision": 1,
         }
         Draft202012Validator(json.loads(IDENTITY_SCHEMA.read_text(encoding="utf-8"))).validate(
             response.json()
@@ -205,7 +209,7 @@ async def test_companion_authority_serves_runtime_snapshot_and_face(tmp_path) ->
     digest = hashlib.sha256(image).hexdigest()
     writer = DataStore.open(settings)
     try:
-        await writer.owner_commands.create_owner(owner_id="owner-without-primary")
+        await writer.owner_commands.create_owner(owner_id="owner-without-default")
         await writer.companion_workspaces.provision_workspace(
             owner_id="owner-1",
             companion_id="companion-2",
@@ -274,19 +278,19 @@ async def test_companion_authority_serves_runtime_snapshot_and_face(tmp_path) ->
         ).status_code == 412
 
         owner_runtime = await client.get(
-            "/api/companion-authority/v1/owners/owner-1/primary-runtime-snapshot",
+            "/api/companion-authority/v1/owners/owner-1/default-runtime-snapshot",
             headers=headers,
         )
         assert owner_runtime.json() == body
         assert (
             await client.get(
-                "/api/companion-authority/v1/owners/missing/primary-runtime-snapshot",
+                "/api/companion-authority/v1/owners/missing/default-runtime-snapshot",
                 headers=headers,
             )
         ).status_code == 404
         assert (
             await client.get(
-                "/api/companion-authority/v1/owners/owner-without-primary/primary-runtime-snapshot",
+                "/api/companion-authority/v1/owners/owner-without-default/default-runtime-snapshot",
                 headers=headers,
             )
         ).status_code == 412
@@ -354,7 +358,7 @@ async def test_runtime_authority_fails_closed_for_archived_workspace(tmp_path) -
     ):
         for path in (
             "/api/companion-authority/v1/companions/companion-1/runtime-snapshot",
-            "/api/companion-authority/v1/owners/owner-1/primary-runtime-snapshot",
+            "/api/companion-authority/v1/owners/owner-1/default-runtime-snapshot",
             "/api/companion-authority/v1/companions/companion-1/face",
         ):
             assert (await client.get(path, headers=headers)).status_code == 412

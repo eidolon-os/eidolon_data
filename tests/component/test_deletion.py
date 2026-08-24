@@ -9,7 +9,7 @@ from eidolon_data.services.companion import CompanionDeletionError
 pytestmark = pytest.mark.component
 
 
-async def _workspace(store, owner_id: str, companion_id: str, *, role: str = "standard"):
+async def _workspace(store, owner_id: str, companion_id: str, *, kind: str = "conversational"):
     if await store.owners.get(owner_id) is None:
         await store.owner_commands.create_owner(owner_id=owner_id)
     return await store.companion_workspaces.provision_workspace(
@@ -17,7 +17,7 @@ async def _workspace(store, owner_id: str, companion_id: str, *, role: str = "st
         companion_id=companion_id,
         genome_id=f"genome-{companion_id}",
         realm_id=f"realm-{companion_id}",
-        role=role,
+        kind=kind,
     )
 
 
@@ -31,9 +31,9 @@ async def _face(store, companion_id: str, key: str):
     )
 
 
-async def test_primary_companion_delete_requires_explicit_override(store) -> None:
-    await _workspace(store, "owner-1", "companion-1", role="primary")
-    with pytest.raises(CompanionDeletionError, match="primary"):
+async def test_deleting_the_default_companion_requires_explicit_override(store) -> None:
+    await _workspace(store, "owner-1", "companion-1", kind="conversational")
+    with pytest.raises(CompanionDeletionError, match="default companion"):
         await store.companion_deletion.delete_companion(
             owner_id="owner-1", companion_id="companion-1"
         )
@@ -41,7 +41,7 @@ async def test_primary_companion_delete_requires_explicit_override(store) -> Non
 
 
 async def test_companion_delete_cascades_owned_rows_and_returns_external_keys(store) -> None:
-    workspace = await _workspace(store, "owner-1", "guard-1", role="guard")
+    workspace = await _workspace(store, "owner-1", "guard-1", kind="guard")
     face = await _face(store, "guard-1", "owner-1/faces/guard.jpg")
     await store.guard_bindings.bind(
         owner_id="owner-1", guard_companion_id="guard-1", device_id="external-device"

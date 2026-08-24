@@ -12,6 +12,7 @@ from eidolon_data.schema import (
     CompanionFaceAssetRow,
     CompanionRow,
     GuardBindingRow,
+    OwnerRow,
     PersonaGenomeRow,
 )
 
@@ -39,15 +40,17 @@ class CompanionDeletionService:
         *,
         owner_id: str,
         companion_id: str,
-        allow_primary: bool = False,
+        allow_default: bool = False,
     ) -> CompanionDeletionResult:
         async with self._session_factory() as session, session.begin():
             companion = await session.get(CompanionRow, companion_id)
             if companion is None or companion.owner_id != owner_id:
                 raise CompanionDeletionError("companion not found for owner")
-            if companion.role == "primary" and not allow_primary:
+            owner = await session.get(OwnerRow, owner_id)
+            is_default = owner is not None and owner.default_companion_id == companion_id
+            if is_default and not allow_default:
                 raise CompanionDeletionError(
-                    "refusing to delete the primary companion without allow_primary"
+                    "refusing to delete this Owner's default companion without allow_default"
                 )
 
             face_rows = (
@@ -81,7 +84,13 @@ class CompanionDeletionService:
                 ),
             }
 
-            # Break the two authority pointers before deleting their targets.
+            # Break the pointers before deleting their targets. The Owner's
+            # default is one of them: SET NULL would clear the column anyway,
+            # but doing it here keeps the revision bump and the audit trail with
+            # the act rather than leaving a silent side effect in the schema.
+            if is_default and owner is not None:
+                owner.default_companion_id = None
+                owner.revision += 1
             companion.current_genome_id = None
             companion.default_memory_realm_id = None
             await session.flush()

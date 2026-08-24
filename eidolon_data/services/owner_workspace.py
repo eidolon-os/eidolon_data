@@ -35,7 +35,11 @@ from eidolon_data.schema import (
 OWNER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$")
 GENERATED_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 REQUEST_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-COMPANION_ROLES = frozenset({"primary", "standard", "guard"})
+#: What a Companion is, as a product type. Which of these are offered to an
+#: Owner is a capability decision made above this layer; this set is what the
+#: storage will accept. "Which one is the default" is deliberately not here —
+#: it is a pointer on the Owner, not a kind.
+COMPANION_KINDS = frozenset({"conversational", "guard", "specialist", "system"})
 ONBOARDING_METADATA_KEY = "_eidolon_onboarding"
 
 
@@ -160,12 +164,17 @@ class OwnerService:
             companions = await session.scalars(
                 select(CompanionRow).where(
                     CompanionRow.owner_id == owner_id,
-                    CompanionRow.status == "active",
+                    CompanionRow.lifecycle_state == "active",
                 )
             )
             for companion in companions:
-                companion.status = "inactive"
+                companion.lifecycle_state = "archived"
+                companion.revision += 1
                 companion.updated_at = owner.updated_at
+            # An archived Owner has no default Companion to route to, and a
+            # pointer left behind would outlive what it points at.
+            owner.default_companion_id = None
+            owner.revision += 1
             realms = await session.execute(
                 update(MemoryRealmRow)
                 .where(
@@ -267,7 +276,7 @@ class CompanionWorkspaceService:
                 owner_id=owner.owner_id,
                 companion_id=ids["companion_id"],
                 companion_display_name=companion_name,
-                role="primary",
+                kind="conversational",
                 companion_profile_json={},
                 companion_runtime_config_json={},
                 companion_metadata_json={
@@ -348,44 +357,42 @@ class CompanionWorkspaceService:
                 )
         return realm
 
-    async def promote_to_primary(
+    async def set_default_companion(
         self,
         *,
         owner_id: str,
         companion_id: str,
     ) -> CompanionRow:
+        """Point this Owner's unaddressed requests at this Companion.
+
+        One write, to one field on the Owner. The old shape moved a ``role``
+        between two Companion rows and needed a flush in the middle to get out
+        of the way of a partial unique index — a two-row dance to express a
+        one-place fact.
+
+        Nothing else moves: existing sessions keep the Companion they were
+        created with, Body assignments are untouched, and no memory is copied.
+        Changing the default changes where *new* unaddressed work goes.
+        """
         async with self._session_factory() as session, session.begin():
             companion = await _owned_active_companion(session, owner_id, companion_id)
-            if companion.role == "guard":
-                raise OwnerWorkspaceError("a guard companion cannot become primary")
-            previous = await session.scalar(
-                select(CompanionRow).where(
-                    CompanionRow.owner_id == owner_id,
-                    CompanionRow.role == "primary",
-                    CompanionRow.status == "active",
-                    CompanionRow.companion_id != companion_id,
-                )
-            )
-            if previous is not None:
-                previous.role = "standard"
-                previous.updated_at = utc_now()
-                # The partial unique index is evaluated per UPDATE in SQLite.
-                # Release it before assigning the new primary role.
-                await session.flush()
-            if companion.role != "primary":
-                companion.role = "primary"
-                companion.updated_at = utc_now()
+            if companion.kind == "guard":
+                raise OwnerWorkspaceError("a guard companion cannot be the default")
+            owner = await session.get(OwnerRow, owner_id)
+            if owner is None:
+                raise OwnerWorkspaceError("owner not found")
+            previous_id = owner.default_companion_id
+            if previous_id != companion_id:
+                owner.default_companion_id = companion_id
+                owner.revision += 1
+                owner.updated_at = utc_now()
                 session.add(
                     governance_fact(
                         owner_id=owner_id,
-                        subject_type="companion",
-                        subject_id=companion_id,
-                        action="companion.promoted_to_primary",
-                        payload={
-                            "previous_primary_id": (
-                                previous.companion_id if previous is not None else None
-                            )
-                        },
+                        subject_type="owner",
+                        subject_id=owner_id,
+                        action="owner.default_companion_changed",
+                        payload={"previous_companion_id": previous_id},
                     )
                 )
             realm, created = await _ensure_memory_realm_in_session(
@@ -410,7 +417,7 @@ class CompanionWorkspaceService:
         owner_id: str,
         companion_id: str | None = None,
         companion_display_name: str = "",
-        role: str = "standard",
+        kind: str = "conversational",
         companion_profile_json: dict | None = None,
         companion_runtime_config_json: dict | None = None,
         companion_metadata_json: dict | None = None,
@@ -423,8 +430,10 @@ class CompanionWorkspaceService:
         memory_policy_json: dict | None = None,
     ) -> CompanionWorkspaceResult:
         owner_id = _validate_owner_id(owner_id)
-        if role not in COMPANION_ROLES:
-            raise OwnerWorkspaceError("role must be primary, standard, or guard")
+        if kind not in COMPANION_KINDS:
+            raise OwnerWorkspaceError(
+                "kind must be conversational, guard, specialist, or system"
+            )
         resolved_companion_id = companion_id or f"c_{owner_id}"
         resolved_genome_id = genome_id or f"g_{uuid4().hex}"
         resolved_realm_id = realm_id or f"r_{uuid4().hex}"
@@ -441,7 +450,7 @@ class CompanionWorkspaceService:
                 owner_id=owner_id,
                 companion_id=resolved_companion_id,
                 companion_display_name=companion_display_name,
-                role=role,
+                kind=kind,
                 companion_profile_json=companion_profile_json,
                 companion_runtime_config_json=companion_runtime_config_json,
                 companion_metadata_json=companion_metadata_json,
@@ -461,7 +470,7 @@ async def _provision_workspace_in_session(
     owner_id: str,
     companion_id: str,
     companion_display_name: str,
-    role: str,
+    kind: str,
     companion_profile_json: dict | None,
     companion_runtime_config_json: dict | None,
     companion_metadata_json: dict | None,
@@ -487,28 +496,28 @@ async def _provision_workspace_in_session(
         )
     ):
         raise OwnerWorkspaceError("workspace identifier already exists")
-    if role == "primary" and await session.scalar(
-        select(CompanionRow.companion_id).where(
-            CompanionRow.owner_id == owner_id,
-            CompanionRow.role == "primary",
-            CompanionRow.status == "active",
-        )
-    ):
-        raise OwnerWorkspaceError("owner already has an active primary companion")
 
     companion_name = companion_display_name.strip() or f"{owner.display_name or owner_id} Companion"
     companion = CompanionRow(
         companion_id=companion_id,
         owner_id=owner_id,
         display_name=companion_name,
-        role=role,
-        status="active",
+        kind=kind,
+        lifecycle_state="active",
         profile_json=dict(companion_profile_json or {}),
         runtime_config_json=dict(companion_runtime_config_json or {}),
         metadata_json=dict(companion_metadata_json or {}),
     )
     session.add(companion)
     await session.flush()
+    if owner.default_companion_id is None and kind != "guard":
+        # The Owner's first default-eligible Companion becomes the default. It
+        # is set here rather than left to a second call because an Owner with a
+        # Companion and no default has no answer for an unaddressed request,
+        # and nothing downstream can invent one.
+        owner.default_companion_id = companion.companion_id
+        owner.revision += 1
+        owner.updated_at = utc_now()
 
     normalized = _normalize_genome(
         genome_json,
@@ -557,7 +566,7 @@ async def _provision_workspace_in_session(
         subject_id=companion_id,
         action="companion.workspace.initialized",
         payload={
-            "role": role,
+            "kind": kind,
             "genome_id": genome.genome_id,
             "realm_id": realm.realm_id,
         },
@@ -596,7 +605,7 @@ async def _load_onboarding_result(
         raise OwnerWorkspaceError("operation_id is already in use for another request")
     if (
         companion.owner_id != owner.owner_id
-        or companion.role != "primary"
+        or owner.default_companion_id != companion.companion_id
         or companion.current_genome_id != genome.genome_id
         or companion.default_memory_realm_id != realm.realm_id
         or genome.companion_id != companion.companion_id
@@ -619,7 +628,7 @@ async def _owned_active_companion(session, owner_id: str, companion_id: str) -> 
     companion = await session.get(CompanionRow, companion_id)
     if companion is None or companion.owner_id != owner_id:
         raise OwnerWorkspaceError("companion not found for owner")
-    if companion.status != "active":
+    if companion.lifecycle_state != "active":
         raise OwnerWorkspaceError("companion is not active")
     return companion
 

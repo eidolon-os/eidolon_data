@@ -30,6 +30,24 @@ class OwnerRow(Base):
     display_name: Mapped[str] = mapped_column(String(128), default="")
     kind: Mapped[str] = mapped_column(String(32), default="person", index=True)
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    #: Which Companion answers when nothing named one. A pointer on the Owner
+    #: rather than a flag on a Companion, because "which one is the default" is
+    #: a fact about the Owner and only one row can hold it — a flag needs a
+    #: cross-row uniqueness rule to say the same thing, and that rule is what
+    #: the old ``role = 'primary'`` index was.
+    default_companion_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey(
+            "companions.companion_id",
+            name="fk_owners_default_companion",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        index=True,
+    )
+    #: Optimistic concurrency for the Owner aggregate. Set-default is a write to
+    #: the Owner, so this is the ``If-Match`` a client sends for it.
+    revision: Mapped[int] = mapped_column(Integer, default=1)
     profile_json: Mapped[JsonDict] = mapped_column(default=dict)
     settings_json: Mapped[JsonDict] = mapped_column(default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -41,6 +59,7 @@ class OwnerRow(Base):
             "status IN ('active', 'archived', 'deleting')",
             name="owner_status",
         ),
+        CheckConstraint("revision > 0", name="owner_revision_positive"),
     )
 
 
@@ -52,8 +71,20 @@ class CompanionRow(Base):
         String(64), ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
     )
     display_name: Mapped[str] = mapped_column(String(128), default="")
-    role: Mapped[str] = mapped_column(String(16), default="standard", index=True)
-    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    #: What kind of companion this is — a product type, and nothing to do with
+    #: which one is the default. The old ``role`` column carried both meanings
+    #: at once, so a guard could not be a default and changing the default
+    #: rewrote a type.
+    kind: Mapped[str] = mapped_column(String(32), default="conversational", index=True)
+    #: Named ``lifecycle_state`` rather than ``status`` — which every other
+    #: table here uses — because this one is not an on/off flag: ``retiring`` is
+    #: a governance state that a cross-service workflow moves through, and
+    #: hiding that under the same name as a boolean-ish status is what let
+    #: "cannot run right now" and "the Owner archived it" share one value.
+    lifecycle_state: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    #: Optimistic concurrency for the Companion aggregate; the ``If-Match`` a
+    #: client sends when renaming or archiving.
+    revision: Mapped[int] = mapped_column(Integer, default=1)
     current_genome_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey(
@@ -83,20 +114,18 @@ class CompanionRow(Base):
     __table_args__ = (
         UniqueConstraint("owner_id", "companion_id", name="uq_companions_owner_companion"),
         CheckConstraint(
-            "role IN ('primary', 'standard', 'guard')",
-            name="companion_role",
+            # Which of these the product offers is a capability decision, not a
+            # storage one; the column only refuses values nothing means.
+            "kind IN ('conversational', 'guard', 'specialist', 'system')",
+            name="companion_kind",
         ),
         CheckConstraint(
-            "status IN ('active', 'inactive', 'deleting')",
-            name="companion_status",
+            # ``inactive`` is gone with the column that conflated it: a
+            # Companion is running, being retired, archived, or being deleted.
+            "lifecycle_state IN ('active', 'retiring', 'archived', 'deleting')",
+            name="companion_lifecycle_state",
         ),
-        Index(
-            "uq_companions_owner_primary",
-            "owner_id",
-            unique=True,
-            sqlite_where=text("role = 'primary' AND status = 'active'"),
-            postgresql_where=text("role = 'primary' AND status = 'active'"),
-        ),
+        CheckConstraint("revision > 0", name="companion_revision_positive"),
     )
 
 
