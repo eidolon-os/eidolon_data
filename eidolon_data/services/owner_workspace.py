@@ -41,6 +41,11 @@ REQUEST_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 #: it is a pointer on the Owner, not a kind.
 COMPANION_KINDS = frozenset({"conversational", "guard", "specialist", "system"})
 ONBOARDING_METADATA_KEY = "_eidolon_onboarding"
+#: Provenance for a Companion added to an Owner who already has one. Its own key
+#: rather than reusing the onboarding one, because these are different events: an
+#: Owner is created once, and Companions are added many times. Sharing the key
+#: would make "was this the first?" unanswerable.
+PROVISION_METADATA_KEY = "_eidolon_companion_provision"
 
 
 class OwnerWorkspaceError(ValueError):
@@ -74,6 +79,30 @@ class CompanionWorkspaceResult:
     companion: CompanionRow
     persona_genome: PersonaGenomeRow
     memory_realm: MemoryRealmRow
+
+
+@dataclass(frozen=True)
+class CompanionProvisionResult:
+    """One added Companion, and whether the Owner's memory had to be created.
+
+    ``memory_realm_created`` is a fact the caller needs rather than a curiosity:
+    a realm that already existed needs no runtime signal, and a realm that was
+    just catalogued does — a row in a table is not a running process (§II-6.4).
+    Publishing it here is what lets the caller send that signal *only* when
+    there is something to reconcile, instead of on every create.
+
+    ``replayed`` says this operation had already been carried out. The result is
+    identical either way; the flag exists so a caller can tell "I did this" from
+    "this was already done" without diffing.
+    """
+
+    operation_id: str
+    request_fingerprint: str
+    companion: CompanionRow
+    persona_genome: PersonaGenomeRow
+    memory_realm: MemoryRealmRow
+    memory_realm_created: bool
+    replayed: bool
 
 
 @dataclass(frozen=True)
@@ -438,6 +467,91 @@ class CompanionWorkspaceService:
                 )
         return companion
 
+    async def provision_companion(
+        self,
+        *,
+        owner_id: str,
+        operation_id: str,
+        request_fingerprint: str,
+        companion_display_name: str,
+        kind: str = "conversational",
+    ) -> CompanionProvisionResult:
+        """Add a Companion to an Owner who already has one, exactly once.
+
+        Idempotent the same way onboarding is, and for the same reason: the
+        caller is a phone, the answer can be lost, and the only safe retry is
+        one that cannot create a second Companion. Every identifier is derived
+        from the operation id, so a retry addresses the same rows; the request
+        fingerprint is stored on the Companion as provenance, so a *different*
+        request reusing an operation id is a conflict rather than a silent
+        overwrite. No second workflow table is involved.
+
+        The Owner's memory realm is not created per Companion (§4.4). A second
+        Companion shares the one its Owner already has, which is why this can
+        report ``memory_realm_created=False`` — and why the derived realm id is
+        used only when there was no realm at all.
+        """
+
+        owner_id = _validate_owner_id(owner_id)
+        canonical_operation_id = _validate_operation_id(operation_id)
+        if not REQUEST_FINGERPRINT_RE.fullmatch(request_fingerprint):
+            raise OwnerWorkspaceError("request_fingerprint must be a sha256 digest")
+        if kind not in COMPANION_KINDS:
+            raise OwnerWorkspaceError(
+                "kind must be conversational, guard, specialist, or system"
+            )
+        display_name = companion_display_name.strip()
+        if not display_name:
+            raise OwnerWorkspaceError("companion_display_name cannot be blank")
+        ids = _provision_ids(canonical_operation_id)
+
+        async with self._session_factory() as session, session.begin():
+            existing = await session.get(CompanionRow, ids["companion_id"])
+            if existing is not None:
+                return await _load_provision_result(
+                    session,
+                    owner_id=owner_id,
+                    operation_id=canonical_operation_id,
+                    request_fingerprint=request_fingerprint,
+                )
+            realm_before = await _active_realm_for_owner(session, owner_id)
+            result = await _provision_workspace_in_session(
+                session,
+                owner_id=owner_id,
+                companion_id=ids["companion_id"],
+                companion_display_name=display_name,
+                kind=kind,
+                companion_profile_json=None,
+                companion_runtime_config_json=None,
+                companion_metadata_json={
+                    "source": "companion_provision",
+                    PROVISION_METADATA_KEY: {
+                        "operation_id": canonical_operation_id,
+                        "request_fingerprint": request_fingerprint,
+                    },
+                },
+                genome_id=ids["genome_id"],
+                genome_source_json={
+                    "source_type": "companion_provision",
+                    "owner_id": owner_id,
+                    "operation_id": canonical_operation_id,
+                },
+                genome_json=None,
+                realm_id=ids["realm_id"],
+                memory_engine="mempalace",
+                memory_engine_config_json=None,
+                memory_policy_json=None,
+            )
+            return CompanionProvisionResult(
+                operation_id=canonical_operation_id,
+                request_fingerprint=request_fingerprint,
+                companion=result.companion,
+                persona_genome=result.persona_genome,
+                memory_realm=result.memory_realm,
+                memory_realm_created=realm_before is None,
+                replayed=False,
+            )
+
     async def provision_workspace(
         self,
         *,
@@ -725,6 +839,82 @@ def _validate_operation_id(operation_id: str) -> str:
     if canonical != operation_id:
         raise OwnerWorkspaceError("operation_id must use canonical UUID encoding")
     return canonical
+
+
+def _provision_ids(operation_id: str) -> dict[str, str]:
+    """Every identifier a provision touches, derived from its operation id.
+
+    Prefixed apart from the onboarding ids so the two events cannot land on the
+    same rows even if a caller reused a uuid across both.
+    """
+    operation_hex = UUID(operation_id).hex
+    return {
+        "companion_id": f"cp_{operation_hex}",
+        "genome_id": f"gp_{operation_hex}_origin",
+        #: Used only when the Owner has no realm yet. A second Companion shares
+        #: the Owner's one realm, so this normally goes unused.
+        "realm_id": f"rp_{operation_hex}",
+    }
+
+
+async def _active_realm_for_owner(session, owner_id: str):
+    from sqlalchemy import select
+
+    return (
+        await session.execute(
+            select(MemoryRealmRow).where(
+                MemoryRealmRow.owner_id == owner_id,
+                #: The column is ``status`` here, not ``lifecycle_state``: this
+                #: table names it that way and renaming it is not this change's
+                #: business.
+                MemoryRealmRow.status == "active",
+            )
+        )
+    ).scalars().first()
+
+
+async def _load_provision_result(
+    session,
+    *,
+    owner_id: str,
+    operation_id: str,
+    request_fingerprint: str,
+) -> CompanionProvisionResult:
+    """Reconstruct a completed provision from the rows it created.
+
+    Nothing is stored about the operation except what the Companion carries, so
+    "has this been done" is answered by the same rows the caller asked about —
+    there is no second place that could disagree with them.
+    """
+
+    ids = _provision_ids(operation_id)
+    companion = await session.get(CompanionRow, ids["companion_id"])
+    genome = await session.get(PersonaGenomeRow, ids["genome_id"])
+    if companion is None or genome is None:
+        raise OwnerWorkspaceError("companion provision resources are incomplete")
+    if companion.owner_id != owner_id:
+        # The operation id belongs to someone else's Companion. Absent rather
+        # than forbidden, so an operation id cannot be probed across Owners.
+        raise OwnerWorkspaceNotFound("companion provision not found for owner")
+    metadata = (companion.metadata_json or {}).get(PROVISION_METADATA_KEY)
+    if not isinstance(metadata, dict) or metadata.get("operation_id") != operation_id:
+        raise OwnerWorkspaceConflict("operation_id belongs to another operation")
+    if metadata.get("request_fingerprint") != request_fingerprint:
+        raise OwnerWorkspaceConflict("operation_id is already in use for another request")
+    realm = await _active_realm_for_owner(session, owner_id)
+    if realm is None:
+        raise OwnerWorkspaceError("companion provision resources are incomplete")
+    return CompanionProvisionResult(
+        operation_id=operation_id,
+        request_fingerprint=request_fingerprint,
+        companion=companion,
+        persona_genome=genome,
+        memory_realm=realm,
+        # A replay creates nothing, so it never asks for a runtime signal. The
+        # signal for the original create was that caller's to send.
+        memory_realm_created=False,
+        replayed=True,
+    )
 
 
 def _onboarding_ids(operation_id: str) -> dict[str, str]:

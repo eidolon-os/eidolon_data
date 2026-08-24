@@ -37,6 +37,44 @@ class OwnerRenameRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=128)
 
 
+class CompanionProvisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    companion_display_name: str = Field(min_length=1, max_length=128)
+    kind: str = Field(default="conversational", min_length=1, max_length=32)
+
+
+class ProvisionedCompanionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    companion_id: str
+    display_name: str
+    kind: str
+    lifecycle_state: Literal["active", "retiring", "archived", "deleting"]
+    revision: int = Field(ge=1)
+
+
+class CompanionProvisionResponse(BaseModel):
+    """What one provision produced, identically on a retry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["1"] = "1"
+    operation: Literal["companion.provision"] = "companion.provision"
+    operation_id: str
+    request_fingerprint: str
+    companion: ProvisionedCompanionResponse
+    persona_genome_id: str
+    memory_realm_id: str
+    #: True only when this call catalogued the Owner's first realm. A second
+    #: Companion shares the Owner's memory (§4.4), so this is normally false —
+    #: and it is what tells a caller whether any runtime reconcile is owed.
+    memory_realm_created: bool
+    #: True when this operation had already been carried out. The body is the
+    #: same either way; a caller that must not act twice reads this.
+    replayed: bool
+
+
 class DefaultCompanionRequest(BaseModel):
     """Which Companion answers when nothing named one."""
 
@@ -187,6 +225,55 @@ def create_app(
         return _owner_identity(row)
 
     @app.put(
+        "/api/workspace-authority/v1/owners/{owner_id}/companion-provisions/{operation_id}",
+        response_model=CompanionProvisionResponse,
+        tags=["workspace-authority"],
+    )
+    async def provision_companion(
+        owner_id: str,
+        operation_id: UUID,
+        payload: CompanionProvisionRequest,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> CompanionProvisionResponse:
+        """Add a Companion to this Owner, exactly once per operation id.
+
+        The operation id is in the path and every identifier is derived from it,
+        so a retry addresses the same rows rather than creating a second
+        Companion. Reusing an id for a *different* request is a conflict, not an
+        overwrite: the request fingerprint is stored as provenance and compared.
+        """
+
+        authorize_service(authorization, token)
+        fingerprint = _provision_fingerprint(payload)
+        try:
+            result = await store.companion_workspaces.provision_companion(
+                owner_id=owner_id,
+                operation_id=str(operation_id),
+                request_fingerprint=fingerprint,
+                companion_display_name=payload.companion_display_name,
+                kind=payload.kind,
+            )
+        except OwnerWorkspaceError as exc:
+            raise HTTPException(
+                status_code=_workspace_error_status(exc), detail=str(exc)
+            ) from exc
+        return CompanionProvisionResponse(
+            operation_id=result.operation_id,
+            request_fingerprint=result.request_fingerprint,
+            companion=ProvisionedCompanionResponse(
+                companion_id=result.companion.companion_id,
+                display_name=result.companion.display_name,
+                kind=result.companion.kind,
+                lifecycle_state=result.companion.lifecycle_state,
+                revision=result.companion.revision,
+            ),
+            persona_genome_id=result.persona_genome.genome_id,
+            memory_realm_id=result.memory_realm.realm_id,
+            memory_realm_created=result.memory_realm_created,
+            replayed=result.replayed,
+        )
+
+    @app.put(
         "/api/workspace-authority/v1/owners/{owner_id}/default-companion",
         response_model=OwnerIdentityResponse,
         tags=["workspace-authority"],
@@ -265,6 +352,19 @@ def _owner_identity(row) -> OwnerIdentityResponse:
         default_companion_id=row.default_companion_id,
         revision=row.revision,
     )
+
+
+def _provision_fingerprint(payload: CompanionProvisionRequest) -> str:
+    """The request's content, canonically, so a retry hashes the same.
+
+    Same construction as the onboarding fingerprint. It is compared, never
+    parsed: its only job is to tell "this request again" from "a different
+    request wearing the same operation id".
+    """
+    canonical = json.dumps(
+        payload.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _request_fingerprint(payload: WorkspaceInitializeRequest) -> str:
