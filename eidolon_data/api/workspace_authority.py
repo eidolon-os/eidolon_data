@@ -43,7 +43,15 @@ class OwnerIdentityResponse(BaseModel):
     operation: Literal["owner.identity"] = "owner.identity"
     owner_id: str
     display_name: str
-    lifecycle_state: Literal["active", "inactive"]
+    lifecycle_state: Literal["active", "archived", "deleting"]
+    #: Which Companion answers when nothing named one. An Owner aggregate field,
+    #: so it is read here rather than derived from a Companion list — and it is
+    #: the only place that says it. ``None`` is a real state: the Owner has no
+    #: default-eligible Companion, and no caller may resolve that by choosing.
+    default_companion_id: str | None = Field(default=None, max_length=64)
+    #: Owner aggregate version. Setting the default writes the Owner, so this is
+    #: the value a writer compares against.
+    revision: int = Field(ge=1)
 
 
 class OwnerResult(BaseModel):
@@ -200,6 +208,8 @@ def _owner_identity(row) -> OwnerIdentityResponse:
         owner_id=row.owner_id,
         display_name=row.display_name,
         lifecycle_state=row.status,
+        default_companion_id=row.default_companion_id,
+        revision=row.revision,
     )
 
 
