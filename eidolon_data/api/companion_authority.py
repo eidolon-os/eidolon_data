@@ -12,6 +12,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.repositories.persona import PersonaGenomeConflict
 
@@ -56,7 +57,7 @@ class CompanionIdentityResponse(BaseModel):
     #: which meant a consumer could not tell "the Owner archived it" from
     #: "it cannot run right now" — and that conflation is what the identity
     #: schema was changed to remove.
-    lifecycle_state: Literal["active", "retiring", "archived", "deleting"]
+    lifecycle_state: CompanionLifecycleState
     #: The product type, independent of which Companion is the default.
     kind: str = Field(min_length=1, max_length=32)
     #: Aggregate version, for compare-and-swap on writes.
@@ -152,7 +153,7 @@ class CompanionSummaryResponse(BaseModel):
     companion_id: str = Field(min_length=1, max_length=64)
     display_name: str = Field(default="", max_length=128)
     kind: str = Field(min_length=1, max_length=32)
-    lifecycle_state: Literal["active", "retiring", "archived", "deleting"]
+    lifecycle_state: CompanionLifecycleState
     revision: int = Field(ge=1)
     created_at: datetime
     updated_at: datetime

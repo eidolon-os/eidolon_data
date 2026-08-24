@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.services.owner_workspace import (
     OwnerWorkspaceConflict,
@@ -50,7 +51,7 @@ class ProvisionedCompanionResponse(BaseModel):
     companion_id: str
     display_name: str
     kind: str
-    lifecycle_state: Literal["active", "retiring", "archived", "deleting"]
+    lifecycle_state: CompanionLifecycleState
     revision: int = Field(ge=1)
 
 
