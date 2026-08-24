@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidolon.dev/data/contracts/v1/owner/identity.schema.json",
+  "title": "Owner Identity V1",
+  "description": "The Owner aggregate as consumers read it. default_companion_id is a field on the Owner and the only place that says which Companion answers when nothing named one; null is a real state and no consumer may resolve it by choosing. revision is what a writer must present to change the pointer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "operation",
+    "owner_id",
+    "display_name",
+    "lifecycle_state",
+    "revision"
+  ],
+  "properties": {
+    "operation": {
+      "const": "owner.identity"
+    },
+    "owner_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "display_name": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "lifecycle_state": {
+      "enum": [
+        "active",
+        "archived",
+        "deleting"
+      ]
+    },
+    "default_companion_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 64
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

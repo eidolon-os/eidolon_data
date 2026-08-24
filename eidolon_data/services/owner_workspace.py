@@ -47,6 +47,23 @@ class OwnerWorkspaceError(ValueError):
     """Raised when a workspace command violates a domain invariant."""
 
 
+class OwnerWorkspaceNotFound(OwnerWorkspaceError):
+    """The subject of the command is not this Owner's, or is not there.
+
+    One exception for both, because they must be answered identically: an id
+    that says "forbidden" rather than "absent" can be probed for existence.
+    """
+
+
+class OwnerWorkspaceConflict(OwnerWorkspaceError):
+    """The caller's view of the aggregate is older than the aggregate.
+
+    Its own type rather than a recognisable message. The status mapping used to
+    read the exception's text for substrings like "already in use", which means
+    a rephrased sentence silently changes an HTTP status.
+    """
+
+
 @dataclass(frozen=True)
 class OwnerCreateResult:
     owner: OwnerRow
@@ -362,6 +379,7 @@ class CompanionWorkspaceService:
         *,
         owner_id: str,
         companion_id: str,
+        expected_revision: int | None = None,
     ) -> CompanionRow:
         """Point this Owner's unaddressed requests at this Companion.
 
@@ -380,8 +398,17 @@ class CompanionWorkspaceService:
                 raise OwnerWorkspaceError("a guard companion cannot be the default")
             owner = await session.get(OwnerRow, owner_id)
             if owner is None:
-                raise OwnerWorkspaceError("owner not found")
+                raise OwnerWorkspaceNotFound("owner not found")
             previous_id = owner.default_companion_id
+            if expected_revision is not None and expected_revision != owner.revision:
+                # Stale view — unless the thing it was asking for is already
+                # true. A retry after a lost response is the common case, and
+                # refusing it would make the caller's only safe move a re-read
+                # followed by another write that changes nothing.
+                if previous_id != companion_id:
+                    raise OwnerWorkspaceConflict(
+                        "owner revision has moved since this caller read it"
+                    )
             if previous_id != companion_id:
                 owner.default_companion_id = companion_id
                 owner.revision += 1
@@ -627,7 +654,7 @@ async def _load_onboarding_result(
 async def _owned_active_companion(session, owner_id: str, companion_id: str) -> CompanionRow:
     companion = await session.get(CompanionRow, companion_id)
     if companion is None or companion.owner_id != owner_id:
-        raise OwnerWorkspaceError("companion not found for owner")
+        raise OwnerWorkspaceNotFound("companion not found for owner")
     if companion.lifecycle_state != "active":
         raise OwnerWorkspaceError("companion is not active")
     return companion

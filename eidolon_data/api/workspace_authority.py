@@ -13,8 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.services.owner_workspace import (
+    OwnerWorkspaceConflict,
     OwnerWorkspaceError,
     OwnerWorkspaceInitializationResult,
+    OwnerWorkspaceNotFound,
 )
 
 from .service_auth import authorize_service, required_service_token
@@ -33,6 +35,18 @@ class OwnerRenameRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     display_name: str = Field(min_length=1, max_length=128)
+
+
+class DefaultCompanionRequest(BaseModel):
+    """Which Companion answers when nothing named one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    companion_id: str = Field(min_length=1, max_length=64)
+    #: The Owner revision this caller last read. Optional so an internal caller
+    #: with no prior read is not forced to invent one, required in practice by
+    #: the management boundary, which always has just read it.
+    expected_revision: int | None = Field(default=None, ge=1)
 
 
 class OwnerIdentityResponse(BaseModel):
@@ -172,6 +186,46 @@ def create_app(
             raise HTTPException(status_code=404, detail="owner not found")
         return _owner_identity(row)
 
+    @app.put(
+        "/api/workspace-authority/v1/owners/{owner_id}/default-companion",
+        response_model=OwnerIdentityResponse,
+        tags=["workspace-authority"],
+    )
+    async def set_default_companion(
+        owner_id: str,
+        payload: DefaultCompanionRequest,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> OwnerIdentityResponse:
+        """Point this Owner's unaddressed work at one of their Companions.
+
+        PUT because it states a desired end, not a step: sending it twice leaves
+        the same Owner pointing at the same Companion. That is what makes a
+        retry after a lost response safe, and a retry after a lost response is
+        the normal case on a phone.
+
+        ``expected_revision`` is the Owner revision the caller last read. A
+        stale one is a 409 — unless the Companion it names is already the
+        default, which is the lost-response retry and is answered as success.
+        Nothing else moves: existing sessions keep the Companion they were
+        created with, Body assignments are untouched, no memory is copied.
+        """
+
+        authorize_service(authorization, token)
+        try:
+            await store.companion_workspaces.set_default_companion(
+                owner_id=owner_id,
+                companion_id=payload.companion_id,
+                expected_revision=payload.expected_revision,
+            )
+        except OwnerWorkspaceError as exc:
+            raise HTTPException(
+                status_code=_workspace_error_status(exc), detail=str(exc)
+            ) from exc
+        row = await store.owners.get(owner_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="owner not found")
+        return _owner_identity(row)
+
     @app.patch(
         "/api/workspace-authority/v1/owners/{owner_id}",
         response_model=OwnerIdentityResponse,
@@ -241,6 +295,13 @@ def _response(result: OwnerWorkspaceInitializationResult) -> WorkspaceOperationR
 
 
 def _workspace_error_status(error: OwnerWorkspaceError) -> int:
+    #: Typed first. The substring checks below predate the typed errors and are
+    #: kept only for the paths that still raise the base class; a status decided
+    #: by reading a sentence changes when someone rewords the sentence.
+    if isinstance(error, OwnerWorkspaceNotFound):
+        return 404
+    if isinstance(error, OwnerWorkspaceConflict):
+        return 409
     message = str(error)
     if "already in use" in message or "belong to another" in message:
         return 409
