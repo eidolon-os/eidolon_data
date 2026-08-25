@@ -494,7 +494,17 @@ def create_app(
                 change_summary=payload.change_summary,
             )
         except PersonaGenomeConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            # The code travels, not only the sentence: a consumer telling "it is
+            # already that" from "someone changed it first" by matching English
+            # is a consumer that breaks when the wording improves.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": exc.code,
+                    "message": str(exc),
+                    "stale_genome_id": exc.stale_genome_id,
+                },
+            ) from exc
         return PersonaChapterResponse(
             genome_id=restored.genome_id,
             version=restored.version,

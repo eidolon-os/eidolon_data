@@ -106,8 +106,12 @@ async def test_proposal_rejects_stale_base_hash_and_wrong_owner(store) -> None:
     workspace = await _workspace(store)
     bad_hash = _proposal(workspace.persona_genome, genome_id="bad-hash")
     bad_hash = bad_hash.model_copy(update={"base_genome_hash": "pg_invalid"})
-    with pytest.raises(PersonaGenomeConflict, match="hash"):
+    with pytest.raises(PersonaGenomeConflict, match="hash") as stale_hash:
         await store.persona_commands.create_evolution_proposal(bad_hash)
+    # Its own code although it also means "stale": a hash that moved under a
+    # matching id means something rewrote a genome in place, which is a
+    # different problem from having lost a race.
+    assert stale_hash.value.code == "base_hash_mismatch"
 
     wrong_owner = _proposal(
         workspace.persona_genome,
@@ -131,13 +135,17 @@ async def test_approval_marks_proposal_stale_when_current_pointer_changed(store)
         version=3,
         base_genome_id="genome-origin",
     )
-    with pytest.raises(PersonaGenomeConflict, match="changed"):
+    with pytest.raises(PersonaGenomeConflict, match="changed") as raced:
         await store.persona_commands.approve_evolution(
             owner_id="owner-1",
             companion_id="companion-1",
             proposed_genome_id=proposed.genome_id,
             expected_base_genome_id="genome-origin",
         )
+    # The one a caller must not retry: this proposal is marked stale by the
+    # authority, so asking again with the same one can never succeed.
+    assert raced.value.code == "current_changed"
+    assert raced.value.stale_genome_id == proposed.genome_id
     assert (await store.persona_genomes.get(proposed.genome_id)).status == "stale"
     assert (
         await store.persona_genomes.get_current("companion-1")
@@ -180,15 +188,25 @@ async def test_reject_rollback_and_reset_to_origin(store) -> None:
 
 
 async def test_only_proposed_genomes_can_be_approved_or_rejected(store) -> None:
+    """Refused with a code, not only a sentence.
+
+    A consumer across a process boundary has to tell this apart from losing a
+    race — one is worth re-reading and trying again, and this one never is — and
+    matching on English is not a way to do that.
+    """
+
     await _workspace(store)
-    with pytest.raises(ValueError, match="only proposed"):
+    with pytest.raises(PersonaGenomeConflict, match="only proposed") as approving:
         await store.persona_commands.approve_evolution(
             owner_id="owner-1",
             companion_id="companion-1",
             proposed_genome_id="genome-origin",
         )
-    with pytest.raises(ValueError, match="only proposed"):
+    with pytest.raises(PersonaGenomeConflict, match="only proposed") as rejecting:
         await store.persona_commands.reject_evolution(owner_id="owner-1", genome_id="genome-origin")
+
+    assert approving.value.code == "state_not_eligible"
+    assert rejecting.value.code == "state_not_eligible"
 
 
 async def test_new_genome_base_must_belong_to_same_companion(store) -> None:
@@ -209,3 +227,71 @@ async def test_new_genome_base_must_belong_to_same_companion(store) -> None:
             base_genome_id="genome-other",
         )
     assert await store.persona_genomes.get("genome-invalid-base") is None
+
+
+async def test_a_proposal_against_an_older_genome_says_which_kind_of_stale(store) -> None:
+    """The two staleness codes, told apart on purpose.
+
+    ``base_not_current`` means the work is fine and out of date — re-read and
+    propose again. ``base_hash_mismatch`` means the genome that id names is not
+    the content it named. A consumer that could not tell them apart would retry
+    both or neither.
+    """
+
+    workspace = await _workspace(store)
+    await store.persona_commands.create_genome(
+        genome_id="genome-newer",
+        companion_id="companion-1",
+        owner_id="owner-1",
+        event_id="audit-newer",
+        version=2,
+        base_genome_id="genome-origin",
+    )
+    await store.persona_commands.rollback_to_genome(
+        owner_id="owner-1", companion_id="companion-1", genome_id="genome-newer"
+    )
+
+    with pytest.raises(PersonaGenomeConflict) as behind:
+        await store.persona_commands.create_evolution_proposal(
+            _proposal(workspace.persona_genome, genome_id="genome-late")
+        )
+
+    assert behind.value.code == "base_not_current"
+    assert behind.value.stale_genome_id == "genome-origin"
+
+
+async def test_a_genome_of_another_companion_is_refused_with_its_own_code(store) -> None:
+    """Never a retry: it is a request about something that is not there."""
+
+    await _workspace(store)
+    await store.companion_workspaces.provision_workspace(
+        owner_id="owner-1",
+        companion_id="companion-2",
+        genome_id="genome-theirs",
+        realm_id="realm-2",
+    )
+
+    with pytest.raises(PersonaGenomeConflict) as foreign:
+        await store.persona_genomes.restore(
+            companion_id="companion-1",
+            genome_id="genome-theirs",
+            change_summary="回到了那时候的样子",
+        )
+
+    assert foreign.value.code == "not_this_companion"
+
+
+async def test_restoring_what_it_already_is_is_not_a_race(store) -> None:
+    """Distinguishable on purpose: a caller that treats a repeat as success — the
+    management restore does — needs to tell it from having lost one."""
+
+    await _workspace(store)
+
+    with pytest.raises(PersonaGenomeConflict) as already:
+        await store.persona_genomes.restore(
+            companion_id="companion-1",
+            genome_id="genome-origin",
+            change_summary="回到了那时候的样子",
+        )
+
+    assert already.value.code == "state_not_eligible"

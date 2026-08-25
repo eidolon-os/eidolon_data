@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from eidolon_sdk.biz.persona import PersonaConflictCode
 from sqlalchemy import func, select
 
 from eidolon_data.repositories.base import Repository
@@ -18,8 +19,27 @@ from eidolon_data.schema import CompanionRow, PersonaGenomeRow
 
 
 class PersonaGenomeConflict(RuntimeError):
-    def __init__(self, message: str, *, stale_genome_id: str | None = None) -> None:
+    """A persona mutation the authority refused, and why in a word.
+
+    ``code`` is the part a caller can act on. The message is for a person reading
+    a log; matching on it across a process boundary is what a consumer had to do
+    before this, and it made "someone changed it while you were deciding" — worth
+    a re-read and another try — indistinguishable from "that genome is not this
+    Companion's", which is never worth retrying.
+
+    The vocabulary lives in ``eidolon_sdk.biz.persona`` because the producer is
+    not its only reader.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: PersonaConflictCode,
+        stale_genome_id: str | None = None,
+    ) -> None:
         super().__init__(message)
+        self.code = code
         self.stale_genome_id = stale_genome_id
 
 
@@ -62,20 +82,31 @@ class PersonaRepository(Repository):
         async with self._session_factory() as session:
             target = await session.get(PersonaGenomeRow, genome_id)
             if target is None or target.companion_id != companion_id:
-                raise PersonaGenomeConflict("persona genome does not belong to companion")
+                raise PersonaGenomeConflict(
+                    "persona genome does not belong to companion",
+                    code="not_this_companion",
+                )
             if target.status != "committed":
                 # Only something this Companion actually was may be returned
                 # to. A proposal it never became is not a past.
                 raise PersonaGenomeConflict(
                     "only a committed persona genome can be restored",
+                    code="state_not_eligible",
                     stale_genome_id=genome_id,
                 )
             companion = await session.get(CompanionRow, companion_id)
             if companion is None:
-                raise PersonaGenomeConflict("companion does not exist")
+                raise PersonaGenomeConflict(
+                    "companion does not exist", code="companion_missing"
+                )
             if companion.current_genome_id == genome_id:
                 raise PersonaGenomeConflict(
                     "companion already has this persona genome",
+                    # Not a concurrency conflict: the state asked for is the
+                    # state it is in. Callers that treat this as success (the
+                    # management restore does) rely on being able to tell it
+                    # apart, which is exactly what a code is for.
+                    code="state_not_eligible",
                     stale_genome_id=genome_id,
                 )
             highest = await session.scalar(

@@ -136,12 +136,14 @@ class PersonaService:
             if companion.current_genome_id != proposal.base_genome_id:
                 raise PersonaGenomeConflict(
                     "proposal base is not the current genome",
+                    code="base_not_current",
                     stale_genome_id=proposal.base_genome_id,
                 )
             base = await session.get(PersonaGenomeRow, proposal.base_genome_id)
             if base is None or base.genome_hash != proposal.base_genome_hash:
                 raise PersonaGenomeConflict(
                     "proposal base hash does not match current genome",
+                    code="base_hash_mismatch",
                     stale_genome_id=proposal.base_genome_id,
                 )
             max_version = (
@@ -200,7 +202,9 @@ class PersonaService:
             if genome is None or genome.companion_id != companion_id:
                 raise KeyError(f"genome not found: {proposed_genome_id}")
             if genome.status != "proposed":
-                raise ValueError("only proposed genomes can be approved")
+                raise PersonaGenomeConflict(
+                    "only proposed genomes can be approved", code="state_not_eligible"
+                )
             if expected_base_genome_id and companion.current_genome_id != expected_base_genome_id:
                 genome.status = "stale"
                 genome.updated_at = utc_now()
@@ -260,6 +264,7 @@ class PersonaService:
         if conflict:
             raise PersonaGenomeConflict(
                 "current genome changed before activation",
+                code="current_changed",
                 stale_genome_id=proposed_genome_id,
             )
         return genome
@@ -280,7 +285,9 @@ class PersonaService:
                 raise KeyError(f"genome not found for companion: {genome_id}")
             await _owned_companion(session, owner_id, genome.companion_id, lock=True)
             if genome.status != "proposed":
-                raise ValueError("only proposed genomes can be rejected")
+                raise PersonaGenomeConflict(
+                    "only proposed genomes can be rejected", code="state_not_eligible"
+                )
             genome.status = "rejected"
             genome.change_summary = f"{genome.change_summary}\n\n{reason}".strip()
             genome.updated_at = utc_now()
@@ -315,7 +322,9 @@ class PersonaService:
             if genome is None or genome.companion_id != companion_id:
                 raise KeyError(f"genome not found: {genome_id}")
             if genome.status != "committed":
-                raise ValueError("only committed genomes can be rollback targets")
+                raise PersonaGenomeConflict(
+                    "only committed genomes can be rollback targets", code="state_not_eligible"
+                )
             companion.current_genome_id = genome_id
             companion.updated_at = utc_now()
             _add_event(
