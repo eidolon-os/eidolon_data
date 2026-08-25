@@ -360,9 +360,20 @@ async def test_runtime_authority_fails_closed_for_archived_workspace(tmp_path) -
         for path in (
             "/api/companion-authority/v1/companions/companion-1/runtime-snapshot",
             "/api/companion-authority/v1/owners/owner-1/default-runtime-snapshot",
-            "/api/companion-authority/v1/companions/companion-1/face",
         ):
             assert (await client.get(path, headers=headers)).status_code == 412
+
+        # The face is not in that set, and deliberately so: being readable is
+        # not being runnable. Nothing can start a session here — the two routes
+        # above refuse — and the one caller left is a management screen showing
+        # a person what their own Eidolon looks like. Refusing that would hide
+        # an archived Companion's portrait from its Owner, which is not what
+        # "put away" was ever supposed to mean.
+        face = await client.get(
+            "/api/companion-authority/v1/companions/companion-1/face",
+            headers=headers,
+        )
+        assert face.status_code in {200, 204}
 
 
 @pytest.mark.parametrize(

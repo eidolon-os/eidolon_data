@@ -577,8 +577,12 @@ def create_app(
         companion = await store.companions.get(companion_id)
         if companion is None:
             raise HTTPException(status_code=404, detail="companion not found")
-        if companion.lifecycle_state != "active":
-            raise HTTPException(status_code=412, detail="companion is not active")
+        # Readable whatever state it is in, unlike the write below. Nothing can
+        # start a session with a Companion that is not active — the runtime
+        # snapshot refuses — so this is not a way to reach one. What it is, is
+        # the only way a person is shown the face of an Eidolon they put away,
+        # and a management screen that could not draw their own archived
+        # Companion would be hiding it from them rather than keeping it.
         asset = await store.companion_faces.get_active(companion_id)
         if asset is None:
             return Response(status_code=204)
