@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Literal
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
 from eidolon_data import DataSettings, DataStore, load_settings
+from eidolon_data.audit import run_audit_dispatcher
 from eidolon_data.services.owner_workspace import (
     CompanionLifecycleConflict,
     OwnerWorkspaceConflict,
@@ -226,9 +228,30 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await store.validate_schema()
+        # One dispatcher, in the process that writes the facts. This authority
+        # serves two apps over one database, and two loops draining one outbox
+        # would publish the same events twice — harmlessly, because the
+        # transport de-duplicates on event id, and pointlessly.
+        #
+        # No URL means no dispatcher *and no purge*: an unpublished governance
+        # fact is still readable by its Owner, so a Host without a bus keeps its
+        # whole history rather than losing it quietly.
+        dispatcher: asyncio.Task | None = None
+        if store.settings.audit_nats_url:
+            dispatcher = asyncio.create_task(
+                run_audit_dispatcher(
+                    store.audit_outbox,
+                    nats_url=store.settings.audit_nats_url,
+                ),
+                name="eidolon-data-audit-dispatcher",
+            )
         try:
             yield
         finally:
+            if dispatcher is not None:
+                dispatcher.cancel()
+                with suppress(asyncio.CancelledError):
+                    await dispatcher
             await store.close()
 
     app = FastAPI(

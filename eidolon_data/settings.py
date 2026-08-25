@@ -49,6 +49,12 @@ class DataSettings(BaseSettings):
     # A controlled reader can be confined to query-only mode. Cross-project
     # production integration should prefer a versioned authority contract.
     sqlite_read_only: bool = False
+    # Where this authority publishes its governance facts for the global audit
+    # stream. Unset means nothing is published — and, deliberately, nothing is
+    # purged either: an unpublished row is still readable by its Owner through
+    # ``/owners/{id}/governance-events``, so a Host with no bus keeps its whole
+    # history rather than losing it quietly.
+    audit_nats_url: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

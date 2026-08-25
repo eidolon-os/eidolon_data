@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -95,3 +96,82 @@ async def test_empty_outbox_and_empty_updates_are_noops(store) -> None:
         await store.audit_outbox.mark_failed(set(), error="none", retry_after=timedelta(seconds=1))
         == 0
     )
+
+
+async def test_a_governance_fact_stays_readable_for_as_long_as_a_person_may_look(
+    store,
+) -> None:
+    """The retention here is a product decision, not a transport one.
+
+    These rows are what 主机动态 is made of, and nothing else on this Host keeps
+    that history. A dispatcher that inherited the Agent's one-day horizon —
+    correct there, where nothing reads its outbox for a person — would leave a
+    history screen that only ever shows today.
+    """
+
+    from eidolon_data.audit import OWNER_HISTORY_RETENTION, purge_expired_audit
+
+    await _enqueue(store, "audit-recent")
+    await _enqueue(store, "audit-ancient")
+    await store.audit_outbox.mark_published(
+        {"audit-recent"}, published_at=datetime.now(UTC) - timedelta(days=30)
+    )
+    await store.audit_outbox.mark_published(
+        {"audit-ancient"}, published_at=datetime.now(UTC) - timedelta(days=120)
+    )
+
+    removed = await purge_expired_audit(store.audit_outbox)
+
+    assert OWNER_HISTORY_RETENTION >= timedelta(days=30)
+    assert removed == 1
+    assert await store.audit_outbox.get_delivery_state("audit-recent") is not None
+    assert await store.audit_outbox.get_delivery_state("audit-ancient") is None
+
+
+async def test_nothing_is_purged_while_it_has_not_been_published(store) -> None:
+    """Which is what makes a Host with no bus safe.
+
+    No URL configured means no dispatcher and therefore no purge — but even when
+    one runs, an event the transport never acknowledged is one its Owner can
+    still read. A bus outage costs delay, never history.
+    """
+
+    from eidolon_data.audit import purge_expired_audit
+
+    await _enqueue(store, "audit-never-sent")
+
+    removed = await purge_expired_audit(
+        store.audit_outbox, now=datetime.now(UTC) + timedelta(days=3650)
+    )
+
+    assert removed == 0
+    assert await store.audit_outbox.get_delivery_state("audit-never-sent") is not None
+
+
+async def test_the_dispatcher_only_runs_when_a_bus_is_configured(tmp_path) -> None:
+    """The wiring, asserted where it is decided rather than trusted.
+
+    A Host with no NATS URL must not start a loop that would mark rows published
+    against nothing — and must not purge. This checks the app's own lifespan,
+    because "we remembered to guard it" is not a property a comment can hold.
+    """
+
+    from eidolon_data import DataSettings, DataStore
+    from eidolon_data.api.workspace_authority import create_app
+
+    settings = DataSettings(
+        sqlite_path=str(tmp_path / "no-bus.sqlite3"),
+        object_store_path=str(tmp_path / "objects"),
+    )
+    writer = DataStore.open(settings)
+    await writer.init_schema()
+    await writer.close()
+
+    app = create_app(settings, service_token="workspace-authority-token-0001")
+    async with app.router.lifespan_context(app):
+        running = [
+            task
+            for task in asyncio.all_tasks()
+            if task.get_name() == "eidolon-data-audit-dispatcher"
+        ]
+        assert running == []
