@@ -901,3 +901,91 @@ async def test_an_archived_companion_will_not_hand_out_a_runtime_snapshot(tmp_pa
         )
         assert brought_back.status_code == 200
         assert (await runtime_client.get(snapshot, headers=runtime_headers)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_what_happened_to_this_owners_things_is_readable_newest_first(
+    tmp_path,
+) -> None:
+    """The governance facts this authority already writes, read back.
+
+    They are written in the same transaction as the change itself, which is what
+    makes them a record rather than a log: an event exists exactly when the
+    thing it describes happened. Nothing had ever read them — the outbox has a
+    dispatcher-shaped hole where a reader should be, and a person had no way to
+    see what had been done to their own Eidolons.
+    """
+
+    settings = await _seed(tmp_path / "governance-events.sqlite3")
+    writer = DataStore.open(settings)
+    await writer.companion_workspaces.provision_workspace(
+        owner_id="owner-1", companion_id="companion-2", genome_id="genome-2"
+    )
+    await writer.companion_workspaces.set_default_companion(
+        owner_id="owner-1", companion_id="companion-2"
+    )
+    await writer.companion_workspaces.put_away_companion(
+        owner_id="owner-1", companion_id="companion-1"
+    )
+    await writer.owner_commands.create_owner(owner_id="owner-2")
+    await writer.close()
+
+    token = "workspace-authority-token-0001"
+    app = create_workspace_app(settings, service_token=token)
+    path = "/api/workspace-authority/v1/owners/owner-1/governance-events"
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+        assert (await client.get(path)).status_code == 401
+
+        answered = await client.get(path, headers=headers)
+        assert answered.status_code == 200
+        body = answered.json()
+        actions = [event["action"] for event in body["events"]]
+        # Newest first, and the archive is two facts because it was two moves in
+        # one transaction — the record says the retirement happened, because it
+        # did.
+        assert actions[:2] == ["companion.archived", "companion.retirement_begun"]
+        # Everything that made this Owner what it is, in one record: two
+        # Companions arriving, the pointer moving, and the one being put away.
+        assert "companion.workspace.initialized" in actions
+        assert "owner.default_companion_changed" in actions
+        assert actions[-1] == "owner.created"
+        assert body["events"][0]["subject_id"] == "companion-1"
+
+        # One page at a time, and the cursor walks backwards through it.
+        first = await client.get(path, params={"limit": 2}, headers=headers)
+        assert len(first.json()["events"]) == 2
+        cursor = first.json()["next_cursor"]
+        assert cursor is not None
+        older = await client.get(
+            path, params={"limit": 2, "before": cursor}, headers=headers
+        )
+        assert older.status_code == 200
+        assert {event["event_id"] for event in older.json()["events"]}.isdisjoint(
+            {event["event_id"] for event in first.json()["events"]}
+        )
+
+        # Another Owner's history is not this Owner's, and an Owner that does
+        # not exist is absent rather than empty: "nothing happened" and "there
+        # is nobody here" are different answers.
+        theirs = await client.get(
+            "/api/workspace-authority/v1/owners/owner-2/governance-events",
+            headers=headers,
+        )
+        assert theirs.status_code == 200
+        assert [event["action"] for event in theirs.json()["events"]] == [
+            "owner.created"
+        ]
+        assert all(
+            event["subject_id"] == "owner-2" for event in theirs.json()["events"]
+        )
+        nobody = await client.get(
+            "/api/workspace-authority/v1/owners/owner-nowhere/governance-events",
+            headers=headers,
+        )
+        assert nobody.status_code == 404

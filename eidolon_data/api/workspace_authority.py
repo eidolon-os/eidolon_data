@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 from uuid import UUID
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
@@ -122,6 +122,44 @@ class CompanionLifecycleResponse(BaseModel):
     revision: int = Field(ge=1)
     #: Who answers for this Owner now. ``None`` when nobody does.
     default_companion_id: str | None = Field(default=None, max_length=64)
+
+
+class GovernanceEventResponse(BaseModel):
+    """One thing that happened to this Owner's things.
+
+    Facts, not sentences. What a person reads is composed where the words live;
+    what this authority knows is what happened, to what, and when.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1, max_length=64)
+    #: Stable machine word (``companion.archived``,
+    #: ``owner.default_companion_changed``). A consumer that has never heard of
+    #: one must still show that it happened.
+    action: str = Field(min_length=1, max_length=128)
+    subject_type: str = Field(min_length=1, max_length=64)
+    subject_id: str = Field(min_length=1, max_length=128)
+    outcome: str = Field(min_length=1, max_length=16)
+    severity: str = Field(min_length=1, max_length=16)
+    occurred_at: str = Field(min_length=1, max_length=64)
+    #: Carried only for events this authority classified as safe to show. A
+    #: classified payload is dropped and the event is still reported: hiding
+    #: that something happened is a bigger lie than not saying what was in it.
+    payload: dict = Field(default_factory=dict)
+
+
+class OwnerGovernanceEventsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["1"] = "1"
+    operation: Literal["owner.governance-events"] = "owner.governance-events"
+    owner_id: str = Field(min_length=1, max_length=64)
+    #: Newest first.
+    events: list[GovernanceEventResponse]
+    #: Send back to read the page before this one. ``None`` means this is as far
+    #: back as the Host still holds — not that nothing happened before.
+    next_cursor: int | None = Field(default=None, ge=1)
 
 
 class OwnerIdentityResponse(BaseModel):
@@ -260,6 +298,58 @@ def create_app(
         if row is None:
             raise HTTPException(status_code=404, detail="owner not found")
         return _owner_identity(row)
+
+    @app.get(
+        "/api/workspace-authority/v1/owners/{owner_id}/governance-events",
+        response_model=OwnerGovernanceEventsResponse,
+        tags=["workspace-authority"],
+    )
+    async def list_owner_governance_events(
+        owner_id: str,
+        limit: int = Query(default=50, ge=1, le=100),
+        before: int | None = Query(default=None, ge=1),
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> OwnerGovernanceEventsResponse:
+        """What has happened to this Owner's things, newest first.
+
+        The governance facts this authority already writes in the same
+        transaction as the change itself — which is what makes them a record
+        rather than a log: an event exists exactly when the thing it describes
+        happened.
+
+        **Recent, not complete.** These live in the audit outbox, whose
+        retention is decided by whoever purges published rows. Nothing purges
+        today; when something does, this window shrinks with it, and the name
+        says so.
+        """
+
+        authorize_service(authorization, token)
+        if await store.owners.get(owner_id) is None:
+            raise HTTPException(status_code=404, detail="owner not found")
+        page = await store.audit_outbox.list_for_owner(
+            owner_id, limit=limit, before_sequence=before
+        )
+        return OwnerGovernanceEventsResponse(
+            owner_id=owner_id,
+            events=[
+                GovernanceEventResponse(
+                    event_id=event.event_id,
+                    action=event.action,
+                    subject_type=event.subject_type,
+                    subject_id=event.subject_id,
+                    outcome=event.outcome,
+                    severity=event.severity,
+                    occurred_at=event.occurred_at.isoformat(),
+                    payload=(
+                        dict(event.payload)
+                        if event.data_classification == "safe"
+                        else {}
+                    ),
+                )
+                for event in page.events
+            ],
+            next_cursor=page.next_sequence,
+        )
 
     @app.put(
         "/api/workspace-authority/v1/owners/{owner_id}/companion-provisions/{operation_id}",

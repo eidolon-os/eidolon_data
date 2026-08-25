@@ -21,6 +21,17 @@ class PendingAuditBatch:
 
 
 @dataclass(frozen=True)
+class OwnerGovernancePage:
+    """One page of what happened to one Owner's things, newest first."""
+
+    events: list[AuditEnvelope]
+    #: The sequence a caller sends back to get the page before this one. ``None``
+    #: means this is as far back as the Host still holds — which is not the same
+    #: as "nothing happened before", and no layer above may say it is.
+    next_sequence: int | None
+
+
+@dataclass(frozen=True)
 class AuditDeliveryState:
     event_id: str
     attempt_count: int
@@ -90,6 +101,47 @@ class AuditOutboxRepository:
 
     async def list_pending(self, *, limit: int = 200) -> list[AuditEnvelope]:
         return (await self.pending_batch(limit=limit)).events
+
+    async def list_for_owner(
+        self,
+        owner_id: str,
+        *,
+        limit: int = 50,
+        before_sequence: int | None = None,
+    ) -> OwnerGovernancePage:
+        """What has happened to this Owner's things, newest first.
+
+        Reading the outbox rather than a second table, and that is a coupling
+        worth saying out loud: **how far back this can see is decided by
+        ``purge_published``**. Nothing dispatches today, so nothing is purged and
+        this is the whole record — but whoever gives the dispatcher a purge
+        horizon is also choosing how much history a person can still read, and
+        the two must be decided together. The answer is called *recent* for that
+        reason, and no caller may present it as everything that ever happened.
+
+        Keyset on ``outbox_id`` because it is the insertion order this authority
+        already guarantees; a timestamp cursor would tie two events written in
+        the same millisecond.
+        """
+
+        capped = max(1, min(limit, 100))
+        async with self._session_factory() as session:
+            query = (
+                select(AuditOutboxRow)
+                .where(AuditOutboxRow.owner_id == owner_id)
+                .where(AuditOutboxRow.category == "governance")
+                .order_by(AuditOutboxRow.outbox_id.desc())
+                .limit(capped + 1)
+            )
+            if before_sequence is not None:
+                query = query.where(AuditOutboxRow.outbox_id < before_sequence)
+            rows = list(await session.scalars(query))
+        more = len(rows) > capped
+        page = rows[:capped]
+        return OwnerGovernancePage(
+            events=[_envelope(row) for row in page],
+            next_sequence=page[-1].outbox_id if more and page else None,
+        )
 
     async def get_delivery_state(self, event_id: str) -> AuditDeliveryState | None:
         """Read transport state without exposing the persistence session."""
