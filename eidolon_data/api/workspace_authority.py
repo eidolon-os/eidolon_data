@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.services.owner_workspace import (
+    CompanionLifecycleConflict,
     OwnerWorkspaceConflict,
     OwnerWorkspaceError,
     OwnerWorkspaceInitializationResult,
@@ -86,6 +87,41 @@ class DefaultCompanionRequest(BaseModel):
     #: with no prior read is not forced to invent one, required in practice by
     #: the management boundary, which always has just read it.
     expected_revision: int | None = Field(default=None, ge=1)
+
+
+class CompanionLifecycleRequest(BaseModel):
+    """Where this Companion should be in its life.
+
+    A desired end rather than a step, which is what lets a client that never saw
+    the answer send it again.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The ownership boundary. In the body rather than the path because it is not
+    #: what this resource is — the Companion is — and a route keyed on both would
+    #: invite a caller to think the pair is the identity.
+    owner_id: str = Field(min_length=1, max_length=64)
+    #: ``deleting`` is not offered: hard deletion is a separate data-governance
+    #: workflow, and a lifecycle route that could reach it would make the two one
+    #: button apart.
+    lifecycle_state: Literal["retiring", "archived", "active"]
+    expected_revision: int | None = Field(default=None, ge=1)
+    #: Required when retiring the Companion an Owner's unaddressed requests go
+    #: to, ignored otherwise. In the same request because between two there would
+    #: be an Owner whose Eidolon cannot answer.
+    replacement_companion_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class CompanionLifecycleResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["companion.lifecycle"] = "companion.lifecycle"
+    companion_id: str = Field(min_length=1, max_length=64)
+    lifecycle_state: CompanionLifecycleState
+    revision: int = Field(ge=1)
+    #: Who answers for this Owner now. ``None`` when nobody does.
+    default_companion_id: str | None = Field(default=None, max_length=64)
 
 
 class OwnerIdentityResponse(BaseModel):
@@ -314,6 +350,67 @@ def create_app(
             raise HTTPException(status_code=404, detail="owner not found")
         return _owner_identity(row)
 
+    @app.put(
+        "/api/workspace-authority/v1/companions/{companion_id}/lifecycle",
+        response_model=CompanionLifecycleResponse,
+        tags=["workspace-authority"],
+    )
+    async def set_companion_lifecycle(
+        companion_id: str,
+        payload: CompanionLifecycleRequest,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> CompanionLifecycleResponse:
+        """Move a Companion along its lifecycle: retiring, archived, or back.
+
+        One route for the three moves rather than three verbs, because the body
+        states a desired end and the authority decides whether it is reachable
+        from where the Companion is. That is also what makes a retry after a lost
+        answer safe: asking for the state it is already in succeeds and records
+        nothing twice.
+
+        ``owner_id`` is required and is the ownership boundary — a Companion that
+        is not this Owner's is 404, the same answer one that does not exist gets.
+        The refusals carry a ``code`` because they lead a person to different next
+        moves: a stale revision is worth a re-read, "name a replacement" is a
+        question, and "there is nobody else" is a refusal to leave an Owner with
+        no Eidolon at all.
+        """
+
+        authorize_service(authorization, token)
+        commands = {
+            "retiring": store.companion_workspaces.begin_retirement,
+            "archived": store.companion_workspaces.archive_companion,
+            "active": store.companion_workspaces.restore_companion,
+        }
+        arguments: dict[str, object] = {
+            "owner_id": payload.owner_id,
+            "companion_id": companion_id,
+            "expected_revision": payload.expected_revision,
+        }
+        if payload.lifecycle_state == "retiring":
+            arguments["replacement_companion_id"] = payload.replacement_companion_id
+        try:
+            row = await commands[payload.lifecycle_state](**arguments)
+        except CompanionLifecycleConflict as exc:
+            raise HTTPException(
+                status_code=_workspace_error_status(exc),
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        except OwnerWorkspaceError as exc:
+            raise HTTPException(
+                status_code=_workspace_error_status(exc), detail=str(exc)
+            ) from exc
+        owner = await store.owners.get(payload.owner_id)
+        return CompanionLifecycleResponse(
+            companion_id=row.companion_id,
+            lifecycle_state=row.lifecycle_state,
+            revision=row.revision,
+            # Which Companion answers now. Carried because the caller that just
+            # retired a default needs it, and asking for it separately would be a
+            # second read of a fact this transaction already settled.
+            default_companion_id=owner.default_companion_id if owner else None,
+        )
+
     @app.patch(
         "/api/workspace-authority/v1/owners/{owner_id}",
         response_model=OwnerIdentityResponse,
@@ -396,6 +493,11 @@ def _response(result: OwnerWorkspaceInitializationResult) -> WorkspaceOperationR
 
 
 def _workspace_error_status(error: OwnerWorkspaceError) -> int:
+    if isinstance(error, CompanionLifecycleConflict):
+        # ``not_found`` is one code covering "not there" and "not yours", so an
+        # id cannot be probed; everything else a lifecycle command refuses is a
+        # conflict about state the caller can re-read.
+        return 404 if error.code == "not_found" else 409
     #: Typed first. The substring checks below predate the typed errors and are
     #: kept only for the paths that still raise the base class; a status decided
     #: by reading a sentence changes when someone rewords the sentence.

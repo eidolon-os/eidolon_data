@@ -14,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 
 from eidolon_data import DataSettings, DataStore
 from eidolon_data.api.companion_authority import create_app
+from eidolon_data.api.workspace_authority import create_app as create_workspace_app
 
 pytestmark = pytest.mark.integration
 IDENTITY_SCHEMA = (
@@ -704,3 +705,121 @@ async def test_an_owner_gives_their_eidolon_a_face_and_takes_it_back(tmp_path) -
                 headers=jpeg,
             )
         ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_companion_can_be_put_away_and_brought_back_over_http(tmp_path) -> None:
+    """One route for the three moves, because the body states a desired end.
+
+    Which also makes a retry after a lost answer safe — the thing a phone does
+    constantly — and lets the authority decide whether the state asked for is
+    reachable from where the Companion is, rather than a caller deciding by
+    picking a verb.
+    """
+
+    settings = await _seed(tmp_path / "lifecycle.sqlite3")
+    writer = DataStore.open(settings)
+    await writer.companion_workspaces.provision_workspace(
+        owner_id="owner-1",
+        companion_id="companion-2",
+        genome_id="genome-2",
+        kind="conversational",
+    )
+    await writer.companion_workspaces.set_default_companion(
+        owner_id="owner-1", companion_id="companion-1"
+    )
+    await writer.close()
+    token = "workspace-authority-token-0001"
+    app = create_workspace_app(settings, service_token=token)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+        lifecycle = "/api/workspace-authority/v1/companions/companion-1/lifecycle"
+
+        # Retiring the Companion that answers for this Owner needs a successor
+        # named in the same request.
+        without = await client.put(
+            lifecycle,
+            json={"owner_id": "owner-1", "lifecycle_state": "retiring"},
+            headers=headers,
+        )
+        assert without.status_code == 409
+        assert without.json()["detail"]["code"] == "default_replacement_required"
+
+        retired = await client.put(
+            lifecycle,
+            json={
+                "owner_id": "owner-1",
+                "lifecycle_state": "retiring",
+                "replacement_companion_id": "companion-2",
+            },
+            headers=headers,
+        )
+        assert retired.status_code == 200
+        assert retired.json()["lifecycle_state"] == "retiring"
+        # The answer carries who answers now: the caller that just retired a
+        # default needs it, and asking again would re-read what this transaction
+        # already settled.
+        assert retired.json()["default_companion_id"] == "companion-2"
+
+        archived = await client.put(
+            lifecycle,
+            json={"owner_id": "owner-1", "lifecycle_state": "archived"},
+            headers=headers,
+        )
+        assert archived.status_code == 200
+
+        # Sending it again is the lost-response retry, and it succeeds.
+        again = await client.put(
+            lifecycle,
+            json={"owner_id": "owner-1", "lifecycle_state": "archived"},
+            headers=headers,
+        )
+        assert again.status_code == 200
+        assert again.json()["revision"] == archived.json()["revision"]
+
+        restored = await client.put(
+            lifecycle,
+            json={"owner_id": "owner-1", "lifecycle_state": "active"},
+            headers=headers,
+        )
+        assert restored.status_code == 200
+        # Restoring does not take the role back.
+        assert restored.json()["default_companion_id"] == "companion-2"
+
+
+@pytest.mark.asyncio
+async def test_another_owners_companion_cannot_be_archived_over_http(tmp_path) -> None:
+    """404, the same answer a Companion that does not exist gets."""
+
+    settings = await _seed(tmp_path / "lifecycle-scope.sqlite3")
+    writer = DataStore.open(settings)
+    await writer.owner_commands.create_owner(owner_id="owner-2")
+    await writer.close()
+    token = "workspace-authority-token-0001"
+    app = create_workspace_app(settings, service_token=token)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+        theirs = await client.put(
+            "/api/workspace-authority/v1/companions/companion-1/lifecycle",
+            json={"owner_id": "owner-2", "lifecycle_state": "retiring"},
+            headers=headers,
+        )
+        absent = await client.put(
+            "/api/workspace-authority/v1/companions/companion-nowhere/lifecycle",
+            json={"owner_id": "owner-2", "lifecycle_state": "retiring"},
+            headers=headers,
+        )
+
+        assert theirs.status_code == 404
+        assert absent.status_code == 404
+        assert theirs.json()["detail"] == absent.json()["detail"]
