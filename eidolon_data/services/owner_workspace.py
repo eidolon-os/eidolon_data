@@ -502,6 +502,11 @@ class CompanionWorkspaceService:
                     subject_id=owner_id,
                     action="owner.default_companion_changed",
                     payload={
+                        # Both sides of the change. An event that says the
+                        # pointer moved without saying what it moved to is one
+                        # nobody can read — including the person whose Eidolon
+                        # it is.
+                        "companion_id": replacement.companion_id,
                         "previous_companion_id": companion_id,
                         "reason": "retirement",
                     },
@@ -722,7 +727,10 @@ class CompanionWorkspaceService:
                         subject_type="owner",
                         subject_id=owner_id,
                         action="owner.default_companion_changed",
-                        payload={"previous_companion_id": previous_id},
+                        payload={
+                            "companion_id": companion_id,
+                            "previous_companion_id": previous_id,
+                        },
                     )
                 )
             realm, created = await _ensure_memory_realm_in_session(

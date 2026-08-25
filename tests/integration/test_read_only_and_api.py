@@ -954,6 +954,15 @@ async def test_what_happened_to_this_owners_things_is_readable_newest_first(
         # Companions arriving, the pointer moving, and the one being put away.
         assert "companion.workspace.initialized" in actions
         assert "owner.default_companion_changed" in actions
+        # Both sides of the change: an event that says the pointer moved without
+        # saying what it moved to is one nobody can read.
+        moved = next(
+            event
+            for event in body["events"]
+            if event["action"] == "owner.default_companion_changed"
+        )
+        assert moved["payload"]["companion_id"] == "companion-2"
+        assert moved["payload"]["previous_companion_id"] == "companion-1"
         assert actions[-1] == "owner.created"
         assert body["events"][0]["subject_id"] == "companion-1"
 
