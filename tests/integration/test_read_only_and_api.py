@@ -823,3 +823,70 @@ async def test_another_owners_companion_cannot_be_archived_over_http(tmp_path) -
         assert theirs.status_code == 404
         assert absent.status_code == 404
         assert theirs.json()["detail"] == absent.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_an_archived_companion_will_not_hand_out_a_runtime_snapshot(tmp_path) -> None:
+    """What "put away" has to mean, one layer down.
+
+    The lifecycle route changes a row; this is the place that row has to be
+    obeyed. Asking for a runtime snapshot is how a session begins, so a
+    Companion that is not active must not produce one — otherwise archiving is
+    bookkeeping and a device that already knows the id keeps talking to
+    something its owner retired.
+
+    412 rather than 404: it is there, and it is not answering. A caller can tell
+    that apart from an id that names nothing, and only one of the two is worth
+    showing a person as "you put this one away".
+    """
+
+    settings = await _seed(tmp_path / "archived-runtime.sqlite3")
+    writer = DataStore.open(settings)
+    await writer.companion_workspaces.provision_workspace(
+        owner_id="owner-1", companion_id="companion-2", genome_id="genome-2"
+    )
+    await writer.companion_workspaces.set_default_companion(
+        owner_id="owner-1", companion_id="companion-2"
+    )
+    await writer.close()
+
+    workspace_token = "workspace-authority-token-0001"
+    runtime_token = "companion-authority-token-000001"
+    workspace = create_workspace_app(settings, service_token=workspace_token)
+    runtime = create_app(
+        settings, service_token=runtime_token, memory_roster_token=MEMORY_ROSTER_TOKEN
+    )
+    async with (
+        workspace.router.lifespan_context(workspace),
+        runtime.router.lifespan_context(runtime),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=workspace), base_url="http://workspace.test"
+        ) as workspace_client,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=runtime), base_url="http://runtime.test"
+        ) as runtime_client,
+    ):
+        snapshot = "/api/companion-authority/v1/companions/companion-1/runtime-snapshot"
+        lifecycle = "/api/workspace-authority/v1/companions/companion-1/lifecycle"
+        runtime_headers = {"Authorization": f"Bearer {runtime_token}"}
+        workspace_headers = {"Authorization": f"Bearer {workspace_token}"}
+
+        assert (await runtime_client.get(snapshot, headers=runtime_headers)).status_code == 200
+
+        for state in ("retiring", "archived"):
+            moved = await workspace_client.put(
+                lifecycle,
+                json={"owner_id": "owner-1", "lifecycle_state": state},
+                headers=workspace_headers,
+            )
+            assert moved.status_code == 200
+            refused = await runtime_client.get(snapshot, headers=runtime_headers)
+            assert refused.status_code == 412, state
+
+        brought_back = await workspace_client.put(
+            lifecycle,
+            json={"owner_id": "owner-1", "lifecycle_state": "active"},
+            headers=workspace_headers,
+        )
+        assert brought_back.status_code == 200
+        assert (await runtime_client.get(snapshot, headers=runtime_headers)).status_code == 200

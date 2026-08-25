@@ -529,6 +529,14 @@ def create_app(
         companion = await store.companions.get(companion_id)
         if companion is None:
             raise HTTPException(status_code=404, detail="companion not found")
+        if companion.lifecycle_state != "active":
+            # Asking for a runtime snapshot is how a session begins, so this is
+            # where "put away" has to mean something. Without it, archiving
+            # changed a row and nothing else: a device that already knew the id
+            # could still start talking to a Companion its owner had retired.
+            # Sessions already running hold the snapshot they were given — this
+            # stops new ones, which is exactly what retiring means.
+            raise HTTPException(status_code=412, detail="companion is not active")
         return await _runtime_snapshot(store, companion, genome_id=genome_id)
 
     @app.get(
