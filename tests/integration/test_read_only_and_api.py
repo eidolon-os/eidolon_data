@@ -531,7 +531,24 @@ async def test_going_back_is_a_new_chapter_not_an_undo(tmp_path) -> None:
     wonder what happened.
     """
 
-    app, token = await _companion_authority(tmp_path)
+    settings = await _seed(tmp_path / "authority.sqlite3")
+    # A Companion that has been two things, because "going back" means nothing
+    # for one that has only ever been itself — and a test that passes because
+    # there was nowhere to go is a test that proves nothing.
+    writer = DataStore.open(settings)
+    await writer.persona_commands.create_genome(
+        genome_id="genome-2",
+        companion_id="companion-1",
+        owner_id="owner-1",
+        event_id="audit-genome-2",
+        version=2,
+        base_genome_id="genome-1",
+    )
+    await writer.close()
+    token = "companion-authority-token-000001"
+    app = create_app(
+        settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN
+    )
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -541,17 +558,42 @@ async def test_going_back_is_a_new_chapter_not_an_undo(tmp_path) -> None:
         headers = {"Authorization": f"Bearer {token}"}
         base = "/api/companion-authority/v1/companions/companion-1"
         before = (await client.get(f"{base}/persona-timeline", headers=headers)).json()
-        original = before["chapters"][0]
+        original = before["chapters"][-1]
 
         # Nothing to go back to yet: it is already what it was.
+        current = before["chapters"][0]
         already = await client.post(
             f"{base}/persona-restorations",
-            json={"genome_id": original["genome_id"]},
+            json={"genome_id": current["genome_id"]},
             headers=headers,
         )
 
         assert already.status_code == 409
-        assert original["is_current"] is True
+        assert already.json()["detail"]["code"] == "state_not_eligible"
+        assert current["is_current"] is True
+        assert original["is_current"] is False
+
+        # And the path that actually goes back. Until this test existed the only
+        # coverage of this route was the refusal above, and the success path
+        # raised a foreign-key error on every call — a restore button that could
+        # only ever 500, projected all the way to a phone.
+        moved_on = await client.post(
+            f"{base}/persona-restorations",
+            json={
+                "genome_id": original["genome_id"],
+                "change_summary": "回到了那时候的样子",
+            },
+            headers=headers,
+        )
+
+        assert moved_on.status_code == 200, moved_on.text
+        # Appended, not rewound: a new chapter carrying the old content, so the
+        # record keeps what happened in between and says when someone went back.
+        assert moved_on.json()["genome_id"] not in {original["genome_id"], "genome-2"}
+        assert moved_on.json()["is_current"] is True
+        after = (await client.get(f"{base}/persona-timeline", headers=headers)).json()
+        assert [chapter["version"] for chapter in after["chapters"]] == [3, 2, 1]
+        assert after["chapters"][0]["restored_from_version"] == 1
 
 
 @pytest.mark.asyncio

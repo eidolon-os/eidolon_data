@@ -295,3 +295,62 @@ async def test_restoring_what_it_already_is_is_not_a_race(store) -> None:
         )
 
     assert already.value.code == "state_not_eligible"
+
+
+async def test_two_ways_of_going_back_that_do_not_agree(store) -> None:
+    """A characterization test, not an endorsement.
+
+    This authority has two "go back" implementations and they mean different
+    things:
+
+    - ``PersonaGenomes.restore`` **appends** a chapter carrying the older
+      content, so the record keeps the months in between and says when someone
+      went back. It is what the HTTP route and the management surface use, and
+      every product-facing docstring describes this model.
+    - ``rollback_to_genome`` / ``reset_to_origin`` **move the pointer**. The
+      chapters in between stay in the table but nothing records that a person
+      rewound past them, and the version sequence no longer tells the story.
+
+    Only the first has a caller outside this process. The second pair is reached
+    only through the in-process persona path — which on a product Host is not
+    wired at all, because Data is a separate service there and no HTTP route
+    exposes them. So this is pinned rather than fixed: whoever gives "reset to
+    origin" a caller has to decide which of the two "going back" means, and this
+    test is here so that decision is made deliberately instead of discovered
+    afterwards.
+    """
+
+    workspace = await _workspace(store)
+    await store.persona_commands.create_genome(
+        genome_id="genome-v2",
+        companion_id="companion-1",
+        owner_id="owner-1",
+        event_id="audit-v2",
+        version=2,
+        base_genome_id="genome-origin",
+    )
+
+    # Appending: a new chapter, and the history grows.
+    restored = await store.persona_genomes.restore(
+        companion_id="companion-1",
+        genome_id="genome-origin",
+        change_summary="回到了那时候的样子",
+    )
+    versions = [
+        row.version for row in await store.persona_genomes.list_for_companion("companion-1")
+    ]
+    assert restored.genome_id not in {"genome-origin", "genome-v2"}
+    assert versions == [1, 2, 3]
+    assert (
+        await store.persona_genomes.get_current("companion-1")
+    ).genome_id == restored.genome_id
+
+    # Rewinding: no new chapter, and nothing in the record says it happened.
+    rewound = await store.persona_commands.rollback_to_genome(
+        owner_id="owner-1", companion_id="companion-1", genome_id="genome-origin"
+    )
+    assert rewound.genome_id == "genome-origin"
+    assert [
+        row.version for row in await store.persona_genomes.list_for_companion("companion-1")
+    ] == versions
+    assert (await store.persona_genomes.get_current("companion-1")).genome_id == "genome-origin"

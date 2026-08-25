@@ -135,6 +135,14 @@ class PersonaRepository(Repository):
                 updated_at=now,
             )
             session.add(restored)
+            # Flushed before the pointer moves. ``companions.current_genome_id``
+            # is a foreign key into this table, and the unit of work has no
+            # dependency to order on — the pointer is a plain string, not a
+            # relationship — so without this the UPDATE can reach SQLite before
+            # the INSERT and the constraint fails. Every restore did, and nothing
+            # noticed: the only test of this route exercised the "already that"
+            # refusal, so the success path had never run.
+            await session.flush()
             companion.current_genome_id = restored.genome_id
             await session.commit()
             await session.refresh(restored)
