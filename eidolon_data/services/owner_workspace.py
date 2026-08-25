@@ -19,7 +19,10 @@ from eidolon_sdk.biz.contracts.companion import (
 from eidolon_sdk.biz.persona import (
     PERSONA_GENOME_SCHEMA,
     PERSONA_REALIZER,
+    PersonaAuthoring,
+    PersonaAuthoringDraft,
     build_default_persona_genome,
+    build_persona_genome_from_draft,
     normalize_persona_genome,
     persona_genome_hash,
     persona_genome_to_json,
@@ -757,6 +760,7 @@ class CompanionWorkspaceService:
         request_fingerprint: str,
         companion_display_name: str,
         kind: str = "conversational",
+        persona: PersonaAuthoring | None = None,
     ) -> CompanionProvisionResult:
         """Add a Companion to an Owner who already has one, exactly once.
 
@@ -772,6 +776,14 @@ class CompanionWorkspaceService:
         Companion shares the one its Owner already has, which is why this can
         report ``memory_realm_created=False`` — and why the derived realm id is
         used only when there was no realm at all.
+
+        ``persona`` is who this Eidolon starts out as, in the person's own
+        words. Absent, it is the template — which is what every Companion got
+        for a while after the authoring screen was removed, meaning two
+        Companions differed only by name. The genome is built *here* rather than
+        by the caller because this is the authority that owns personas: a
+        management layer composing a genome would be a second place that decides
+        what an unauthored Eidolon is.
         """
 
         owner_id = _validate_owner_id(owner_id)
@@ -814,11 +826,25 @@ class CompanionWorkspaceService:
                 },
                 genome_id=ids["genome_id"],
                 genome_source_json={
-                    "source_type": "companion_provision",
+                    # A genome somebody wrote and a genome the Host defaulted to
+                    # are different facts, and the record has to be able to tell
+                    # them apart long after both look like text in a column.
+                    "source_type": (
+                        "owner_authored" if persona is not None else "companion_provision"
+                    ),
                     "owner_id": owner_id,
                     "operation_id": canonical_operation_id,
                 },
-                genome_json=None,
+                genome_json=persona_genome_to_json(
+                    build_persona_genome_from_draft(
+                        PersonaAuthoringDraft.for_companion(
+                            persona, name=display_name
+                        ),
+                        origin=(
+                            "owner_authored" if persona is not None else "template"
+                        ),
+                    )
+                ),
                 realm_id=ids["realm_id"],
                 memory_engine="mempalace",
                 memory_engine_config_json=None,

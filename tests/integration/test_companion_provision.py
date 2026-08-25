@@ -20,7 +20,7 @@ from sqlalchemy import func, select
 
 from eidolon_data import DataSettings, DataStore
 from eidolon_data.api.workspace_authority import create_app
-from eidolon_data.schema import MemoryRealmRow
+from eidolon_data.schema import CompanionRow, MemoryRealmRow, PersonaGenomeRow
 
 pytestmark = [pytest.mark.asyncio]
 
@@ -314,3 +314,194 @@ async def test_an_unknown_field_is_refused_rather_than_ignored(client) -> None:
     )
 
     assert answered.status_code == 422
+
+
+async def _genome_of(store: DataStore, companion_id: str) -> dict:
+    """The genome row this Companion points at, as written."""
+
+    async with store.companions._session_factory() as session:
+        companion = await session.get(CompanionRow, companion_id)
+        assert companion is not None, companion_id
+        row = await session.get(PersonaGenomeRow, companion.current_genome_id)
+        assert row is not None, "a provisioned Companion must point at a genome"
+        return {"genome": row.genome_json, "source": row.source_json}
+
+
+async def test_asking_for_nothing_still_writes_a_whole_person(client) -> None:
+    """The behaviour that was there before authoring came back, unchanged.
+
+    Somebody who just wants another Eidolon should not have to describe one, so
+    an absent ``persona`` is the template — and it must be a *complete* genome,
+    not an empty one waiting to be filled in later.
+    """
+
+    http, store = client
+    await _owner_with_one(store)
+    response = await http.put(
+        PATH.format(owner="owner-1", operation=OPERATION),
+        json={"companion_display_name": "小南"},
+        headers=_auth(),
+    )
+    assert response.status_code == 200, response.text
+
+    written = await _genome_of(store, response.json()["companion"]["companion_id"])
+    assert written["genome"]["constitution"]["name"] == "小南"
+    assert written["genome"]["constitution"]["values"], "the template has values"
+    assert written["genome"]["character"]["portrait"], "and a portrait"
+    assert written["source"]["source_type"] == "companion_provision"
+    assert written["genome"]["provenance"]["origin"] == "template"
+
+
+async def test_what_a_person_wrote_is_what_gets_stored(client) -> None:
+    """The whole point of the screen.
+
+    Two Companions used to differ only by name, because the authoring surface
+    was removed and every genome came from the same template. This asserts the
+    opposite end: the sentences somebody chose reach the row.
+    """
+
+    http, store = client
+    await _owner_with_one(store)
+    response = await http.put(
+        PATH.format(owner="owner-1", operation=OPERATION),
+        json={
+            "companion_display_name": "小南",
+            "persona": {
+                "self_concept": "我是一个会记得你说过的话的伙伴",
+                "character_portrait": "安静，话不多，但记得住",
+                "relationship_narrative": "我们是从一次很长的深夜对话开始的",
+                "voice_portrait": "短句，不用感叹号",
+                "values": ["诚实"],
+                "boundaries": ["不替他做决定"],
+                "commitments": ["每周问一次他睡得好不好"],
+                "pinned_facts": ["他有一只叫阿力的猫"],
+                "safety_boundaries": ["不提他父亲"],
+                "behavior_guidance": ["先问再答"],
+                "dialogue_examples": ["「今天怎么样？」"],
+            },
+        },
+        headers=_auth(),
+    )
+    assert response.status_code == 200, response.text
+
+    written = await _genome_of(store, response.json()["companion"]["companion_id"])
+    genome = written["genome"]
+    assert genome["constitution"]["self_concept"] == "我是一个会记得你说过的话的伙伴"
+    assert genome["constitution"]["values"] == ["诚实"]
+    assert genome["constitution"]["boundaries"] == ["不替他做决定"]
+    assert genome["character"]["portrait"] == "安静，话不多，但记得住"
+    assert genome["relationship"]["narrative"] == "我们是从一次很长的深夜对话开始的"
+    assert genome["relationship"]["commitments"] == ["每周问一次他睡得好不好"]
+    assert genome["relationship"]["pinned_facts"] == ["他有一只叫阿力的猫"]
+    assert genome["relationship"]["safety_boundaries"] == ["不提他父亲"]
+    assert genome["expression"]["voice_portrait"] == "短句，不用感叹号"
+    assert genome["expression"]["behavior_guidance"] == ["先问再答"]
+    assert genome["expression"]["dialogue_examples"] == ["「今天怎么样？」"]
+    # Authored and defaulted are different facts, and the record says which.
+    assert written["source"]["source_type"] == "owner_authored"
+    assert genome["provenance"]["origin"] == "owner_authored"
+
+
+async def test_a_retry_carrying_different_authoring_is_a_conflict(client) -> None:
+    """A personality is not something to overwrite on a lost response.
+
+    The request is fingerprinted whole, so authoring is inside the comparison
+    that already protects the name. Without that, a retry from a phone whose
+    form had changed would silently replace who somebody decided their Eidolon
+    was — and the first answer would have said it worked.
+    """
+
+    http, store = client
+    await _owner_with_one(store)
+    first = await http.put(
+        PATH.format(owner="owner-1", operation=OPERATION),
+        json={"companion_display_name": "小南", "persona": {"self_concept": "我记得"}},
+        headers=_auth(),
+    )
+    assert first.status_code == 200, first.text
+
+    again = await http.put(
+        PATH.format(owner="owner-1", operation=OPERATION),
+        json={"companion_display_name": "小南", "persona": {"self_concept": "我不记得"}},
+        headers=_auth(),
+    )
+    assert again.status_code == 409, again.text
+
+    # And the same request twice is still the same Companion, not a second one.
+    replay = await http.put(
+        PATH.format(owner="owner-1", operation=OPERATION),
+        json={"companion_display_name": "小南", "persona": {"self_concept": "我记得"}},
+        headers=_auth(),
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["replayed"] is True
+
+
+async def test_the_template_is_what_asking_for_nothing_would_have_written(
+    client,
+) -> None:
+    """The read a form starts from, checked against the write it precedes.
+
+    If these two ever disagree, the screen shows a personality this Host does
+    not use, and the person edits a description of something else. Asserted
+    across the two routes rather than inside one builder, because that is where
+    the disagreement would actually live.
+    """
+
+    http, store = client
+    await _owner_with_one(store)
+
+    template = await http.get(
+        "/api/workspace-authority/v1/persona-authoring-template", headers=_auth()
+    )
+    assert template.status_code == 200, template.text
+
+    # Send the template straight back, untouched.
+    created = await http.put(
+        PATH.format(owner="owner-1", operation=OPERATION),
+        json={"companion_display_name": "小南", "persona": template.json()},
+        headers=_auth(),
+    )
+    assert created.status_code == 200, created.text
+    round_tripped = await _genome_of(
+        store, created.json()["companion"]["companion_id"]
+    )
+
+    # ... and compare with what asking for nothing writes.
+    default = await http.put(
+        PATH.format(owner="owner-1", operation=OTHER_OPERATION),
+        json={"companion_display_name": "小南"},
+        headers=_auth(),
+    )
+    assert default.status_code == 200, default.text
+    defaulted = await _genome_of(store, default.json()["companion"]["companion_id"])
+
+    for section in ("constitution", "character", "relationship", "expression"):
+        assert round_tripped["genome"][section] == defaulted["genome"][section], section
+
+
+async def test_the_template_needs_the_authority_credential(client) -> None:
+    """A product default is not a secret, but this plane has one rule."""
+
+    http, _store = client
+    assert (
+        await http.get("/api/workspace-authority/v1/persona-authoring-template")
+    ).status_code == 401
+
+
+async def test_an_unknown_authoring_field_is_refused_rather_than_ignored(
+    client,
+) -> None:
+    """Silently dropping a field is how a person loses a sentence they wrote."""
+
+    http, store = client
+    await _owner_with_one(store)
+    response = await http.put(
+        PATH.format(owner="owner-1", operation=OPERATION),
+        json={
+            "companion_display_name": "小南",
+            "persona": {"favourite_colour": "青"},
+        },
+        headers=_auth(),
+    )
+    assert response.status_code == 422, response.text

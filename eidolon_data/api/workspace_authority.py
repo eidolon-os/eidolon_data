@@ -13,6 +13,7 @@ from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
+from eidolon_sdk.biz.persona import PersonaAuthoring
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.audit import run_audit_dispatcher
 from eidolon_data.services.owner_workspace import (
@@ -46,6 +47,15 @@ class CompanionProvisionRequest(BaseModel):
 
     companion_display_name: str = Field(min_length=1, max_length=128)
     kind: str = Field(default="conversational", min_length=1, max_length=32)
+    #: Who this Eidolon starts out as, in the person's own words. Absent means
+    #: the template — and because the whole request is fingerprinted, a retry
+    #: carrying *different* authoring is a conflict rather than a quiet
+    #: overwrite of a personality somebody chose.
+    #:
+    #: The SDK's shape, not a copy of it: the form a client shows, the request
+    #: it sends, and what this authority builds from are then one thing, and a
+    #: field added to the genome cannot be silently dropped in transit.
+    persona: PersonaAuthoring | None = None
 
 
 class ProvisionedCompanionResponse(BaseModel):
@@ -374,6 +384,36 @@ def create_app(
             next_cursor=page.next_sequence,
         )
 
+    @app.get(
+        "/api/workspace-authority/v1/persona-authoring-template",
+        response_model=PersonaAuthoring,
+        tags=["workspace-authority"],
+    )
+    async def persona_authoring_template(
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> PersonaAuthoring:
+        """Who an Eidolon is before anybody has said anything about it.
+
+        Served by the authority that writes genomes rather than composed by a
+        screen, and that is the whole point: this has to be *what would actually
+        be written* if the form came back untouched. A client filling the form
+        from its own constants would show a personality this Host might not use
+        — and the person would have edited a description of something else.
+
+        Owner-independent and unauthenticated beyond the service token: it is a
+        product default, not anybody's data. Answering it per Owner would invite
+        a per-Owner default nobody asked for.
+
+        Round-trippable on purpose. The response is exactly the shape the
+        provision request accepts, so "read it, let someone edit it, send it
+        back" needs no translation step in between — and a field added to the
+        genome shows up on both ends at once instead of being quietly dropped by
+        whichever side forgot.
+        """
+
+        authorize_service(authorization, token)
+        return PersonaAuthoring()
+
     @app.put(
         "/api/workspace-authority/v1/owners/{owner_id}/companion-provisions/{operation_id}",
         response_model=CompanionProvisionResponse,
@@ -402,6 +442,7 @@ def create_app(
                 request_fingerprint=fingerprint,
                 companion_display_name=payload.companion_display_name,
                 kind=payload.kind,
+                persona=payload.persona,
             )
         except OwnerWorkspaceError as exc:
             raise HTTPException(
