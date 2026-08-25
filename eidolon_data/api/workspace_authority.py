@@ -379,7 +379,14 @@ def create_app(
         authorize_service(authorization, token)
         commands = {
             "retiring": store.companion_workspaces.begin_retirement,
-            "archived": store.companion_workspaces.archive_companion,
+            # Reaching ``archived`` from ``active`` is one transaction, not two
+            # requests. Nothing runs between the two halves today — no drain
+            # exists, and BodyAssignment does not exist at all — so asking a
+            # caller to make both calls would not enforce the order, it would
+            # only leave a Companion stuck in ``retiring`` when a Host dies in
+            # between. ``begin_retirement`` above is still here for the
+            # coordinator that will have work to do in the middle.
+            "archived": store.companion_workspaces.put_away_companion,
             "active": store.companion_workspaces.restore_companion,
         }
         arguments: dict[str, object] = {
@@ -387,7 +394,7 @@ def create_app(
             "companion_id": companion_id,
             "expected_revision": payload.expected_revision,
         }
-        if payload.lifecycle_state == "retiring":
+        if payload.lifecycle_state in {"retiring", "archived"}:
             arguments["replacement_companion_id"] = payload.replacement_companion_id
         try:
             row = await commands[payload.lifecycle_state](**arguments)

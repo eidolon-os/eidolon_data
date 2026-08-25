@@ -453,52 +453,76 @@ class CompanionWorkspaceService:
 
         async with self._session_factory() as session, session.begin():
             companion = await _owned_companion(session, owner_id, companion_id)
-            if companion.lifecycle_state == "retiring":
-                return companion
-            _require_transition(companion, "retiring", expected_revision)
-            owner = await session.get(OwnerRow, owner_id)
-            if owner is None:
-                raise OwnerWorkspaceNotFound("owner not found")
-            replacement: CompanionRow | None = None
-            if owner.default_companion_id == companion_id:
-                replacement = await _eligible_replacement(
-                    session,
-                    owner_id=owner_id,
-                    retiring_id=companion_id,
-                    replacement_companion_id=replacement_companion_id,
-                )
-                owner.default_companion_id = replacement.companion_id
-                owner.revision += 1
-                owner.updated_at = utc_now()
-                session.add(
-                    governance_fact(
-                        owner_id=owner_id,
-                        subject_type="owner",
-                        subject_id=owner_id,
-                        action="owner.default_companion_changed",
-                        payload={
-                            "previous_companion_id": companion_id,
-                            "reason": "retirement",
-                        },
-                    )
-                )
-            companion.lifecycle_state = "retiring"
-            companion.revision += 1
-            companion.updated_at = utc_now()
+            await self._retire(
+                session,
+                owner_id=owner_id,
+                companion=companion,
+                expected_revision=expected_revision,
+                replacement_companion_id=replacement_companion_id,
+            )
+            return companion
+
+    async def _retire(
+        self,
+        session,
+        *,
+        owner_id: str,
+        companion: CompanionRow,
+        expected_revision: int | None,
+        replacement_companion_id: str | None,
+    ) -> None:
+        """The retiring half, on a session someone else opened.
+
+        Split out so that "put this away" can be one transaction while the two
+        steps stay separately callable. See ``put_away_companion``.
+        """
+
+        companion_id = companion.companion_id
+        if companion.lifecycle_state == "retiring":
+            return
+        _require_transition(companion, "retiring", expected_revision)
+        owner = await session.get(OwnerRow, owner_id)
+        if owner is None:
+            raise OwnerWorkspaceNotFound("owner not found")
+        replacement: CompanionRow | None = None
+        if owner.default_companion_id == companion_id:
+            replacement = await _eligible_replacement(
+                session,
+                owner_id=owner_id,
+                retiring_id=companion_id,
+                replacement_companion_id=replacement_companion_id,
+            )
+            owner.default_companion_id = replacement.companion_id
+            owner.revision += 1
+            owner.updated_at = utc_now()
             session.add(
                 governance_fact(
                     owner_id=owner_id,
-                    subject_type="companion",
-                    subject_id=companion_id,
-                    action="companion.retirement_begun",
+                    subject_type="owner",
+                    subject_id=owner_id,
+                    action="owner.default_companion_changed",
                     payload={
-                        "replacement_companion_id": (
-                            replacement.companion_id if replacement else None
-                        )
+                        "previous_companion_id": companion_id,
+                        "reason": "retirement",
                     },
                 )
             )
-            return companion
+        companion.lifecycle_state = "retiring"
+        companion.revision += 1
+        companion.updated_at = utc_now()
+        session.add(
+            governance_fact(
+                owner_id=owner_id,
+                subject_type="companion",
+                subject_id=companion_id,
+                action="companion.retirement_begun",
+                payload={
+                    "replacement_companion_id": (
+                        replacement.companion_id if replacement else None
+                    )
+                },
+            )
+        )
 
     async def archive_companion(
         self,
@@ -521,31 +545,101 @@ class CompanionWorkspaceService:
 
         async with self._session_factory() as session, session.begin():
             companion = await _owned_companion(session, owner_id, companion_id)
-            if companion.lifecycle_state == "archived":
-                return companion
-            _require_transition(companion, "archived", expected_revision)
-            owner = await session.get(OwnerRow, owner_id)
-            if owner is not None and owner.default_companion_id == companion_id:
-                # Unreachable through ``begin_retirement``, which moves the
-                # pointer first. Refused rather than quietly cleared: a pointer
-                # that survived retirement means something wrote it in between,
-                # and archiving on top of that would leave an Owner whose
-                # unaddressed requests go nowhere.
-                raise CompanionLifecycleConflict(
-                    "companion is still this owner's default",
-                    code="default_replacement_required",
-                )
-            companion.lifecycle_state = "archived"
-            companion.revision += 1
-            companion.updated_at = utc_now()
-            session.add(
-                governance_fact(
-                    owner_id=owner_id,
-                    subject_type="companion",
-                    subject_id=companion_id,
-                    action="companion.archived",
-                )
+            await self._archive(
+                session,
+                owner_id=owner_id,
+                companion=companion,
+                expected_revision=expected_revision,
             )
+            return companion
+
+    async def _archive(
+        self,
+        session,
+        *,
+        owner_id: str,
+        companion: CompanionRow,
+        expected_revision: int | None,
+    ) -> None:
+        """The archiving half, on a session someone else opened."""
+
+        companion_id = companion.companion_id
+        if companion.lifecycle_state == "archived":
+            return
+        _require_transition(companion, "archived", expected_revision)
+        owner = await session.get(OwnerRow, owner_id)
+        if owner is not None and owner.default_companion_id == companion_id:
+            # Unreachable through retirement, which moves the pointer first.
+            # Refused rather than quietly cleared: a pointer that survived
+            # retirement means something wrote it in between, and archiving on
+            # top of that would leave an Owner whose unaddressed requests go
+            # nowhere.
+            raise CompanionLifecycleConflict(
+                "companion is still this owner's default",
+                code="default_replacement_required",
+            )
+        companion.lifecycle_state = "archived"
+        companion.revision += 1
+        companion.updated_at = utc_now()
+        session.add(
+            governance_fact(
+                owner_id=owner_id,
+                subject_type="companion",
+                subject_id=companion_id,
+                action="companion.archived",
+            )
+        )
+
+    async def put_away_companion(
+        self,
+        *,
+        owner_id: str,
+        companion_id: str,
+        expected_revision: int | None = None,
+        replacement_companion_id: str | None = None,
+    ) -> CompanionRow:
+        """Put it away: retire it and archive it, in one transaction.
+
+        The two steps exist because something is meant to happen between them —
+        sessions drain, Body assignments are handed back — and **nothing does
+        yet**: no per-Companion drain primitive exists, and BodyAssignment does
+        not exist at all. While that is true, making a caller issue two commands
+        does not enforce the order, it only invents a state a person can get
+        stuck in: a Host that dies between the two leaves a Companion
+        ``retiring``, which is neither where they were nor where they asked to
+        be.
+
+        So the product action is one transaction, and ``retiring`` stops being
+        observable through it. Both governance facts are still recorded — the
+        record says the retirement happened, because it did.
+
+        **When a step does appear between them, this command is the thing that
+        must go**, and a coordinator uses ``begin_retirement`` and
+        ``archive_companion`` around its own work. They are still here, still
+        refuse an out-of-order move, and are still what a workflow would call.
+        Deleting this one at that point is a smaller change than discovering
+        that it silently skipped a drain.
+        """
+
+        async with self._session_factory() as session, session.begin():
+            companion = await _owned_companion(session, owner_id, companion_id)
+            if companion.lifecycle_state != "archived":
+                await self._retire(
+                    session,
+                    owner_id=owner_id,
+                    companion=companion,
+                    expected_revision=expected_revision,
+                    replacement_companion_id=replacement_companion_id,
+                )
+                # The revision moved in the half above, so the caller's is no
+                # longer the one to compare against — it was already compared,
+                # once, against the state this transaction started from.
+                await self._archive(
+                    session,
+                    owner_id=owner_id,
+                    companion=companion,
+                    expected_revision=None,
+                )
             return companion
 
     async def restore_companion(

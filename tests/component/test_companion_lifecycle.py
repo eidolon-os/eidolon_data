@@ -68,10 +68,14 @@ async def test_retiring_stops_new_work_before_archiving_ends_it(store) -> None:
     assert archived.revision > retired.revision
 
 
-async def test_an_active_companion_cannot_be_archived_in_one_step(store) -> None:
-    """The invariant that makes the workflow's order real rather than advisory:
-    draining sessions and handing back Body assignments happen between the two
-    commands, and a caller that could skip here would skip them."""
+async def test_the_archive_step_alone_still_refuses_an_active_companion(store) -> None:
+    """The granular command keeps the order real for whoever coordinates steps.
+
+    A workflow that drains sessions and hands back Body assignments calls these
+    two around its own work, and must not be able to skip from active straight
+    to archived. What changed is only that the *product* action no longer asks a
+    caller to make two calls — see ``put_away_companion`` below.
+    """
 
     await _owner_with(store)
 
@@ -81,6 +85,69 @@ async def test_an_active_companion_cannot_be_archived_in_one_step(store) -> None
         )
 
     assert refused.value.code == "transition_not_allowed"
+
+
+async def test_putting_one_away_is_one_transaction_with_no_state_in_between(
+    store,
+) -> None:
+    """Two steps, one commit — because nothing runs between them yet.
+
+    While no drain exists and BodyAssignment does not exist at all, making a
+    caller issue both commands does not enforce an order; it only creates a
+    state a person can get stuck in, since a Host that dies in between leaves a
+    Companion ``retiring`` — neither where they were nor where they asked to be.
+
+    The record still says both things happened, because both did.
+    """
+
+    await _owner_with(store)
+
+    away = await store.companion_workspaces.put_away_companion(
+        owner_id="owner-1", companion_id="companion-2"
+    )
+
+    assert away.lifecycle_state == "archived"
+    facts = [row.action for row in await store.audit_outbox.list_pending()]
+    assert "companion.retirement_begun" in facts
+    assert "companion.archived" in facts
+
+
+async def test_a_put_away_that_is_refused_leaves_it_exactly_where_it_was(
+    store,
+) -> None:
+    """The reason one transaction is worth having.
+
+    The refusal comes from the first half, and the second never runs — so a
+    Companion whose retirement was refused is still active, not half-retired.
+    Two requests could not promise this.
+    """
+
+    await _owner_with(store, companions=1)
+
+    with pytest.raises(CompanionLifecycleConflict) as refused:
+        await store.companion_workspaces.put_away_companion(
+            owner_id="owner-1", companion_id="companion-1"
+        )
+
+    assert refused.value.code == "last_active_companion"
+    still = await store.companions.get("companion-1")
+    assert still.lifecycle_state == "active"
+    assert (await store.owners.get("owner-1")).default_companion_id == "companion-1"
+
+
+async def test_putting_away_one_that_is_already_retiring_finishes_it(store) -> None:
+    """So a Companion left retiring by anything else is not a dead end."""
+
+    await _owner_with(store)
+    await store.companion_workspaces.begin_retirement(
+        owner_id="owner-1", companion_id="companion-2"
+    )
+
+    away = await store.companion_workspaces.put_away_companion(
+        owner_id="owner-1", companion_id="companion-2"
+    )
+
+    assert away.lifecycle_state == "archived"
 
 
 async def test_archiving_the_default_hands_the_role_over_in_the_same_request(
