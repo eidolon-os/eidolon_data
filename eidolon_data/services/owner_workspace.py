@@ -11,6 +11,11 @@ import re
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
+from eidolon_sdk.biz.contracts.companion import (
+    COMPANION_LIFECYCLE_TRANSITIONS,
+    DEFAULT_ELIGIBLE_LIFECYCLE_STATES,
+    CompanionLifecycleConflictCode,
+)
 from eidolon_sdk.biz.persona import (
     PERSONA_GENOME_SCHEMA,
     PERSONA_REALIZER,
@@ -67,6 +72,21 @@ class OwnerWorkspaceConflict(OwnerWorkspaceError):
     read the exception's text for substrings like "already in use", which means
     a rephrased sentence silently changes an HTTP status.
     """
+
+
+class CompanionLifecycleConflict(OwnerWorkspaceError):
+    """A lifecycle command the authority refused, and why in a word.
+
+    Its own type carrying a ``code`` rather than a recognisable sentence: these
+    refusals travel two process boundaries before a person reads one, and they
+    call for different things — a re-read, a question ("which Companion should
+    answer instead?"), or nothing at all because the caller is retrying something
+    that already happened.
+    """
+
+    def __init__(self, message: str, *, code: CompanionLifecycleConflictCode) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -402,6 +422,166 @@ class CompanionWorkspaceService:
                     )
                 )
         return realm
+
+    async def begin_retirement(
+        self,
+        *,
+        owner_id: str,
+        companion_id: str,
+        expected_revision: int | None = None,
+        replacement_companion_id: str | None = None,
+    ) -> CompanionRow:
+        """Start putting a Companion away: no new sessions, no new Body work.
+
+        The first of the two steps, and the reason there are two. Everything that
+        has to stop — new sessions, new Body assignments, becoming the default —
+        stops here, while the Companion is still answerable; archiving is what
+        happens after those have drained. A single command that did both would be
+        archiving a Companion that something is still talking to.
+
+        **If this is the Companion the Owner's unaddressed requests go to, the
+        same request has to say who takes over.** Not a later step: between the
+        two there would be an Owner whose Eidolon cannot answer, and no amount of
+        ordering inside a workflow makes that window not exist. When there is
+        nobody to hand it to, the command refuses — an Owner left with one
+        archived Companion has no Eidolon at all.
+
+        Repeating it is a success. A Companion already retiring is the state the
+        caller asked for, and a retry after a lost answer must not produce a
+        second governance event for one decision.
+        """
+
+        async with self._session_factory() as session, session.begin():
+            companion = await _owned_companion(session, owner_id, companion_id)
+            if companion.lifecycle_state == "retiring":
+                return companion
+            _require_transition(companion, "retiring", expected_revision)
+            owner = await session.get(OwnerRow, owner_id)
+            if owner is None:
+                raise OwnerWorkspaceNotFound("owner not found")
+            replacement: CompanionRow | None = None
+            if owner.default_companion_id == companion_id:
+                replacement = await _eligible_replacement(
+                    session,
+                    owner_id=owner_id,
+                    retiring_id=companion_id,
+                    replacement_companion_id=replacement_companion_id,
+                )
+                owner.default_companion_id = replacement.companion_id
+                owner.revision += 1
+                owner.updated_at = utc_now()
+                session.add(
+                    governance_fact(
+                        owner_id=owner_id,
+                        subject_type="owner",
+                        subject_id=owner_id,
+                        action="owner.default_companion_changed",
+                        payload={
+                            "previous_companion_id": companion_id,
+                            "reason": "retirement",
+                        },
+                    )
+                )
+            companion.lifecycle_state = "retiring"
+            companion.revision += 1
+            companion.updated_at = utc_now()
+            session.add(
+                governance_fact(
+                    owner_id=owner_id,
+                    subject_type="companion",
+                    subject_id=companion_id,
+                    action="companion.retirement_begun",
+                    payload={
+                        "replacement_companion_id": (
+                            replacement.companion_id if replacement else None
+                        )
+                    },
+                )
+            )
+            return companion
+
+    async def archive_companion(
+        self,
+        *,
+        owner_id: str,
+        companion_id: str,
+        expected_revision: int | None = None,
+    ) -> CompanionRow:
+        """Put it away, once the things that had to stop have stopped.
+
+        Only from ``retiring``. Refusing to archive an active Companion is the
+        invariant that makes the workflow's order real rather than advisory: the
+        steps that drain sessions and hand back Body assignments run between the
+        two commands, and a caller that could skip straight here would skip them.
+
+        Memory is deliberately untouched. A Realm belongs to the Owner and is
+        read by every Companion they have, so archiving one of them releases
+        nothing and deletes nothing (§4.4 of the isolation decision).
+        """
+
+        async with self._session_factory() as session, session.begin():
+            companion = await _owned_companion(session, owner_id, companion_id)
+            if companion.lifecycle_state == "archived":
+                return companion
+            _require_transition(companion, "archived", expected_revision)
+            owner = await session.get(OwnerRow, owner_id)
+            if owner is not None and owner.default_companion_id == companion_id:
+                # Unreachable through ``begin_retirement``, which moves the
+                # pointer first. Refused rather than quietly cleared: a pointer
+                # that survived retirement means something wrote it in between,
+                # and archiving on top of that would leave an Owner whose
+                # unaddressed requests go nowhere.
+                raise CompanionLifecycleConflict(
+                    "companion is still this owner's default",
+                    code="default_replacement_required",
+                )
+            companion.lifecycle_state = "archived"
+            companion.revision += 1
+            companion.updated_at = utc_now()
+            session.add(
+                governance_fact(
+                    owner_id=owner_id,
+                    subject_type="companion",
+                    subject_id=companion_id,
+                    action="companion.archived",
+                )
+            )
+            return companion
+
+    async def restore_companion(
+        self,
+        *,
+        owner_id: str,
+        companion_id: str,
+        expected_revision: int | None = None,
+    ) -> CompanionRow:
+        """Bring it back, and nothing else.
+
+        Deliberately does **not** make it the default again or return the Body
+        assignments it had: those were given away to someone, and taking them
+        back without being asked would move an Owner's Eidolon out from under
+        whatever is using it now. Restoring says this Companion may answer again;
+        what it answers through is a separate decision the Owner makes.
+        """
+
+        async with self._session_factory() as session, session.begin():
+            companion = await _owned_companion(session, owner_id, companion_id)
+            if companion.lifecycle_state == "active":
+                return companion
+            _require_transition(companion, "active", expected_revision)
+            companion.lifecycle_state = "active"
+            companion.revision += 1
+            companion.updated_at = utc_now()
+            session.add(
+                governance_fact(
+                    owner_id=owner_id,
+                    subject_type="companion",
+                    subject_id=companion_id,
+                    action="companion.restored",
+                    payload={"restored_from": "archived"},
+                )
+            )
+            return companion
 
     async def set_default_companion(
         self,
@@ -762,6 +942,90 @@ async def _load_onboarding_result(
             persona_genome=genome,
             memory_realm=realm,
         ),
+    )
+
+
+async def _owned_companion(session, owner_id: str, companion_id: str) -> CompanionRow:
+    """This Owner's Companion in whatever state it is in.
+
+    Separate from :func:`_owned_active_companion` because the lifecycle commands
+    are the ones that act on a Companion that is *not* active, and reusing the
+    active-only helper would make "already retiring" indistinguishable from "not
+    yours".
+    """
+
+    companion = await session.get(CompanionRow, companion_id)
+    if companion is None or companion.owner_id != owner_id:
+        raise CompanionLifecycleConflict(
+            "companion not found for owner", code="not_found"
+        )
+    return companion
+
+
+def _require_transition(
+    companion: CompanionRow, target: str, expected_revision: int | None
+) -> None:
+    """Refuse a move the lifecycle does not allow, or a stale caller.
+
+    Order matters: the transition is checked first. A caller holding an old
+    revision *and* asking for an impossible move should be told the move is
+    impossible — re-reading and trying again would not help.
+    """
+
+    allowed = COMPANION_LIFECYCLE_TRANSITIONS.get(companion.lifecycle_state, ())
+    if target not in allowed:
+        raise CompanionLifecycleConflict(
+            f"a {companion.lifecycle_state} companion cannot become {target}",
+            code="transition_not_allowed",
+        )
+    if expected_revision is not None and expected_revision != companion.revision:
+        raise CompanionLifecycleConflict(
+            "companion revision has moved since this caller read it",
+            code="revision_stale",
+        )
+
+
+async def _eligible_replacement(
+    session,
+    *,
+    owner_id: str,
+    retiring_id: str,
+    replacement_companion_id: str | None,
+) -> CompanionRow:
+    """Who answers instead, or a refusal that says which question to ask.
+
+    Two different refusals on purpose. "Name a replacement" is a question for the
+    person and their answer resolves it; "there is nobody else" is not a question
+    at all, and offering them a picker with one unusable entry would be worse
+    than saying so.
+    """
+
+    others = (
+        await session.scalars(
+            select(CompanionRow).where(
+                CompanionRow.owner_id == owner_id,
+                CompanionRow.companion_id != retiring_id,
+                CompanionRow.lifecycle_state.in_(DEFAULT_ELIGIBLE_LIFECYCLE_STATES),
+                CompanionRow.kind != "guard",
+            )
+        )
+    ).all()
+    if not others:
+        raise CompanionLifecycleConflict(
+            "this owner has no other companion that could answer",
+            code="last_active_companion",
+        )
+    if replacement_companion_id is None:
+        raise CompanionLifecycleConflict(
+            "archiving the default companion requires a replacement",
+            code="default_replacement_required",
+        )
+    for candidate in others:
+        if candidate.companion_id == replacement_companion_id:
+            return candidate
+    raise CompanionLifecycleConflict(
+        "the named replacement cannot answer for this owner",
+        code="default_replacement_ineligible",
     )
 
 
