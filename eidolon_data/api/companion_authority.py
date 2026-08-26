@@ -13,6 +13,11 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
+from eidolon_sdk.biz.persona import (
+    PersonaAuthoring,
+    normalize_persona_genome,
+    persona_authoring_of,
+)
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.repositories.persona import PersonaGenomeConflict
 
@@ -96,6 +101,23 @@ class PersonaRestoreRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     genome_id: str = Field(min_length=1, max_length=64)
+    change_summary: str = Field(default="", max_length=4096)
+
+
+class PersonaAuthoringRequest(BaseModel):
+    """Who this Companion is now, and one line about why it changed.
+
+    The persona travels as the SDK's own shape rather than a copy of it, so what
+    a screen reads, what it sends and what gets built are one thing — and a field
+    added to the genome cannot go missing between them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    persona: PersonaAuthoring
+    #: What a person reads later when they wonder what happened. Written by
+    #: whoever made the change and stored as written: a sentence about who
+    #: somebody's Eidolon became should not be composed by a projection.
     change_summary: str = Field(default="", max_length=4096)
 
 
@@ -473,6 +495,73 @@ def create_app(
             for row in sorted(rows, key=lambda value: value.version, reverse=True)
         ]
         return PersonaTimelineResponse(companion_id=companion_id, chapters=chapters)
+
+    @app.get(
+        "/api/companion-authority/v1/companions/{companion_id}/persona",
+        response_model=PersonaAuthoring,
+        tags=["companion-authority"],
+    )
+    async def get_persona(
+        companion_id: str,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> PersonaAuthoring:
+        """Who this Companion is now, in the part a person wrote.
+
+        The read an edit screen opens on. It answers with the same shape the
+        write accepts, so read → change one sentence → send back needs no
+        translation, and the fields a form does not show still make the trip
+        instead of being wiped by their own absence.
+        """
+
+        authorize_service(authorization, token)
+        current = await store.persona_genomes.get_current(companion_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="companion has no persona")
+        return persona_authoring_of(normalize_persona_genome(current.genome_json))
+
+    @app.put(
+        "/api/companion-authority/v1/companions/{companion_id}/persona",
+        response_model=PersonaChapterResponse,
+        tags=["companion-authority"],
+    )
+    async def author_persona(
+        companion_id: str,
+        payload: PersonaAuthoringRequest,
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> PersonaChapterResponse:
+        """Say who this Companion is now, as a new chapter rather than an edit.
+
+        PUT because the body states an end — "this is who it is" — so a client
+        that lost the answer sends the same thing again and lands in the same
+        place. Sending it twice writes one chapter, because an unchanged genome
+        hashes to what is already current.
+        """
+
+        authorize_service(authorization, token)
+        try:
+            authored = await store.persona_genomes.author(
+                companion_id=companion_id,
+                persona=payload.persona,
+                change_summary=payload.change_summary,
+            )
+        except PersonaGenomeConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": exc.code,
+                    "message": str(exc),
+                    "stale_genome_id": exc.stale_genome_id,
+                },
+            ) from exc
+        return PersonaChapterResponse(
+            genome_id=authored.genome_id,
+            version=authored.version,
+            lifecycle_state=authored.status,
+            change_summary=authored.change_summary,
+            restored_from_version=None,
+            is_current=True,
+            created_at=authored.created_at.isoformat(),
+        )
 
     @app.post(
         "/api/companion-authority/v1/companions/{companion_id}/persona-restorations",

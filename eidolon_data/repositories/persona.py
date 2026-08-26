@@ -11,7 +11,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from eidolon_sdk.biz.persona import PersonaConflictCode
+from eidolon_sdk.biz.persona import (
+    PersonaAuthoring,
+    PersonaAuthoringDraft,
+    PersonaConflictCode,
+    build_persona_genome_from_draft,
+    persona_authoring_of,
+    normalize_persona_genome,
+    persona_genome_hash,
+    persona_genome_to_json,
+)
 from sqlalchemy import func, select
 
 from eidolon_data.repositories.base import Repository
@@ -64,6 +73,107 @@ class PersonaRepository(Repository):
                     .order_by(PersonaGenomeRow.version)
                 )
             )
+
+    async def author(
+        self,
+        *,
+        companion_id: str,
+        persona: PersonaAuthoring,
+        change_summary: str,
+    ) -> PersonaGenomeRow:
+        """Say who this Companion is now, as a new chapter.
+
+        The same shape as :meth:`restore`, and that is the point: going back and
+        changing your mind are the same act pointing in different directions.
+        Both append; neither edits. So there is one way a Companion's persona
+        ever changes, and the record of what it has been is only ever added to.
+
+        **Saving without changing anything appends nothing.** What is compared
+        is the authored part, not the genome hash: provenance lives inside that
+        hash and names the genome each new one is based on, so two identical
+        requests hash differently by construction. Opening the edit screen and
+        pressing save must not manufacture a chapter, and neither must a phone
+        retrying after a lost answer — a history padded with non-events is a
+        history nobody reads, which costs exactly what the history is for.
+
+        The name inside the genome is carried over rather than taken from the
+        Companion row. Editing who an Eidolon *is* has no business rewriting
+        what it is *called* as a side effect; if the two have drifted apart,
+        that is renaming's problem and fixing it here would hide it.
+        """
+
+        async with self._session_factory() as session:
+            companion = await session.get(CompanionRow, companion_id)
+            if companion is None:
+                raise PersonaGenomeConflict(
+                    "companion does not exist", code="companion_missing"
+                )
+            current = (
+                await session.get(PersonaGenomeRow, companion.current_genome_id)
+                if companion.current_genome_id
+                else None
+            )
+            if current is None:
+                # Nothing to base a chapter on. A Companion with no genome is a
+                # broken row, not a Companion waiting for its first persona:
+                # provisioning writes one in the same transaction.
+                raise PersonaGenomeConflict(
+                    "companion has no current persona genome",
+                    code="state_not_eligible",
+                )
+
+            standing = normalize_persona_genome(current.genome_json)
+            if persona_authoring_of(standing) == persona:
+                # Already who it is. Compared on the authored part rather than
+                # on the genome hash, because provenance is inside that hash and
+                # names the genome this one is based on — so two identical
+                # requests hash differently by construction, and comparing
+                # hashes would write a chapter every time regardless.
+                return current
+
+            name = standing.constitution.name or companion.display_name
+            written = build_persona_genome_from_draft(
+                PersonaAuthoringDraft.for_companion(persona, name=name),
+                origin="owner_authored",
+                base_genome_id=current.genome_id,
+            )
+            genome_json = persona_genome_to_json(written)
+            genome_hash = persona_genome_hash(written)
+
+            highest = await session.scalar(
+                select(func.max(PersonaGenomeRow.version)).where(
+                    PersonaGenomeRow.companion_id == companion_id
+                )
+            )
+            now = datetime.now(timezone.utc)
+            authored = PersonaGenomeRow(
+                genome_id=f"g_{uuid4().hex}",
+                companion_id=companion_id,
+                version=(highest or 0) + 1,
+                status="committed",
+                base_genome_id=current.genome_id,
+                schema_version=written.schema_version,
+                genome_hash=genome_hash,
+                realizer_version=current.realizer_version,
+                source_json={
+                    "source_type": "owner_authored",
+                    "based_on": current.genome_id,
+                    "based_on_version": current.version,
+                },
+                genome_json=genome_json,
+                change_summary=change_summary,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(authored)
+            # Flushed before the pointer moves, for the reason restore documents
+            # below: the pointer is a foreign key into this table and a plain
+            # string, so the unit of work has nothing to order on.
+            await session.flush()
+            companion.current_genome_id = authored.genome_id
+            await session.commit()
+            await session.refresh(authored)
+            return authored
 
     async def restore(
         self,

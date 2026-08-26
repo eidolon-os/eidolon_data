@@ -998,3 +998,196 @@ async def test_what_happened_to_this_owners_things_is_readable_newest_first(
             headers=headers,
         )
         assert nobody.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_changing_your_mind_is_a_new_chapter_too(tmp_path) -> None:
+    """Editing and going back are one act pointing two ways.
+
+    Both append; neither edits. That is what keeps "what this Companion has
+    been" a record rather than a current value with a history-shaped name — and
+    it means there is exactly one way a persona ever changes, however it was
+    asked for.
+    """
+
+    settings = await _seed(tmp_path / "authority.sqlite3")
+    token = "companion-authority-token-000001"
+    app = create_app(
+        settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+        base = "/api/companion-authority/v1/companions/companion-1"
+
+        before = (await client.get(f"{base}/persona", headers=headers)).json()
+        assert "name" not in before, "the name is the Companion's, said once"
+
+        written = {
+            **before,
+            "self_concept": "我是一个会记得你说过的话的伙伴",
+            "values": ["诚实", "守时"],
+        }
+        answered = await client.put(
+            f"{base}/persona",
+            headers=headers,
+            json={"persona": written, "change_summary": "我改了它对自己的说法"},
+        )
+        assert answered.status_code == 200, answered.text
+        assert answered.json()["change_summary"] == "我改了它对自己的说法"
+
+        # It reads back as what was written...
+        now = (await client.get(f"{base}/persona", headers=headers)).json()
+        assert now["self_concept"] == "我是一个会记得你说过的话的伙伴"
+        assert now["values"] == ["诚实", "守时"]
+        # ... and everything untouched came through unharmed.
+        assert now["character_portrait"] == before["character_portrait"]
+        assert now["behavior_guidance"] == before["behavior_guidance"]
+
+        # ... as a chapter, with what it was still on the record.
+        timeline = (
+            await client.get(f"{base}/persona-timeline", headers=headers)
+        ).json()
+        assert len(timeline["chapters"]) == 2
+        assert timeline["chapters"][0]["is_current"] is True
+
+
+@pytest.mark.asyncio
+async def test_saving_without_changing_anything_writes_no_chapter(tmp_path) -> None:
+    """Opening the screen and pressing save is not something that happened.
+
+    The genome is content-addressed, so an untouched form hashes to what is
+    already current and this is cheap to get right. Getting it wrong would pad
+    the record with non-events, and a history of non-events is one nobody reads
+    — which costs exactly the thing the history exists for.
+    """
+
+    settings = await _seed(tmp_path / "authority.sqlite3")
+    token = "companion-authority-token-000001"
+    app = create_app(
+        settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+        base = "/api/companion-authority/v1/companions/companion-1"
+
+        unchanged = (await client.get(f"{base}/persona", headers=headers)).json()
+        for _ in range(2):
+            answered = await client.put(
+                f"{base}/persona", headers=headers, json={"persona": unchanged}
+            )
+            assert answered.status_code == 200, answered.text
+
+        timeline = (
+            await client.get(f"{base}/persona-timeline", headers=headers)
+        ).json()
+        assert len(timeline["chapters"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_same_edit_sent_twice_writes_one_chapter(tmp_path) -> None:
+    """A lost answer must not cost a chapter.
+
+    The phone retries; the second request is byte-identical; the second genome
+    would hash the same as the one just written. Without that, every dropped
+    response would leave a duplicate entry in the record of who somebody's
+    Eidolon has been.
+    """
+
+    settings = await _seed(tmp_path / "authority.sqlite3")
+    token = "companion-authority-token-000001"
+    app = create_app(
+        settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+        base = "/api/companion-authority/v1/companions/companion-1"
+        written = {
+            **(await client.get(f"{base}/persona", headers=headers)).json(),
+            "self_concept": "我记得",
+        }
+
+        first = await client.put(
+            f"{base}/persona", headers=headers, json={"persona": written}
+        )
+        again = await client.put(
+            f"{base}/persona", headers=headers, json={"persona": written}
+        )
+
+        assert first.status_code == 200 and again.status_code == 200
+        assert first.json()["genome_id"] == again.json()["genome_id"]
+        timeline = (
+            await client.get(f"{base}/persona-timeline", headers=headers)
+        ).json()
+        assert len(timeline["chapters"]) == 2, "one for the edit, one it was"
+
+
+@pytest.mark.asyncio
+async def test_an_edit_does_not_rename_the_eidolon(tmp_path) -> None:
+    """Who it is and what it is called are two decisions.
+
+    The name inside the genome is carried over rather than re-derived, so an
+    edit cannot rewrite it as a side effect — and if the name and the Companion
+    row have drifted apart, that stays renaming's problem instead of being
+    silently papered over by whoever edits next.
+    """
+
+    settings = await _seed(tmp_path / "authority.sqlite3")
+    token = "companion-authority-token-000001"
+    app = create_app(
+        settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        headers = {"Authorization": f"Bearer {token}"}
+        base = "/api/companion-authority/v1/companions/companion-1"
+        snapshot = await client.get(f"{base}/runtime-snapshot", headers=headers)
+        before = snapshot.json()["persona_genome"]["genome"]["constitution"]["name"]
+
+        written = {
+            **(await client.get(f"{base}/persona", headers=headers)).json(),
+            "self_concept": "我记得",
+        }
+        await client.put(f"{base}/persona", headers=headers, json={"persona": written})
+
+        after = (await client.get(f"{base}/runtime-snapshot", headers=headers)).json()
+        assert after["persona_genome"]["genome"]["constitution"]["name"] == before
+
+
+@pytest.mark.asyncio
+async def test_authoring_needs_the_authority_credential(tmp_path) -> None:
+    settings = await _seed(tmp_path / "authority.sqlite3")
+    app = create_app(
+        settings,
+        service_token="companion-authority-token-000001",
+        memory_roster_token=MEMORY_ROSTER_TOKEN,
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        base = "/api/companion-authority/v1/companions/companion-1"
+        assert (await client.get(f"{base}/persona")).status_code == 401
+        assert (
+            await client.put(f"{base}/persona", json={"persona": {}})
+        ).status_code == 401
