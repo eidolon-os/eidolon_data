@@ -19,6 +19,7 @@ from httpx import ASGITransport
 from sqlalchemy import func, select
 
 from eidolon_data import DataSettings, DataStore
+from eidolon_data.api.companion_authority import create_app as create_companion_app
 from eidolon_data.api.workspace_authority import create_app
 from eidolon_data.schema import CompanionRow, MemoryRealmRow, PersonaGenomeRow
 
@@ -28,6 +29,24 @@ TOKEN = "workspace-authority-token-0001"
 PATH = "/api/workspace-authority/v1/owners/{owner}/companion-provisions/{operation}"
 OPERATION = "32c421a3-e0df-40f9-8f75-68745ae39d81"
 OTHER_OPERATION = "7c1f0c2e-6d34-4f0a-9a2b-0e6c9a55e321"
+
+
+COMPANION_TOKEN = "companion-authority-token-000001"
+
+
+def companion_authority_app(settings: DataSettings):
+    """The persona authority, built on the same store.
+
+    Two apps in one test is the point: the template and the write it precedes
+    are now answered by different processes in production, so a test that used
+    one app could not see them disagree.
+    """
+
+    return create_companion_app(
+        settings,
+        service_token=COMPANION_TOKEN,
+        memory_roster_token="memory-roster-token-0001",
+    )
 
 
 @pytest.fixture
@@ -42,7 +61,9 @@ async def client(tmp_path):
             transport=ASGITransport(app=app), base_url="http://data.test"
         ) as http,
     ):
-        yield http, writer
+        # The settings travel with the client so a test that needs the *other*
+        # authority can build it on the same store.
+        yield http, writer, settings
     await writer.close()
 
 
@@ -89,7 +110,7 @@ async def test_a_second_companion_shares_the_owners_one_memory(client) -> None:
     Not "a new realm is unused" — none is created. A realm is a running process
     somewhere, and one per Companion was the design this plan replaced.
     """
-    http, store = client
+    http, store, _settings = client
     first = await _owner_with_one(store)
     assert await _realms(store) == 1
 
@@ -114,7 +135,7 @@ async def test_asking_twice_produces_one_companion(client) -> None:
     Every identifier is derived from the operation id, so the retry addresses
     the rows the first call created rather than making new ones.
     """
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
 
     first = await http.put(
@@ -146,7 +167,7 @@ async def test_a_different_request_under_a_used_id_is_a_conflict(client) -> None
     second call would either silently rename the first Companion or create
     another one, and both look like success to the caller.
     """
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
     await http.put(
         PATH.format(owner="owner-1", operation=OPERATION),
@@ -169,7 +190,7 @@ async def test_another_owners_operation_is_absent_rather_than_forbidden(
     client,
 ) -> None:
     """An operation id must not be probeable across Owners."""
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
     await _owner_with_one(store, owner_id="owner-2")
     await http.put(
@@ -194,7 +215,7 @@ async def test_creating_one_does_not_move_the_default(client) -> None:
     answers by default, and quietly moving the pointer would change where their
     running conversations go.
     """
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
     before = await _owner(http)
 
@@ -220,7 +241,7 @@ async def test_the_first_companion_of_an_owner_still_becomes_the_default(
     the first one to arrive takes the pointer. This route is where a second
     Companion normally arrives, but it is also reachable before any exists.
     """
-    http, store = client
+    http, store, _settings = client
     await store.owner_commands.create_owner(owner_id="owner-1", display_name="Manson")
 
     answered = await http.put(
@@ -239,7 +260,7 @@ async def test_the_first_companion_of_an_owner_still_becomes_the_default(
 
 async def test_a_guard_does_not_take_the_pointer(client) -> None:
     """Guard belongs to another product line; it must never answer by default."""
-    http, store = client
+    http, store, _settings = client
     await store.owner_commands.create_owner(owner_id="owner-1", display_name="Manson")
 
     answered = await http.put(
@@ -258,7 +279,7 @@ async def test_two_operations_make_two_companions(client) -> None:
     A rule that collapsed distinct operations would make the second Eidolon
     unaddable, which is the whole point of this phase.
     """
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
 
     for operation, name in ((OPERATION, "阿力"), (OTHER_OPERATION, "小南")):
@@ -275,7 +296,7 @@ async def test_two_operations_make_two_companions(client) -> None:
 
 
 async def test_an_unknown_owner_is_not_created_by_asking(client) -> None:
-    http, store = client
+    http, store, _settings = client
 
     answered = await http.put(
         PATH.format(owner="owner-nobody", operation=OPERATION),
@@ -287,7 +308,7 @@ async def test_an_unknown_owner_is_not_created_by_asking(client) -> None:
 
 
 async def test_the_write_needs_the_authority_credential(client) -> None:
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
 
     anonymous = await http.put(
@@ -304,7 +325,7 @@ async def test_an_unknown_field_is_refused_rather_than_ignored(client) -> None:
     ``kind`` is spelled one way; a caller sending ``companion_kind`` would get a
     conversational Companion and no indication that its choice was dropped.
     """
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
 
     answered = await http.put(
@@ -335,7 +356,7 @@ async def test_asking_for_nothing_still_writes_a_whole_person(client) -> None:
     not an empty one waiting to be filled in later.
     """
 
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
     response = await http.put(
         PATH.format(owner="owner-1", operation=OPERATION),
@@ -360,7 +381,7 @@ async def test_what_a_person_wrote_is_what_gets_stored(client) -> None:
     opposite end: the sentences somebody chose reach the row.
     """
 
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
     response = await http.put(
         PATH.format(owner="owner-1", operation=OPERATION),
@@ -411,7 +432,7 @@ async def test_a_retry_carrying_different_authoring_is_a_conflict(client) -> Non
     was — and the first answer would have said it worked.
     """
 
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
     first = await http.put(
         PATH.format(owner="owner-1", operation=OPERATION),
@@ -448,12 +469,24 @@ async def test_the_template_is_what_asking_for_nothing_would_have_written(
     the disagreement would actually live.
     """
 
-    http, store = client
+    http, store, settings = client
     await _owner_with_one(store)
 
-    template = await http.get(
-        "/api/workspace-authority/v1/persona-authoring-template", headers=_auth()
-    )
+    # The template now lives on the persona authority — a read with no Owner in
+    # it, about what a genome starts as, belongs beside the genome routes. This
+    # test therefore spans two authorities, which is exactly where a drift
+    # between "what the form shows" and "what provisioning writes" would live.
+    persona_app = companion_authority_app(settings)
+    async with (
+        persona_app.router.lifespan_context(persona_app),
+        httpx.AsyncClient(
+            transport=ASGITransport(app=persona_app), base_url="http://persona.test"
+        ) as persona_http,
+    ):
+        template = await persona_http.get(
+            "/api/companion-authority/v1/persona-authoring-template",
+            headers={"Authorization": f"Bearer {COMPANION_TOKEN}"},
+        )
     assert template.status_code == 200, template.text
 
     # Send the template straight back, untouched.
@@ -480,13 +513,25 @@ async def test_the_template_is_what_asking_for_nothing_would_have_written(
         assert round_tripped["genome"][section] == defaulted["genome"][section], section
 
 
-async def test_the_template_needs_the_authority_credential(client) -> None:
+async def test_the_template_needs_the_authority_credential(tmp_path) -> None:
     """A product default is not a secret, but this plane has one rule."""
 
-    http, _store = client
-    assert (
-        await http.get("/api/workspace-authority/v1/persona-authoring-template")
-    ).status_code == 401
+    settings = DataSettings(sqlite_path=str(tmp_path / "template.sqlite3"))
+    writer = DataStore.open(settings)
+    await writer.init_schema()
+    await writer.close()
+    app = companion_authority_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://persona.test"
+        ) as http,
+    ):
+        assert (
+            await http.get(
+                "/api/companion-authority/v1/persona-authoring-template"
+            )
+        ).status_code == 401
 
 
 async def test_an_unknown_authoring_field_is_refused_rather_than_ignored(
@@ -494,7 +539,7 @@ async def test_an_unknown_authoring_field_is_refused_rather_than_ignored(
 ) -> None:
     """Silently dropping a field is how a person loses a sentence they wrote."""
 
-    http, store = client
+    http, store, _settings = client
     await _owner_with_one(store)
     response = await http.put(
         PATH.format(owner="owner-1", operation=OPERATION),

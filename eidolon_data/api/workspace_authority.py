@@ -384,36 +384,6 @@ def create_app(
             next_cursor=page.next_sequence,
         )
 
-    @app.get(
-        "/api/workspace-authority/v1/persona-authoring-template",
-        response_model=PersonaAuthoring,
-        tags=["workspace-authority"],
-    )
-    async def persona_authoring_template(
-        authorization: str | None = Header(default=None, alias="Authorization"),
-    ) -> PersonaAuthoring:
-        """Who an Eidolon is before anybody has said anything about it.
-
-        Served by the authority that writes genomes rather than composed by a
-        screen, and that is the whole point: this has to be *what would actually
-        be written* if the form came back untouched. A client filling the form
-        from its own constants would show a personality this Host might not use
-        — and the person would have edited a description of something else.
-
-        Owner-independent and unauthenticated beyond the service token: it is a
-        product default, not anybody's data. Answering it per Owner would invite
-        a per-Owner default nobody asked for.
-
-        Round-trippable on purpose. The response is exactly the shape the
-        provision request accepts, so "read it, let someone edit it, send it
-        back" needs no translation step in between — and a field added to the
-        genome shows up on both ends at once instead of being quietly dropped by
-        whichever side forgot.
-        """
-
-        authorize_service(authorization, token)
-        return PersonaAuthoring()
-
     @app.put(
         "/api/workspace-authority/v1/owners/{owner_id}/companion-provisions/{operation_id}",
         response_model=CompanionProvisionResponse,

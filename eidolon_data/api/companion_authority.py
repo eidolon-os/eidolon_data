@@ -497,6 +497,39 @@ def create_app(
         return PersonaTimelineResponse(companion_id=companion_id, chapters=chapters)
 
     @app.get(
+        "/api/companion-authority/v1/persona-authoring-template",
+        response_model=PersonaAuthoring,
+        tags=["companion-authority"],
+    )
+    async def persona_authoring_template(
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> PersonaAuthoring:
+        """Who an Eidolon is before anybody has said anything about it.
+
+        Served by the authority that writes genomes rather than composed by a
+        screen, and that is the whole point: this has to be *what would actually
+        be written* if the form came back untouched. A client filling the form
+        from its own constants would show a personality this Host might not use
+        — and the person would have edited a description of something else.
+
+        Owner-independent and unauthenticated beyond the service token: it is a
+        product default, not anybody's data. Answering it per Owner would invite
+        a per-Owner default nobody asked for — which is also why it sits on the
+        persona authority rather than the Owner-scoped one, where it was first
+        written. A read with no Owner in it, about what a genome starts as,
+        belongs beside the genome routes.
+
+        Round-trippable on purpose. The response is exactly the shape the
+        provision request accepts, so "read it, let someone edit it, send it
+        back" needs no translation step in between — and a field added to the
+        genome shows up on both ends at once instead of being quietly dropped by
+        whichever side forgot.
+        """
+
+        authorize_service(authorization, token)
+        return PersonaAuthoring()
+
+    @app.get(
         "/api/companion-authority/v1/companions/{companion_id}/persona",
         response_model=PersonaAuthoring,
         tags=["companion-authority"],
