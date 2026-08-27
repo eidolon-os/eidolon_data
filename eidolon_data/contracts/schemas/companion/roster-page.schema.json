@@ -20,7 +20,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["companion_id", "display_name", "kind", "lifecycle_state", "revision", "created_at", "updated_at"],
+        "required": ["companion_id", "display_name", "kind", "lifecycle_state", "revision", "created_at", "updated_at", "current_genome_id", "memory_realm_id"],
         "properties": {
           "companion_id": {"type": "string", "minLength": 1, "maxLength": 64},
           "display_name": {"type": "string", "maxLength": 128},
@@ -28,7 +28,15 @@
           "lifecycle_state": {"enum": ["active", "retiring", "archived", "deleting"]},
           "revision": {"type": "integer", "minimum": 1},
           "created_at": {"type": "string", "format": "date-time"},
-          "updated_at": {"type": "string", "format": "date-time"}
+          "updated_at": {"type": "string", "format": "date-time"},
+          "current_genome_id": {
+            "description": "The committed genome this Companion currently runs, when one exists.",
+            "oneOf": [{"type": "string", "minLength": 1, "maxLength": 64}, {"type": "null"}]
+          },
+          "memory_realm_id": {
+            "description": "The Owner Realm that stores this Companion's audience-scoped memory.",
+            "oneOf": [{"type": "string", "minLength": 1, "maxLength": 64}, {"type": "null"}]
+          }
         }
       }
     },

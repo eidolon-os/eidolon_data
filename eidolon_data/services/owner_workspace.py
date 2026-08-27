@@ -711,15 +711,18 @@ class CompanionWorkspaceService:
             if owner is None:
                 raise OwnerWorkspaceNotFound("owner not found")
             previous_id = owner.default_companion_id
-            if expected_revision is not None and expected_revision != owner.revision:
+            if (
+                expected_revision is not None
+                and expected_revision != owner.revision
+                and previous_id != companion_id
+            ):
                 # Stale view — unless the thing it was asking for is already
                 # true. A retry after a lost response is the common case, and
                 # refusing it would make the caller's only safe move a re-read
                 # followed by another write that changes nothing.
-                if previous_id != companion_id:
-                    raise OwnerWorkspaceConflict(
-                        "owner revision has moved since this caller read it"
-                    )
+                raise OwnerWorkspaceConflict(
+                    "owner revision has moved since this caller read it"
+                )
             if previous_id != companion_id:
                 owner.default_companion_id = companion_id
                 owner.revision += 1
@@ -1187,10 +1190,10 @@ async def _ensure_memory_realm_in_session(
 ) -> tuple[MemoryRealmRow, bool]:
     """Point this Companion at its Owner's memory, creating it only once.
 
-    The Owner has one realm and every Companion shares it, so this creates a
-    realm for the Owner's first Companion and then only repoints. There is no
-    per-Companion realm to create — an Owner's second Companion adds a name and
-    a persona, not a second memory.
+    The Owner has one physical Realm, so this creates it for the first Companion
+    and then only repoints. Logical memories are still Companion-private by
+    default through their audience; adding a Companion adds a new audience and
+    persona, not another storage service or a shared transcript pool.
     """
     existing = await session.scalar(
         select(MemoryRealmRow)

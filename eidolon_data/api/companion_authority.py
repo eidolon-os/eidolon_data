@@ -9,20 +9,19 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
-
 from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
 from eidolon_sdk.biz.persona import (
     PersonaAuthoring,
     normalize_persona_genome,
     persona_authoring_of,
 )
+from fastapi import FastAPI, Header, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
+
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.repositories.persona import PersonaGenomeConflict
 
 from .service_auth import authorize_service, required_service_token
-
 
 #: A face is a photograph, not a document. Larger than this is not a portrait
 #: of an Eidolon; it is a file someone picked by accident.
@@ -179,6 +178,8 @@ class CompanionSummaryResponse(BaseModel):
     revision: int = Field(ge=1)
     created_at: datetime
     updated_at: datetime
+    current_genome_id: str | None = Field(default=None, max_length=64)
+    memory_realm_id: str | None = Field(default=None, max_length=64)
 
 
 class CompanionPageResponse(BaseModel):
@@ -362,6 +363,8 @@ def create_app(
                     revision=row.revision,
                     created_at=row.created_at,
                     updated_at=row.updated_at,
+                    current_genome_id=row.current_genome_id,
+                    memory_realm_id=row.default_memory_realm_id,
                 )
                 for row in page
             ],

@@ -107,6 +107,14 @@ async def test_the_roster_names_the_default_once_for_the_page(client) -> None:
     assert body["operation"] == "companion.roster-page"
     assert body["default_companion_id"] == "c-a"
     assert [row["companion_id"] for row in body["companions"]] == ["c-a", "c-b"]
+    assert [row["current_genome_id"] for row in body["companions"]] == [
+        "genome-c-a",
+        "genome-c-b",
+    ]
+    assert [row["memory_realm_id"] for row in body["companions"]] == [
+        "realm-c-a",
+        "realm-c-a",
+    ]
     for row in body["companions"]:
         assert "is_default" not in row
 
