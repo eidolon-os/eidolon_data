@@ -167,3 +167,64 @@ async def test_owner_name_is_readable_and_correctable(tmp_path) -> None:
             headers=headers,
         )
         assert missing.status_code == 404
+
+
+async def test_the_workspace_operation_survives_the_owner_changing_default(
+    tmp_path,
+) -> None:
+    """Adding a second Eidolon and making it the default must not brick the Host.
+
+    The reconstruction used to require that the Owner's *current* default
+    Companion still be the one the workspace was initialized with. On a real
+    Host, "设为默认" therefore turned this read into a permanent 409 — and the
+    workspace status read gates the device list, the Companion list and the
+    cockpit, so the whole product went dark after an action the product itself
+    offers. What this endpoint answers is what one initialization created, not
+    how the Owner has arranged things since.
+    """
+
+    settings = DataSettings(sqlite_path=str(tmp_path / "workspace-default.sqlite3"))
+    store = DataStore.open(settings)
+    await store.init_schema()
+    await store.close()
+    token = "workspace-authority-token-000002"
+    operation_id = "2f0a5f0c-9d1e-4a2b-8c3d-1e4f5a6b7c8d"
+    path = f"/api/workspace-authority/v1/operations/{operation_id}"
+    payload = {
+        "owner_display_name": "Manson",
+        "companion_display_name": "Xiaoyi",
+    }
+    app = create_app(settings, service_token=token)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://data.test",
+        ) as client,
+    ):
+        created = await client.put(path, json=payload, headers=headers)
+        assert created.status_code == 200, created.text
+        owner_id = created.json()["owner"]["owner_id"]
+        first_companion = created.json()["workspace"]["primary_companion_id"]
+
+        second = await client.put(
+            f"/api/workspace-authority/v1/owners/{owner_id}"
+            "/companion-provisions/6b1c2d3e-4f50-4a61-9b72-8c93da4eb5f6",
+            json={"companion_display_name": "Xiaoer"},
+            headers=headers,
+        )
+        assert second.status_code in {200, 201}, second.text
+        second_companion = second.json()["companion"]["companion_id"]
+        assert second_companion != first_companion
+
+        promoted = await client.put(
+            f"/api/workspace-authority/v1/owners/{owner_id}/default-companion",
+            json={"companion_id": second_companion},
+            headers=headers,
+        )
+        assert promoted.status_code == 200, promoted.text
+
+        resumed = await client.get(path, headers=headers)
+        assert resumed.status_code == 200, resumed.text
+        assert resumed.json()["workspace"]["primary_companion_id"] == first_companion

@@ -1052,11 +1052,21 @@ async def _load_onboarding_result(
         raise OwnerWorkspaceError("workspace identifiers belong to another operation")
     if request_fingerprint is not None and stored_fingerprint != request_fingerprint:
         raise OwnerWorkspaceError("operation_id is already in use for another request")
+    # Parentage only. What this function reconstructs is one initialization that
+    # already happened, so the question is whether these four rows still belong
+    # together — not whether the Owner has since reorganised around them.
+    #
+    # It used to also require `owner.default_companion_id == companion`,
+    # `companion.current_genome_id == genome` and
+    # `companion.default_memory_realm_id == realm`. All three are pointers the
+    # product invites the Owner to move: adding a second Eidolon and making it
+    # the default, or restoring an earlier persona chapter. The first of those
+    # is the whole premise of an Owner having more than one Companion, and
+    # doing it turned this read into a permanent 409 — which on a Host is not a
+    # stale screen but a dead product, because the workspace status read gates
+    # the device list, the Companion list and the cockpit behind it.
     if (
         companion.owner_id != owner.owner_id
-        or owner.default_companion_id != companion.companion_id
-        or companion.current_genome_id != genome.genome_id
-        or companion.default_memory_realm_id != realm.realm_id
         or genome.companion_id != companion.companion_id
         or realm.owner_id != owner.owner_id
     ):
