@@ -164,9 +164,9 @@ async def test_memory_runtime_roster_has_distinct_auth_and_exact_contract(tmp_pa
                 }
             ],
         }
-        Draft202012Validator(
-            json.loads(MEMORY_ROSTER_SCHEMA.read_text(encoding="utf-8"))
-        ).validate(response.json())
+        Draft202012Validator(json.loads(MEMORY_ROSTER_SCHEMA.read_text(encoding="utf-8"))).validate(
+            response.json()
+        )
         assert (
             await client.get(
                 "/api/companion-authority/v1/companions/companion-1",
@@ -558,9 +558,7 @@ async def test_going_back_is_a_new_chapter_not_an_undo(tmp_path) -> None:
     )
     await writer.close()
     token = "companion-authority-token-000001"
-    app = create_app(
-        settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN
-    )
+    app = create_app(settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN)
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -580,8 +578,8 @@ async def test_going_back_is_a_new_chapter_not_an_undo(tmp_path) -> None:
             headers=headers,
         )
 
-        assert already.status_code == 409
-        assert already.json()["detail"]["code"] == "state_not_eligible"
+        assert already.status_code == 200
+        assert already.json()["genome_id"] == current["genome_id"]
         assert current["is_current"] is True
         assert original["is_current"] is False
 
@@ -691,12 +689,8 @@ async def test_an_owner_gives_their_eidolon_a_face_and_takes_it_back(tmp_path) -
         assert (await client.get(path, headers=headers)).content == second
 
         # Not a JPEG, and refused where the person can still choose another.
-        assert (
-            await client.put(path, content=b"GIF89a", headers=jpeg)
-        ).status_code == 415
-        assert (
-            await client.put(path, content=second, headers=headers)
-        ).status_code == 415
+        assert (await client.put(path, content=b"GIF89a", headers=jpeg)).status_code == 415
+        assert (await client.put(path, content=second, headers=headers)).status_code == 415
         assert (await client.put(path, content=b"", headers=jpeg)).status_code == 422
         # The refusals changed nothing.
         assert (await client.get(path, headers=headers)).content == second
@@ -971,9 +965,7 @@ async def test_what_happened_to_this_owners_things_is_readable_newest_first(
         assert len(first.json()["events"]) == 2
         cursor = first.json()["next_cursor"]
         assert cursor is not None
-        older = await client.get(
-            path, params={"limit": 2, "before": cursor}, headers=headers
-        )
+        older = await client.get(path, params={"limit": 2, "before": cursor}, headers=headers)
         assert older.status_code == 200
         assert {event["event_id"] for event in older.json()["events"]}.isdisjoint(
             {event["event_id"] for event in first.json()["events"]}
@@ -987,12 +979,8 @@ async def test_what_happened_to_this_owners_things_is_readable_newest_first(
             headers=headers,
         )
         assert theirs.status_code == 200
-        assert [event["action"] for event in theirs.json()["events"]] == [
-            "owner.created"
-        ]
-        assert all(
-            event["subject_id"] == "owner-2" for event in theirs.json()["events"]
-        )
+        assert [event["action"] for event in theirs.json()["events"]] == ["owner.created"]
+        assert all(event["subject_id"] == "owner-2" for event in theirs.json()["events"])
         nobody = await client.get(
             "/api/workspace-authority/v1/owners/owner-nowhere/governance-events",
             headers=headers,
@@ -1012,9 +1000,7 @@ async def test_changing_your_mind_is_a_new_chapter_too(tmp_path) -> None:
 
     settings = await _seed(tmp_path / "authority.sqlite3")
     token = "companion-authority-token-000001"
-    app = create_app(
-        settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN
-    )
+    app = create_app(settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN)
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -1028,30 +1014,28 @@ async def test_changing_your_mind_is_a_new_chapter_too(tmp_path) -> None:
         assert "name" not in before, "the name is the Companion's, said once"
 
         written = {
-            **before,
+            **before["persona"],
             "self_concept": "我是一个会记得你说过的话的伙伴",
             "values": ["诚实", "守时"],
         }
         answered = await client.put(
             f"{base}/persona",
             headers=headers,
-            json={"persona": written, "change_summary": "我改了它对自己的说法"},
+            json=_edit_request(before, written),
         )
         assert answered.status_code == 200, answered.text
-        assert answered.json()["change_summary"] == "我改了它对自己的说法"
+        assert answered.json()["genome_id"] != before["genome_id"]
 
         # It reads back as what was written...
-        now = (await client.get(f"{base}/persona", headers=headers)).json()
+        now = (await client.get(f"{base}/persona", headers=headers)).json()["persona"]
         assert now["self_concept"] == "我是一个会记得你说过的话的伙伴"
         assert now["values"] == ["诚实", "守时"]
         # ... and everything untouched came through unharmed.
-        assert now["character_portrait"] == before["character_portrait"]
-        assert now["behavior_guidance"] == before["behavior_guidance"]
+        assert now["character_portrait"] == before["persona"]["character_portrait"]
+        assert now["behavior_guidance"] == before["persona"]["behavior_guidance"]
 
         # ... as a chapter, with what it was still on the record.
-        timeline = (
-            await client.get(f"{base}/persona-timeline", headers=headers)
-        ).json()
+        timeline = (await client.get(f"{base}/persona-timeline", headers=headers)).json()
         assert len(timeline["chapters"]) == 2
         assert timeline["chapters"][0]["is_current"] is True
 
@@ -1068,9 +1052,7 @@ async def test_saving_without_changing_anything_writes_no_chapter(tmp_path) -> N
 
     settings = await _seed(tmp_path / "authority.sqlite3")
     token = "companion-authority-token-000001"
-    app = create_app(
-        settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN
-    )
+    app = create_app(settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN)
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -1083,13 +1065,13 @@ async def test_saving_without_changing_anything_writes_no_chapter(tmp_path) -> N
         unchanged = (await client.get(f"{base}/persona", headers=headers)).json()
         for _ in range(2):
             answered = await client.put(
-                f"{base}/persona", headers=headers, json={"persona": unchanged}
+                f"{base}/persona",
+                headers=headers,
+                json=_edit_request(unchanged, unchanged["persona"]),
             )
             assert answered.status_code == 200, answered.text
 
-        timeline = (
-            await client.get(f"{base}/persona-timeline", headers=headers)
-        ).json()
+        timeline = (await client.get(f"{base}/persona-timeline", headers=headers)).json()
         assert len(timeline["chapters"]) == 1
 
 
@@ -1105,9 +1087,7 @@ async def test_the_same_edit_sent_twice_writes_one_chapter(tmp_path) -> None:
 
     settings = await _seed(tmp_path / "authority.sqlite3")
     token = "companion-authority-token-000001"
-    app = create_app(
-        settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN
-    )
+    app = create_app(settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN)
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -1116,23 +1096,22 @@ async def test_the_same_edit_sent_twice_writes_one_chapter(tmp_path) -> None:
     ):
         headers = {"Authorization": f"Bearer {token}"}
         base = "/api/companion-authority/v1/companions/companion-1"
+        snapshot = (await client.get(f"{base}/persona", headers=headers)).json()
         written = {
-            **(await client.get(f"{base}/persona", headers=headers)).json(),
+            **snapshot["persona"],
             "self_concept": "我记得",
         }
 
         first = await client.put(
-            f"{base}/persona", headers=headers, json={"persona": written}
+            f"{base}/persona", headers=headers, json=_edit_request(snapshot, written)
         )
         again = await client.put(
-            f"{base}/persona", headers=headers, json={"persona": written}
+            f"{base}/persona", headers=headers, json=_edit_request(snapshot, written)
         )
 
         assert first.status_code == 200 and again.status_code == 200
         assert first.json()["genome_id"] == again.json()["genome_id"]
-        timeline = (
-            await client.get(f"{base}/persona-timeline", headers=headers)
-        ).json()
+        timeline = (await client.get(f"{base}/persona-timeline", headers=headers)).json()
         assert len(timeline["chapters"]) == 2, "one for the edit, one it was"
 
 
@@ -1148,9 +1127,7 @@ async def test_an_edit_does_not_rename_the_eidolon(tmp_path) -> None:
 
     settings = await _seed(tmp_path / "authority.sqlite3")
     token = "companion-authority-token-000001"
-    app = create_app(
-        settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN
-    )
+    app = create_app(settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN)
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -1162,11 +1139,15 @@ async def test_an_edit_does_not_rename_the_eidolon(tmp_path) -> None:
         snapshot = await client.get(f"{base}/runtime-snapshot", headers=headers)
         before = snapshot.json()["persona_genome"]["genome"]["constitution"]["name"]
 
+        snapshot = (await client.get(f"{base}/persona", headers=headers)).json()
         written = {
-            **(await client.get(f"{base}/persona", headers=headers)).json(),
+            **snapshot["persona"],
             "self_concept": "我记得",
         }
-        await client.put(f"{base}/persona", headers=headers, json={"persona": written})
+        answer = await client.put(
+            f"{base}/persona", headers=headers, json=_edit_request(snapshot, written)
+        )
+        assert answer.status_code == 200, answer.text
 
         after = (await client.get(f"{base}/runtime-snapshot", headers=headers)).json()
         assert after["persona_genome"]["genome"]["constitution"]["name"] == before
@@ -1188,6 +1169,13 @@ async def test_authoring_needs_the_authority_credential(tmp_path) -> None:
     ):
         base = "/api/companion-authority/v1/companions/companion-1"
         assert (await client.get(f"{base}/persona")).status_code == 401
-        assert (
-            await client.put(f"{base}/persona", json={"persona": {}})
-        ).status_code == 401
+        assert (await client.put(f"{base}/persona", json={"persona": {}})).status_code == 401
+
+
+def _edit_request(snapshot, persona, operation_id="test-edit"):
+    return {
+        "expected_base_genome_id": snapshot["genome_id"],
+        "expected_preference_revision": snapshot["preference_revision"],
+        "operation_id": operation_id,
+        "persona": persona,
+    }

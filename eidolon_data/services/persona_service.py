@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from contextlib import asynccontextmanager
+from uuid import uuid4
+
 from eidolon_sdk.biz.persona import (
     PERSONA_GENOME_SCHEMA,
     PERSONA_REALIZER,
+    ConversationPreferences,
+    PersonaEditRequest,
+    PersonaEditSnapshot,
     PersonaEvolutionProposalEvent,
     PersonaObservationEvent,
+    apply_persona_authoring,
     build_default_persona_genome,
     normalize_persona_genome,
+    persona_authoring_of,
     persona_genome_hash,
     persona_genome_to_json,
+    validate_persona_evolution,
 )
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from eidolon_data.audit import governance_fact
@@ -32,6 +43,173 @@ class PersonaService:
     def __init__(self, session_factory: async_sessionmaker) -> None:
         self._session_factory = session_factory
 
+    async def read_edit_snapshot(self, companion_id: str) -> PersonaEditSnapshot:
+        async with self._session_factory() as session:
+            companion = await _companion_for_edit(session, companion_id)
+            current = await _current_for_edit(session, companion)
+            return _edit_snapshot(companion, current)
+
+    async def edit(
+        self,
+        *,
+        companion_id: str,
+        request: PersonaEditRequest,
+        change_summary: str = "更新性格与说话方式",
+    ) -> PersonaEditSnapshot:
+        """CAS, immutable version, preference update and receipt in one transaction."""
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                request.model_dump(mode="json", exclude_unset=True),
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        async with self._session_factory() as session, _persona_transaction(session):
+            companion = await _companion_for_edit(session, companion_id)
+            metadata = dict(companion.metadata_json or {})
+            receipts = dict(metadata.get("persona_operations") or {})
+            if receipt := receipts.get(request.operation_id):
+                if receipt["fingerprint"] != fingerprint:
+                    raise PersonaGenomeConflict(
+                        "operation id reused with different input", code="operation_conflict"
+                    )
+                original = await session.get(PersonaGenomeRow, receipt["genome_id"])
+                return PersonaEditSnapshot(
+                    genome_id=original.genome_id,
+                    persona=persona_authoring_of(normalize_persona_genome(original.genome_json)),
+                    preferences=ConversationPreferences.model_validate(receipt["preferences"]),
+                    preference_revision=receipt["preference_revision"],
+                )
+            current = await _current_for_edit(session, companion)
+            before = _edit_snapshot(companion, current)
+            if current.genome_id != request.expected_base_genome_id:
+                raise PersonaGenomeConflict(
+                    "persona changed; reload before saving",
+                    code="base_not_current",
+                    stale_genome_id=current.genome_id,
+                )
+            if before.preference_revision != request.expected_preference_revision:
+                raise PersonaGenomeConflict(
+                    "conversation preferences changed; reload before saving",
+                    code="preferences_changed",
+                    stale_genome_id=current.genome_id,
+                )
+            base = normalize_persona_genome(current.genome_json)
+            candidate = apply_persona_authoring(
+                base, request.persona, base_genome_id=current.genome_id
+            )
+            if persona_authoring_of(candidate) != persona_authoring_of(base):
+                current = await _append_persona(
+                    session,
+                    companion,
+                    current,
+                    candidate,
+                    source="owner_authored",
+                    summary=change_summary,
+                )
+            if request.preferences is not None and request.preferences != before.preferences:
+                config = dict(companion.runtime_config_json or {})
+                config["conversation_preferences"] = request.preferences.model_dump(mode="json")
+                config["preference_revision"] = before.preference_revision + 1
+                companion.runtime_config_json = config
+                companion.revision += 1
+                companion.updated_at = utc_now()
+            result = _edit_snapshot(companion, current)
+            # Receipts live with the aggregate, not in the expiring audit outbox.
+            # Store only the immutable result reference and the small preference
+            # snapshot. Retain until Companion deletion for reliable late retries.
+            receipts[request.operation_id] = {
+                "fingerprint": fingerprint,
+                "genome_id": result.genome_id,
+                "preferences": result.preferences.model_dump(mode="json"),
+                "preference_revision": result.preference_revision,
+            }
+            metadata["persona_operations"] = receipts
+            companion.metadata_json = metadata
+            session.add(
+                governance_fact(
+                    owner_id=companion.owner_id,
+                    subject_type="companion",
+                    subject_id=companion_id,
+                    action="persona.settings.saved",
+                    payload={
+                        "genome_id": result.genome_id,
+                        "previous_genome_id": before.genome_id,
+                        "preference_revision": result.preference_revision,
+                        "operation_id": request.operation_id,
+                    },
+                )
+            )
+            return result
+
+    async def rename(self, companion_id: str, display_name: str) -> CompanionRow | None:
+        name = display_name.strip()
+        if not name or len(name) > 128:
+            raise ValueError("companion name must contain 1-128 characters")
+        async with self._session_factory() as session, _persona_transaction(session):
+            companion = await session.get(CompanionRow, companion_id, with_for_update=True)
+            if companion is None:
+                return None
+            current = await _current_for_edit(session, companion)
+            base = normalize_persona_genome(current.genome_json)
+            if companion.display_name == name and base.constitution.name == name:
+                return companion
+            candidate = base.model_copy(deep=True)
+            candidate.constitution.name = name
+            companion.display_name = name
+            await _append_persona(
+                session,
+                companion,
+                current,
+                candidate,
+                source="owner_rename",
+                summary="更新伙伴名字",
+            )
+            return companion
+
+    async def restore_chapter(
+        self,
+        *,
+        companion_id: str,
+        genome_id: str,
+        change_summary: str = "恢复性格设定",
+        owner_id: str | None = None,
+    ) -> PersonaGenomeRow:
+        async with self._session_factory() as session, _persona_transaction(session):
+            companion = await _companion_for_edit(session, companion_id)
+            if owner_id is not None and companion.owner_id != owner_id:
+                raise KeyError("companion not found for owner")
+            current = await _current_for_edit(session, companion)
+            target = await session.get(PersonaGenomeRow, genome_id)
+            if target is None or target.companion_id != companion_id:
+                raise PersonaGenomeConflict(
+                    "persona does not belong to companion", code="not_this_companion"
+                )
+            if target.status != "committed":
+                raise PersonaGenomeConflict(
+                    "only committed personas can be restored", code="state_not_eligible"
+                )
+            if current.genome_id == genome_id:
+                return current
+            if (current.source_json or {}).get("restored_from") == genome_id:
+                return current
+            candidate = normalize_persona_genome(target.genome_json).model_copy(deep=True)
+            candidate.constitution.name = companion.display_name
+            # Restoring personality must not resurrect old owner facts/preferences.
+            standing = normalize_persona_genome(current.genome_json)
+            candidate.relationship.pinned_facts = list(standing.relationship.pinned_facts)
+            candidate.relationship.owner_preferences = dict(standing.relationship.owner_preferences)
+            return await _append_persona(
+                session,
+                companion,
+                current,
+                candidate,
+                source="owner_restore",
+                summary=change_summary,
+                restored_from=target,
+            )
+
     async def create_genome(
         self,
         *,
@@ -46,7 +224,7 @@ class PersonaService:
         base_genome_id: str | None = None,
         change_summary: str = "",
     ) -> PersonaGenomeRow:
-        async with self._session_factory() as session, session.begin():
+        async with self._session_factory() as session, _persona_transaction(session):
             companion = await _owned_companion(session, owner_id, companion_id, lock=True)
             if base_genome_id is not None:
                 base = await session.get(PersonaGenomeRow, base_genome_id)
@@ -104,7 +282,7 @@ class PersonaService:
 
     async def record_observation(self, event: PersonaObservationEvent) -> None:
         """Record Agent evidence in the authority-local audit transaction."""
-        async with self._session_factory() as session, session.begin():
+        async with self._session_factory() as session, _persona_transaction(session):
             await _owned_companion(
                 session,
                 event.owner_id,
@@ -126,7 +304,7 @@ class PersonaService:
         self,
         proposal: PersonaEvolutionProposalEvent,
     ) -> PersonaGenomeRow:
-        async with self._session_factory() as session, session.begin():
+        async with self._session_factory() as session, _persona_transaction(session):
             companion = await _owned_companion(
                 session,
                 proposal.owner_id,
@@ -146,6 +324,7 @@ class PersonaService:
                     code="base_hash_mismatch",
                     stale_genome_id=proposal.base_genome_id,
                 )
+            validate_persona_evolution(normalize_persona_genome(base.genome_json), proposal)
             max_version = (
                 await session.execute(
                     select(PersonaGenomeRow.version)
@@ -196,7 +375,7 @@ class PersonaService:
         expected_base_genome_id: str | None = None,
     ) -> PersonaGenomeRow:
         conflict = False
-        async with self._session_factory() as session, session.begin():
+        async with self._session_factory() as session, _persona_transaction(session):
             companion = await _owned_companion(session, owner_id, companion_id, lock=True)
             genome = await session.get(PersonaGenomeRow, proposed_genome_id)
             if genome is None or genome.companion_id != companion_id:
@@ -205,7 +384,10 @@ class PersonaService:
                 raise PersonaGenomeConflict(
                     "only proposed genomes can be approved", code="state_not_eligible"
                 )
-            if expected_base_genome_id and companion.current_genome_id != expected_base_genome_id:
+            if companion.current_genome_id != genome.base_genome_id or (
+                expected_base_genome_id is not None
+                and expected_base_genome_id != genome.base_genome_id
+            ):
                 genome.status = "stale"
                 genome.updated_at = utc_now()
                 conflict = True
@@ -226,6 +408,22 @@ class PersonaService:
                     ),
                 )
             else:
+                base = await session.get(PersonaGenomeRow, genome.base_genome_id)
+                candidate = normalize_persona_genome(genome.genome_json)
+                validate_persona_evolution(
+                    normalize_persona_genome(base.genome_json),
+                    PersonaEvolutionProposalEvent(
+                        proposal_id=(genome.source_json or {}).get("proposal_id", genome.genome_id),
+                        owner_id=owner_id,
+                        companion_id=companion_id,
+                        base_genome_id=base.genome_id,
+                        base_genome_hash=base.genome_hash,
+                        proposed_genome_id=genome.genome_id,
+                        proposed_genome=candidate,
+                        rationale=genome.change_summary,
+                        evidence_refs=(genome.source_json or {}).get("evidence_refs", []),
+                    ),
+                )
                 _add_event(
                     session,
                     _event(
@@ -244,6 +442,7 @@ class PersonaService:
                 genome.status = "committed"
                 genome.updated_at = utc_now()
                 companion.current_genome_id = proposed_genome_id
+                companion.revision += 1
                 companion.updated_at = utc_now()
                 committed_event = _event(
                     owner_id=owner_id,
@@ -277,7 +476,7 @@ class PersonaService:
         companion_id: str | None = None,
         reason: str = "",
     ) -> PersonaGenomeRow:
-        async with self._session_factory() as session, session.begin():
+        async with self._session_factory() as session, _persona_transaction(session):
             genome = await session.get(PersonaGenomeRow, genome_id)
             if genome is None:
                 raise KeyError(f"genome not found: {genome_id}")
@@ -316,33 +515,15 @@ class PersonaService:
         companion_id: str,
         genome_id: str,
     ) -> PersonaGenomeRow:
-        async with self._session_factory() as session, session.begin():
-            companion = await _owned_companion(session, owner_id, companion_id, lock=True)
-            genome = await session.get(PersonaGenomeRow, genome_id)
-            if genome is None or genome.companion_id != companion_id:
-                raise KeyError(f"genome not found: {genome_id}")
-            if genome.status != "committed":
-                raise PersonaGenomeConflict(
-                    "only committed genomes can be rollback targets", code="state_not_eligible"
-                )
-            companion.current_genome_id = genome_id
-            companion.updated_at = utc_now()
-            _add_event(
-                session,
-                _event(
-                    owner_id=owner_id,
-                    companion_id=companion_id,
-                    genome=genome,
-                    event_type="persona.genome.rolled_back",
-                    subject_type="companion",
-                    subject_id=companion_id,
-                    payload={"genome_id": genome_id, "genome_hash": genome.genome_hash},
-                ),
-            )
-        return genome
+        return await self.restore_chapter(
+            owner_id=owner_id,
+            companion_id=companion_id,
+            genome_id=genome_id,
+            change_summary="恢复历史人格",
+        )
 
     async def reset_to_origin(self, *, owner_id: str, companion_id: str) -> PersonaGenomeRow:
-        async with self._session_factory() as session, session.begin():
+        async with self._session_factory() as session, _persona_transaction(session):
             companion = await _owned_companion(session, owner_id, companion_id, lock=True)
             genome = (
                 await session.get(PersonaGenomeRow, companion.current_genome_id)
@@ -358,25 +539,26 @@ class PersonaService:
                 if parent is None or parent.companion_id != companion_id:
                     break
                 genome = parent
-            companion.current_genome_id = genome.genome_id
-            companion.updated_at = utc_now()
-            _add_event(
+            current = await _current_for_edit(session, companion)
+            if (
+                current.genome_id == genome.genome_id
+                or (current.source_json or {}).get("restored_from") == genome.genome_id
+            ):
+                return current
+            candidate = normalize_persona_genome(genome.genome_json).model_copy(deep=True)
+            standing = normalize_persona_genome(current.genome_json)
+            candidate.constitution.name = companion.display_name
+            candidate.relationship.pinned_facts = list(standing.relationship.pinned_facts)
+            candidate.relationship.owner_preferences = dict(standing.relationship.owner_preferences)
+            return await _append_persona(
                 session,
-                _event(
-                    owner_id=owner_id,
-                    companion_id=companion_id,
-                    genome=genome,
-                    event_type="persona.genome.rolled_back",
-                    subject_type="companion",
-                    subject_id=companion_id,
-                    payload={
-                        "genome_id": genome.genome_id,
-                        "genome_hash": genome.genome_hash,
-                        "reason": "reset_to_origin",
-                    },
-                ),
+                companion,
+                current,
+                candidate,
+                source="owner_restore",
+                summary="恢复初始性格设定",
+                restored_from=genome,
             )
-        return genome
 
 
 async def _owned_companion(session, owner_id: str, companion_id: str, *, lock: bool):
@@ -460,3 +642,109 @@ def _event(
 def _add_event(session, event) -> None:
     """Write governance intent in the same System Data transaction."""
     session.add(event)
+
+
+@asynccontextmanager
+async def _persona_transaction(session):
+    # SQLite ignores FOR UPDATE; reserve the writer before reading the base.
+    # PostgreSQL uses row locks in the reads below.
+    if session.bind.dialect.name == "sqlite":
+        await session.execute(text("BEGIN IMMEDIATE"))
+    else:
+        await session.begin()
+    try:
+        yield
+        await session.commit()
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def _companion_for_edit(session, companion_id):
+    companion = await session.get(CompanionRow, companion_id, with_for_update=True)
+    if companion is None:
+        raise PersonaGenomeConflict("companion missing", code="companion_missing")
+    return companion
+
+
+async def _current_for_edit(session, companion):
+    current = await session.get(PersonaGenomeRow, companion.current_genome_id or "")
+    if current is None or current.status != "committed":
+        raise PersonaGenomeConflict("no committed persona", code="state_not_eligible")
+    return current
+
+
+def _edit_snapshot(companion, current):
+    config = companion.runtime_config_json or {}
+    return PersonaEditSnapshot(
+        genome_id=current.genome_id,
+        persona=persona_authoring_of(normalize_persona_genome(current.genome_json)),
+        preferences=ConversationPreferences.model_validate(
+            config.get("conversation_preferences", {})
+        ),
+        preference_revision=config.get("preference_revision", 1),
+    )
+
+
+async def _append_persona(
+    session, companion, current, candidate, *, source, summary, restored_from=None
+):
+    candidate = candidate.model_copy(deep=True)
+    candidate.provenance.origin = source
+    candidate.provenance.base_genome_id = current.genome_id
+    highest = await session.scalar(
+        select(func.max(PersonaGenomeRow.version)).where(
+            PersonaGenomeRow.companion_id == companion.companion_id
+        )
+    )
+    row = _genome_row(
+        genome_id=f"g_{uuid4().hex}",
+        companion_id=companion.companion_id,
+        owner_id=companion.owner_id,
+        version=(highest or 0) + 1,
+        status="committed",
+        base_genome_id=current.genome_id,
+        source_json={
+            "source_type": source,
+            "previous_genome_id": current.genome_id,
+            **(
+                {
+                    "restored_from": restored_from.genome_id,
+                    "restored_version": restored_from.version,
+                }
+                if restored_from
+                else {}
+            ),
+        },
+        genome_json=persona_genome_to_json(candidate),
+        change_summary=summary,
+    )
+    session.add(row)
+    await session.flush()
+    companion.current_genome_id = row.genome_id
+    companion.revision += 1
+    companion.updated_at = utc_now()
+    event = _event(
+        owner_id=companion.owner_id,
+        companion_id=companion.companion_id,
+        genome=row,
+        event_type="persona.genome.committed",
+        payload={
+            "genome_id": row.genome_id,
+            "previous_genome_id": current.genome_id,
+            "source": source,
+        },
+    )
+    row.applied_event_id = event.event_id
+    session.add(event)
+    if restored_from is not None:
+        session.add(
+            _event(
+                owner_id=companion.owner_id,
+                companion_id=companion.companion_id,
+                genome=row,
+                event_type="persona.genome.rolled_back",
+                payload={"genome_id": row.genome_id, "restored_from": restored_from.genome_id},
+            )
+        )
+    return row

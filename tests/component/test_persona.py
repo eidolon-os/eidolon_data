@@ -5,7 +5,7 @@ from eidolon_sdk.biz.persona import (
     PersonaEvidenceRef,
     PersonaEvolutionProposalEvent,
     PersonaObservationEvent,
-    build_default_persona_genome,
+    normalize_persona_genome,
 )
 
 from eidolon_data.repositories.persona import PersonaGenomeConflict
@@ -27,6 +27,8 @@ async def _workspace(store, *, owner_id: str = "owner-1", companion_id: str = "c
 def _proposal(
     base, *, genome_id: str, owner_id: str = "owner-1", companion_id: str = "companion-1"
 ):
+    candidate = normalize_persona_genome(base.genome_json).model_copy(deep=True)
+    candidate.provenance.base_genome_id = base.genome_id
     return PersonaEvolutionProposalEvent(
         proposal_id=f"proposal-{genome_id}",
         owner_id=owner_id,
@@ -35,11 +37,7 @@ def _proposal(
         base_genome_hash=base.genome_hash,
         proposed_genome_id=genome_id,
         rationale="Repeated evidence supports concise replies.",
-        proposed_genome=build_default_persona_genome(
-            name="Evolved",
-            origin="memory_reflection",
-            base_genome_id=base.genome_id,
-        ),
+        proposed_genome=candidate,
         evidence_refs=[
             PersonaEvidenceRef(
                 kind="memory_fragment",
@@ -180,11 +178,11 @@ async def test_reject_rollback_and_reset_to_origin(store) -> None:
         companion_id="companion-1",
         genome_id="genome-origin",
     )
-    assert rolled_back.genome_id == "genome-origin"
+    assert rolled_back.genome_id not in {"genome-origin", "genome-v3"}
     reset = await store.persona_commands.reset_to_origin(
         owner_id="owner-1", companion_id="companion-1"
     )
-    assert reset.genome_id == "genome-origin"
+    assert reset.genome_id == rolled_back.genome_id
 
 
 async def test_only_proposed_genomes_can_be_approved_or_rejected(store) -> None:
@@ -281,46 +279,17 @@ async def test_a_genome_of_another_companion_is_refused_with_its_own_code(store)
     assert foreign.value.code == "not_this_companion"
 
 
-async def test_restoring_what_it_already_is_is_not_a_race(store) -> None:
-    """Distinguishable on purpose: a caller that treats a repeat as success — the
-    management restore does — needs to tell it from having lost one."""
-
+async def test_restoring_current_is_idempotent(store) -> None:
     await _workspace(store)
-
-    with pytest.raises(PersonaGenomeConflict) as already:
-        await store.persona_genomes.restore(
-            companion_id="companion-1",
-            genome_id="genome-origin",
-            change_summary="回到了那时候的样子",
-        )
-
-    assert already.value.code == "state_not_eligible"
+    restored = await store.persona_genomes.restore(
+        companion_id="companion-1", genome_id="genome-origin", change_summary="恢复"
+    )
+    assert restored.genome_id == "genome-origin"
+    assert len(await store.persona_genomes.list_for_companion("companion-1")) == 1
 
 
-async def test_two_ways_of_going_back_that_do_not_agree(store) -> None:
-    """A characterization test, not an endorsement.
-
-    This authority has two "go back" implementations and they mean different
-    things:
-
-    - ``PersonaGenomes.restore`` **appends** a chapter carrying the older
-      content, so the record keeps the months in between and says when someone
-      went back. It is what the HTTP route and the management surface use, and
-      every product-facing docstring describes this model.
-    - ``rollback_to_genome`` / ``reset_to_origin`` **move the pointer**. The
-      chapters in between stay in the table but nothing records that a person
-      rewound past them, and the version sequence no longer tells the story.
-
-    Only the first has a caller outside this process. The second pair is reached
-    only through the in-process persona path — which on a product Host is not
-    wired at all, because Data is a separate service there and no HTTP route
-    exposes them. So this is pinned rather than fixed: whoever gives "reset to
-    origin" a caller has to decide which of the two "going back" means, and this
-    test is here so that decision is made deliberately instead of discovered
-    afterwards.
-    """
-
-    workspace = await _workspace(store)
+async def test_restore_rollback_and_reset_share_append_semantics(store) -> None:
+    await _workspace(store)
     await store.persona_commands.create_genome(
         genome_id="genome-v2",
         companion_id="companion-1",
@@ -329,28 +298,75 @@ async def test_two_ways_of_going_back_that_do_not_agree(store) -> None:
         version=2,
         base_genome_id="genome-origin",
     )
-
-    # Appending: a new chapter, and the history grows.
     restored = await store.persona_genomes.restore(
-        companion_id="companion-1",
-        genome_id="genome-origin",
-        change_summary="回到了那时候的样子",
+        companion_id="companion-1", genome_id="genome-origin", change_summary="恢复"
     )
-    versions = [
-        row.version for row in await store.persona_genomes.list_for_companion("companion-1")
-    ]
     assert restored.genome_id not in {"genome-origin", "genome-v2"}
-    assert versions == [1, 2, 3]
-    assert (
-        await store.persona_genomes.get_current("companion-1")
-    ).genome_id == restored.genome_id
-
-    # Rewinding: no new chapter, and nothing in the record says it happened.
-    rewound = await store.persona_commands.rollback_to_genome(
+    again = await store.persona_commands.rollback_to_genome(
         owner_id="owner-1", companion_id="companion-1", genome_id="genome-origin"
     )
-    assert rewound.genome_id == "genome-origin"
-    assert [
-        row.version for row in await store.persona_genomes.list_for_companion("companion-1")
-    ] == versions
-    assert (await store.persona_genomes.get_current("companion-1")).genome_id == "genome-origin"
+    assert again.genome_id == restored.genome_id
+    forward = await store.persona_commands.rollback_to_genome(
+        owner_id="owner-1", companion_id="companion-1", genome_id="genome-v2"
+    )
+    assert forward.genome_id not in {"genome-origin", "genome-v2", restored.genome_id}
+    reset = await store.persona_commands.reset_to_origin(
+        owner_id="owner-1", companion_id="companion-1"
+    )
+    assert reset.genome_id not in {"genome-origin", forward.genome_id}
+    assert [r.version for r in await store.persona_genomes.list_for_companion("companion-1")] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+
+
+async def test_approval_cannot_bypass_base_check_by_omitting_expected(store) -> None:
+    workspace = await _workspace(store)
+    proposed = await store.persona_commands.create_evolution_proposal(
+        _proposal(workspace.persona_genome, genome_id="proposal-stale")
+    )
+    await store.persona_commands.rename("companion-1", "新名字")
+    with pytest.raises(PersonaGenomeConflict) as caught:
+        await store.persona_commands.approve_evolution(
+            owner_id="owner-1", companion_id="companion-1", proposed_genome_id=proposed.genome_id
+        )
+    assert caught.value.code == "current_changed"
+
+
+@pytest.mark.parametrize("field", ["constitution", "relationship", "evolution_policy"])
+async def test_data_refuses_memory_rewrites_of_owner_settings(store, field):
+    workspace = await _workspace(store)
+    proposal = _proposal(workspace.persona_genome, genome_id="forbidden")
+    if field == "constitution":
+        proposal.proposed_genome.constitution.name = "Someone else"
+    elif field == "relationship":
+        proposal.proposed_genome.relationship.pinned_facts = ["invented fact"]
+    else:
+        proposal.proposed_genome.evolution_policy.max_delta_per_commit = 1
+    with pytest.raises(ValueError, match="cannot rewrite"):
+        await store.persona_commands.create_evolution_proposal(proposal)
+    assert await store.persona_genomes.get("forbidden") is None
+
+
+async def test_data_refuses_proposals_when_evolution_disabled(store):
+    workspace = await _workspace(store)
+    genome = normalize_persona_genome(workspace.persona_genome.genome_json).model_copy(deep=True)
+    genome.evolution_policy.enabled = False
+    from eidolon_sdk.biz.persona import persona_genome_to_json
+
+    base = await store.persona_commands.create_genome(
+        genome_id="disabled",
+        companion_id="companion-1",
+        owner_id="owner-1",
+        event_id="disable",
+        version=2,
+        base_genome_id="genome-origin",
+        genome_json=persona_genome_to_json(genome),
+    )
+    with pytest.raises(ValueError, match="disabled"):
+        await store.persona_commands.create_evolution_proposal(
+            _proposal(base, genome_id="cannot-grow")
+        )

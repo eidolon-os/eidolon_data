@@ -9,11 +9,11 @@ from contextlib import asynccontextmanager, suppress
 from typing import Literal
 from uuid import UUID
 
+from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
+from eidolon_sdk.biz.persona import ConversationPreferences, PersonaAuthoring
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
-from eidolon_sdk.biz.persona import PersonaAuthoring
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.audit import run_audit_dispatcher
 from eidolon_data.services.owner_workspace import (
@@ -56,6 +56,7 @@ class CompanionProvisionRequest(BaseModel):
     #: it sends, and what this authority builds from are then one thing, and a
     #: field added to the genome cannot be silently dropped in transit.
     persona: PersonaAuthoring | None = None
+    preferences: ConversationPreferences | None = None
 
 
 class ProvisionedCompanionResponse(BaseModel):
@@ -373,11 +374,7 @@ def create_app(
                     outcome=event.outcome,
                     severity=event.severity,
                     occurred_at=event.occurred_at.isoformat(),
-                    payload=(
-                        dict(event.payload)
-                        if event.data_classification == "safe"
-                        else {}
-                    ),
+                    payload=(dict(event.payload) if event.data_classification == "safe" else {}),
                 )
                 for event in page.events
             ],
@@ -413,11 +410,10 @@ def create_app(
                 companion_display_name=payload.companion_display_name,
                 kind=payload.kind,
                 persona=payload.persona,
+                preferences=payload.preferences,
             )
         except OwnerWorkspaceError as exc:
-            raise HTTPException(
-                status_code=_workspace_error_status(exc), detail=str(exc)
-            ) from exc
+            raise HTTPException(status_code=_workspace_error_status(exc), detail=str(exc)) from exc
         return CompanionProvisionResponse(
             operation_id=result.operation_id,
             request_fingerprint=result.request_fingerprint,
@@ -466,9 +462,7 @@ def create_app(
                 expected_revision=payload.expected_revision,
             )
         except OwnerWorkspaceError as exc:
-            raise HTTPException(
-                status_code=_workspace_error_status(exc), detail=str(exc)
-            ) from exc
+            raise HTTPException(status_code=_workspace_error_status(exc), detail=str(exc)) from exc
         row = await store.owners.get(owner_id)
         if row is None:
             raise HTTPException(status_code=404, detail="owner not found")
@@ -528,9 +522,7 @@ def create_app(
                 detail={"code": exc.code, "message": str(exc)},
             ) from exc
         except OwnerWorkspaceError as exc:
-            raise HTTPException(
-                status_code=_workspace_error_status(exc), detail=str(exc)
-            ) from exc
+            raise HTTPException(status_code=_workspace_error_status(exc), detail=str(exc)) from exc
         owner = await store.owners.get(payload.owner_id)
         return CompanionLifecycleResponse(
             companion_id=row.companion_id,
@@ -591,7 +583,11 @@ def _provision_fingerprint(payload: CompanionProvisionRequest) -> str:
     request wearing the same operation id".
     """
     canonical = json.dumps(
-        payload.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+        payload.model_dump(
+            mode="json", exclude={"preferences"} if payload.preferences is None else set()
+        ),
+        ensure_ascii=False,
+        sort_keys=True,
     )
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

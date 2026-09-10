@@ -12,10 +12,12 @@ from typing import Any, Literal
 from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
 from eidolon_sdk.biz.persona import (
     PersonaAuthoring,
-    normalize_persona_genome,
-    persona_authoring_of,
+    PersonaEditRequest,
+    PersonaEditSnapshot,
+    PersonaPresetCatalog,
+    persona_preset_catalog,
 )
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon_data import DataSettings, DataStore, load_settings
@@ -100,23 +102,6 @@ class PersonaRestoreRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     genome_id: str = Field(min_length=1, max_length=64)
-    change_summary: str = Field(default="", max_length=4096)
-
-
-class PersonaAuthoringRequest(BaseModel):
-    """Who this Companion is now, and one line about why it changed.
-
-    The persona travels as the SDK's own shape rather than a copy of it, so what
-    a screen reads, what it sends and what gets built are one thing — and a field
-    added to the genome cannot go missing between them.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    persona: PersonaAuthoring
-    #: What a person reads later when they wonder what happened. Written by
-    #: whoever made the change and stored as written: a sentence about who
-    #: somebody's Eidolon became should not be composed by a projection.
     change_summary: str = Field(default="", max_length=4096)
 
 
@@ -237,9 +222,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str]:
     """
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
-        created_at, _, companion_id = (
-            base64.urlsafe_b64decode(padded).decode().partition("\x1f")
-        )
+        created_at, _, companion_id = base64.urlsafe_b64decode(padded).decode().partition("\x1f")
         if not companion_id:
             raise ValueError("cursor is missing its tiebreak")
         return datetime.fromisoformat(created_at), companion_id
@@ -347,9 +330,7 @@ def create_app(
         after = _decode_cursor(cursor) if cursor else None
         # One extra row answers "is there another page" without a second query
         # that could see a different write.
-        rows = await store.companions.page_for_owner(
-            owner_id, limit=limit + 1, after=after
-        )
+        rows = await store.companions.page_for_owner(owner_id, limit=limit + 1, after=after)
         page, has_more = rows[:limit], len(rows) > limit
         return CompanionPageResponse(
             owner_id=owner_id,
@@ -487,10 +468,13 @@ def create_app(
                 lifecycle_state=row.status,
                 change_summary=row.change_summary,
                 restored_from_version=(
-                    by_id[row.base_genome_id].version
-                    if (row.source_json or {}).get("source_type") == "owner_restore"
-                    and row.base_genome_id in by_id
-                    else None
+                    (row.source_json or {}).get("restored_version")
+                    or (
+                        by_id[row.base_genome_id].version
+                        if (row.source_json or {}).get("source_type") == "owner_restore"
+                        and row.base_genome_id in by_id
+                        else None
+                    )
                 ),
                 is_current=row.genome_id == companion.current_genome_id,
                 created_at=row.created_at.isoformat(),
@@ -498,6 +482,17 @@ def create_app(
             for row in sorted(rows, key=lambda value: value.version, reverse=True)
         ]
         return PersonaTimelineResponse(companion_id=companion_id, chapters=chapters)
+
+    @app.get(
+        "/api/companion-authority/v1/persona-presets",
+        response_model=PersonaPresetCatalog,
+        tags=["companion-authority"],
+    )
+    async def get_persona_presets(
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ):
+        authorize_service(authorization, token)
+        return persona_preset_catalog()
 
     @app.get(
         "/api/companion-authority/v1/persona-authoring-template",
@@ -534,52 +529,37 @@ def create_app(
 
     @app.get(
         "/api/companion-authority/v1/companions/{companion_id}/persona",
-        response_model=PersonaAuthoring,
+        response_model=PersonaEditSnapshot,
         tags=["companion-authority"],
     )
     async def get_persona(
-        companion_id: str,
-        authorization: str | None = Header(default=None, alias="Authorization"),
-    ) -> PersonaAuthoring:
-        """Who this Companion is now, in the part a person wrote.
-
-        The read an edit screen opens on. It answers with the same shape the
-        write accepts, so read → change one sentence → send back needs no
-        translation, and the fields a form does not show still make the trip
-        instead of being wiped by their own absence.
-        """
-
+        companion_id: str, authorization: str | None = Header(default=None, alias="Authorization")
+    ):
         authorize_service(authorization, token)
-        current = await store.persona_genomes.get_current(companion_id)
-        if current is None:
-            raise HTTPException(status_code=404, detail="companion has no persona")
-        return persona_authoring_of(normalize_persona_genome(current.genome_json))
+        try:
+            return await store.persona_commands.read_edit_snapshot(companion_id)
+        except PersonaGenomeConflict as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    def authorize_persona_edit(
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ):
+        authorize_service(authorization, token)
 
     @app.put(
         "/api/companion-authority/v1/companions/{companion_id}/persona",
-        response_model=PersonaChapterResponse,
+        response_model=PersonaEditSnapshot,
+        dependencies=[Depends(authorize_persona_edit)],
         tags=["companion-authority"],
     )
     async def author_persona(
         companion_id: str,
-        payload: PersonaAuthoringRequest,
+        payload: PersonaEditRequest,
         authorization: str | None = Header(default=None, alias="Authorization"),
-    ) -> PersonaChapterResponse:
-        """Say who this Companion is now, as a new chapter rather than an edit.
-
-        PUT because the body states an end — "this is who it is" — so a client
-        that lost the answer sends the same thing again and lands in the same
-        place. Sending it twice writes one chapter, because an unchanged genome
-        hashes to what is already current.
-        """
-
+    ):
         authorize_service(authorization, token)
         try:
-            authored = await store.persona_genomes.author(
-                companion_id=companion_id,
-                persona=payload.persona,
-                change_summary=payload.change_summary,
-            )
+            return await store.persona_commands.edit(companion_id=companion_id, request=payload)
         except PersonaGenomeConflict as exc:
             raise HTTPException(
                 status_code=409,
@@ -589,15 +569,6 @@ def create_app(
                     "stale_genome_id": exc.stale_genome_id,
                 },
             ) from exc
-        return PersonaChapterResponse(
-            genome_id=authored.genome_id,
-            version=authored.version,
-            lifecycle_state=authored.status,
-            change_summary=authored.change_summary,
-            restored_from_version=None,
-            is_current=True,
-            created_at=authored.created_at.isoformat(),
-        )
 
     @app.post(
         "/api/companion-authority/v1/companions/{companion_id}/persona-restorations",
@@ -684,9 +655,7 @@ def create_app(
             # Either the pointer is unset or it points at a Companion that is no
             # longer active. Both mean the same thing to a caller asking "who
             # answers when nobody was named": nobody, and it must not guess.
-            raise HTTPException(
-                status_code=412, detail="owner has no active default companion"
-            )
+            raise HTTPException(status_code=412, detail="owner has no active default companion")
         return await _runtime_snapshot(store, companion, genome_id=None)
 
     @app.get(
@@ -771,7 +740,9 @@ def create_app(
         try:
             store.object_storage.put(key, data, expected_sha256=digest)
         except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=500, detail="companion face could not be stored") from exc
+            raise HTTPException(
+                status_code=500, detail="companion face could not be stored"
+            ) from exc
         try:
             asset = await store.companion_faces.set_face(
                 companion_id=companion_id,

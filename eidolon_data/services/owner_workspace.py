@@ -19,6 +19,7 @@ from eidolon_sdk.biz.contracts.companion import (
 from eidolon_sdk.biz.persona import (
     PERSONA_GENOME_SCHEMA,
     PERSONA_REALIZER,
+    ConversationPreferences,
     PersonaAuthoring,
     PersonaAuthoringDraft,
     build_default_persona_genome,
@@ -525,9 +526,7 @@ class CompanionWorkspaceService:
                 subject_id=companion_id,
                 action="companion.retirement_begun",
                 payload={
-                    "replacement_companion_id": (
-                        replacement.companion_id if replacement else None
-                    )
+                    "replacement_companion_id": (replacement.companion_id if replacement else None)
                 },
             )
         )
@@ -720,9 +719,7 @@ class CompanionWorkspaceService:
                 # true. A retry after a lost response is the common case, and
                 # refusing it would make the caller's only safe move a re-read
                 # followed by another write that changes nothing.
-                raise OwnerWorkspaceConflict(
-                    "owner revision has moved since this caller read it"
-                )
+                raise OwnerWorkspaceConflict("owner revision has moved since this caller read it")
             if previous_id != companion_id:
                 owner.default_companion_id = companion_id
                 owner.revision += 1
@@ -764,6 +761,7 @@ class CompanionWorkspaceService:
         companion_display_name: str,
         kind: str = "conversational",
         persona: PersonaAuthoring | None = None,
+        preferences: ConversationPreferences | None = None,
     ) -> CompanionProvisionResult:
         """Add a Companion to an Owner who already has one, exactly once.
 
@@ -794,9 +792,7 @@ class CompanionWorkspaceService:
         if not REQUEST_FINGERPRINT_RE.fullmatch(request_fingerprint):
             raise OwnerWorkspaceError("request_fingerprint must be a sha256 digest")
         if kind not in COMPANION_KINDS:
-            raise OwnerWorkspaceError(
-                "kind must be conversational, guard, specialist, or system"
-            )
+            raise OwnerWorkspaceError("kind must be conversational, guard, specialist, or system")
         display_name = companion_display_name.strip()
         if not display_name:
             raise OwnerWorkspaceError("companion_display_name cannot be blank")
@@ -819,7 +815,14 @@ class CompanionWorkspaceService:
                 companion_display_name=display_name,
                 kind=kind,
                 companion_profile_json=None,
-                companion_runtime_config_json=None,
+                companion_runtime_config_json=(
+                    None
+                    if preferences is None
+                    else {
+                        "conversation_preferences": preferences.model_dump(mode="json"),
+                        "preference_revision": 1,
+                    }
+                ),
                 companion_metadata_json={
                     "source": "companion_provision",
                     PROVISION_METADATA_KEY: {
@@ -840,12 +843,8 @@ class CompanionWorkspaceService:
                 },
                 genome_json=persona_genome_to_json(
                     build_persona_genome_from_draft(
-                        PersonaAuthoringDraft.for_companion(
-                            persona, name=display_name
-                        ),
-                        origin=(
-                            "owner_authored" if persona is not None else "template"
-                        ),
+                        PersonaAuthoringDraft.for_companion(persona, name=display_name),
+                        origin=("owner_authored" if persona is not None else "template"),
                     )
                 ),
                 realm_id=ids["realm_id"],
@@ -883,9 +882,7 @@ class CompanionWorkspaceService:
     ) -> CompanionWorkspaceResult:
         owner_id = _validate_owner_id(owner_id)
         if kind not in COMPANION_KINDS:
-            raise OwnerWorkspaceError(
-                "kind must be conversational, guard, specialist, or system"
-            )
+            raise OwnerWorkspaceError("kind must be conversational, guard, specialist, or system")
         resolved_companion_id = companion_id or f"c_{owner_id}"
         resolved_genome_id = genome_id or f"g_{uuid4().hex}"
         resolved_realm_id = realm_id or f"r_{uuid4().hex}"
@@ -1097,9 +1094,7 @@ async def _owned_companion(session, owner_id: str, companion_id: str) -> Compani
 
     companion = await session.get(CompanionRow, companion_id)
     if companion is None or companion.owner_id != owner_id:
-        raise CompanionLifecycleConflict(
-            "companion not found for owner", code="not_found"
-        )
+        raise CompanionLifecycleConflict("companion not found for owner", code="not_found")
     return companion
 
 
@@ -1266,16 +1261,20 @@ async def _active_realm_for_owner(session, owner_id: str):
     from sqlalchemy import select
 
     return (
-        await session.execute(
-            select(MemoryRealmRow).where(
-                MemoryRealmRow.owner_id == owner_id,
-                #: The column is ``status`` here, not ``lifecycle_state``: this
-                #: table names it that way and renaming it is not this change's
-                #: business.
-                MemoryRealmRow.status == "active",
+        (
+            await session.execute(
+                select(MemoryRealmRow).where(
+                    MemoryRealmRow.owner_id == owner_id,
+                    #: The column is ``status`` here, not ``lifecycle_state``: this
+                    #: table names it that way and renaming it is not this change's
+                    #: business.
+                    MemoryRealmRow.status == "active",
+                )
             )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
 
 
 async def _load_provision_result(

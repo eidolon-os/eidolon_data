@@ -57,26 +57,8 @@ class CompanionsRepository(Repository):
                     tuple_(CompanionRow.created_at, CompanionRow.companion_id)
                     > (created_at, companion_id)
                 )
-            query = query.order_by(
-                CompanionRow.created_at, CompanionRow.companion_id
-            ).limit(limit)
+            query = query.order_by(CompanionRow.created_at, CompanionRow.companion_id).limit(limit)
             return list(await session.scalars(query))
-
-    async def rename(self, companion_id: str, display_name: str) -> CompanionRow | None:
-        """Give this Companion the name its Owner chose.
-
-        Returns None when there is no such Companion, so the caller answers
-        "which Companion?" rather than reporting a rename that touched nothing.
-        """
-
-        async with self._session_factory() as session:
-            row = await session.get(CompanionRow, companion_id)
-            if row is None:
-                return None
-            row.display_name = display_name
-            await session.commit()
-            await session.refresh(row)
-            return row
 
     async def get_default_for_owner(self, owner_id: str) -> CompanionRow | None:
         """The Companion this Owner's unaddressed requests go to.

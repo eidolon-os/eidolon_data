@@ -13,17 +13,16 @@ from eidolon_data.db.engine import (
 )
 from eidolon_data.repositories import (
     CompanionFaceAssetsRepository,
-    CompanionsRepository,
     GuardBindingsRepository,
     MemoryRealmsRepository,
     OwnerFaceProfilesRepository,
     OwnersRepository,
-    PersonaRepository,
 )
 from eidolon_data.services.companion import CompanionDeletionService
 from eidolon_data.services.object_storage import LocalObjectStorage
 from eidolon_data.services.owner_deletion import OwnerDeletionService
 from eidolon_data.services.owner_workspace import CompanionWorkspaceService, OwnerService
+from eidolon_data.services.persona_access import CompanionsAccess, PersonaAccess
 from eidolon_data.services.persona_service import PersonaService
 from eidolon_data.settings import DataSettings
 
@@ -82,12 +81,12 @@ class DataStore:
         return OwnersRepository(self._session_factory)
 
     @property
-    def companions(self) -> CompanionsRepository:
-        return CompanionsRepository(self._session_factory)
+    def companions(self) -> CompanionsAccess:
+        return CompanionsAccess(self._session_factory)
 
     @property
-    def persona_genomes(self) -> PersonaRepository:
-        return PersonaRepository(self._session_factory)
+    def persona_genomes(self) -> PersonaAccess:
+        return PersonaAccess(self._session_factory)
 
     @property
     def memory_realms(self) -> MemoryRealmsRepository:
