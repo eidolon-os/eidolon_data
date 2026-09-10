@@ -343,7 +343,7 @@ async def test_data_refuses_memory_rewrites_of_owner_settings(store, field):
     if field == "constitution":
         proposal.proposed_genome.constitution.name = "Someone else"
     elif field == "relationship":
-        proposal.proposed_genome.relationship.pinned_facts = ["invented fact"]
+        proposal.proposed_genome.relationship.safety_boundaries = ["rewritten boundary"]
     else:
         proposal.proposed_genome.evolution_policy.max_delta_per_commit = 1
     with pytest.raises(ValueError, match="cannot rewrite"):

@@ -492,7 +492,12 @@ async def test_an_owner_may_name_their_companion(tmp_path) -> None:
         headers = {"Authorization": f"Bearer {token}"}
         path = "/api/companion-authority/v1/companions/companion-1"
 
-        renamed = await client.patch(path, json={"display_name": "小忆"}, headers=headers)
+        snapshot = (await client.get(f"{path}/persona", headers=headers)).json()
+        renamed = await client.put(
+            f"{path}/persona",
+            json=_persona_action(snapshot, "rename", display_name="小忆"),
+            headers=headers,
+        )
 
         assert renamed.status_code == 200
         assert renamed.json()["display_name"] == "小忆"
@@ -511,19 +516,18 @@ async def test_naming_refuses_what_it_cannot_carry_out(tmp_path) -> None:
     ):
         headers = {"Authorization": f"Bearer {token}"}
 
-        blank = await client.patch(
-            "/api/companion-authority/v1/companions/companion-1",
-            json={"display_name": "   "},
+        path = "/api/companion-authority/v1/companions/companion-1/persona"
+        snapshot = (await client.get(path, headers=headers)).json()
+        blank = await client.put(
+            path, json=_persona_action(snapshot, "rename", display_name="   "), headers=headers
+        )
+        missing = await client.put(
+            path.replace("companion-1", "nobody"),
+            json=_persona_action(snapshot, "rename", display_name="小忆"),
             headers=headers,
         )
-        missing = await client.patch(
-            "/api/companion-authority/v1/companions/nobody",
-            json={"display_name": "小忆"},
-            headers=headers,
-        )
-        unauthorized = await client.patch(
-            "/api/companion-authority/v1/companions/companion-1",
-            json={"display_name": "小忆"},
+        unauthorized = await client.put(
+            path, json=_persona_action(snapshot, "rename", display_name="小忆")
         )
 
         # A name of only spaces would erase the one the Owner has.
@@ -572,9 +576,10 @@ async def test_going_back_is_a_new_chapter_not_an_undo(tmp_path) -> None:
 
         # Nothing to go back to yet: it is already what it was.
         current = before["chapters"][0]
-        already = await client.post(
-            f"{base}/persona-restorations",
-            json={"genome_id": current["genome_id"]},
+        snapshot = (await client.get(f"{base}/persona", headers=headers)).json()
+        already = await client.put(
+            f"{base}/persona",
+            json=_persona_action(snapshot, "restore", restore_genome_id=current["genome_id"]),
             headers=headers,
         )
 
@@ -587,12 +592,14 @@ async def test_going_back_is_a_new_chapter_not_an_undo(tmp_path) -> None:
         # coverage of this route was the refusal above, and the success path
         # raised a foreign-key error on every call — a restore button that could
         # only ever 500, projected all the way to a phone.
-        moved_on = await client.post(
-            f"{base}/persona-restorations",
-            json={
-                "genome_id": original["genome_id"],
-                "change_summary": "回到了那时候的样子",
-            },
+        moved_on = await client.put(
+            f"{base}/persona",
+            json=_persona_action(
+                already.json(),
+                "restore",
+                restore_genome_id=original["genome_id"],
+                operation_id="restore-old",
+            ),
             headers=headers,
         )
 
@@ -600,7 +607,6 @@ async def test_going_back_is_a_new_chapter_not_an_undo(tmp_path) -> None:
         # Appended, not rewound: a new chapter carrying the old content, so the
         # record keeps what happened in between and says when someone went back.
         assert moved_on.json()["genome_id"] not in {original["genome_id"], "genome-2"}
-        assert moved_on.json()["is_current"] is True
         after = (await client.get(f"{base}/persona-timeline", headers=headers)).json()
         assert [chapter["version"] for chapter in after["chapters"]] == [3, 2, 1]
         assert after["chapters"][0]["restored_from_version"] == 1
@@ -1178,4 +1184,15 @@ def _edit_request(snapshot, persona, operation_id="test-edit"):
         "expected_preference_revision": snapshot["preference_revision"],
         "operation_id": operation_id,
         "persona": persona,
+    }
+
+
+def _persona_action(snapshot, action, **fields):
+    return {
+        "expected_base_genome_id": snapshot["genome_id"],
+        "expected_preference_revision": snapshot["preference_revision"],
+        "operation_id": f"test-{action}",
+        "persona": {},
+        "action": action,
+        **fields,
     }

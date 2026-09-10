@@ -77,6 +77,8 @@ class PersonaService:
                 original = await session.get(PersonaGenomeRow, receipt["genome_id"])
                 return PersonaEditSnapshot(
                     genome_id=original.genome_id,
+                    display_name=receipt["display_name"],
+                    companion_revision=receipt["companion_revision"],
                     persona=persona_authoring_of(normalize_persona_genome(original.genome_json)),
                     preferences=ConversationPreferences.model_validate(receipt["preferences"]),
                     preference_revision=receipt["preference_revision"],
@@ -96,17 +98,44 @@ class PersonaService:
                     stale_genome_id=current.genome_id,
                 )
             base = normalize_persona_genome(current.genome_json)
-            candidate = apply_persona_authoring(
-                base, request.persona, base_genome_id=current.genome_id
+            target = None
+            source = "owner_authored"
+            if request.action == "rename":
+                candidate = base.model_copy(deep=True)
+                candidate.constitution.name = request.display_name.strip()
+                companion.display_name = candidate.constitution.name
+                source, change_summary = "owner_rename", "更新伙伴名字"
+            elif request.action == "restore":
+                target = await session.get(PersonaGenomeRow, request.restore_genome_id)
+                if target is None or target.companion_id != companion_id:
+                    raise PersonaGenomeConflict(
+                        "persona does not belong to companion", code="not_this_companion"
+                    )
+                if target.status != "committed":
+                    raise PersonaGenomeConflict(
+                        "only committed personas can be restored", code="state_not_eligible"
+                    )
+                candidate = normalize_persona_genome(target.genome_json).model_copy(deep=True)
+                candidate.constitution.name = companion.display_name
+                if target.genome_id == current.genome_id:
+                    candidate = base.model_copy(deep=True)
+                source, change_summary = "owner_restore", "恢复性格设定"
+            else:
+                candidate = apply_persona_authoring(
+                    base, request.persona, base_genome_id=current.genome_id
+                )
+            changed = candidate.model_dump(exclude={"provenance"}) != base.model_dump(
+                exclude={"provenance"}
             )
-            if persona_authoring_of(candidate) != persona_authoring_of(base):
+            if changed or (target is not None and target.genome_id != current.genome_id):
                 current = await _append_persona(
                     session,
                     companion,
                     current,
                     candidate,
-                    source="owner_authored",
+                    source=source,
                     summary=change_summary,
+                    restored_from=target,
                 )
             if request.preferences is not None and request.preferences != before.preferences:
                 config = dict(companion.runtime_config_json or {})
@@ -122,6 +151,8 @@ class PersonaService:
             receipts[request.operation_id] = {
                 "fingerprint": fingerprint,
                 "genome_id": result.genome_id,
+                "display_name": result.display_name,
+                "companion_revision": result.companion_revision,
                 "preferences": result.preferences.model_dump(mode="json"),
                 "preference_revision": result.preference_revision,
             }
@@ -196,10 +227,7 @@ class PersonaService:
                 return current
             candidate = normalize_persona_genome(target.genome_json).model_copy(deep=True)
             candidate.constitution.name = companion.display_name
-            # Restoring personality must not resurrect old owner facts/preferences.
-            standing = normalize_persona_genome(current.genome_json)
-            candidate.relationship.pinned_facts = list(standing.relationship.pinned_facts)
-            candidate.relationship.owner_preferences = dict(standing.relationship.owner_preferences)
+            # Conversation preferences remain in the current Companion runtime config.
             return await _append_persona(
                 session,
                 companion,
@@ -546,10 +574,7 @@ class PersonaService:
             ):
                 return current
             candidate = normalize_persona_genome(genome.genome_json).model_copy(deep=True)
-            standing = normalize_persona_genome(current.genome_json)
             candidate.constitution.name = companion.display_name
-            candidate.relationship.pinned_facts = list(standing.relationship.pinned_facts)
-            candidate.relationship.owner_preferences = dict(standing.relationship.owner_preferences)
             return await _append_persona(
                 session,
                 companion,
@@ -678,6 +703,8 @@ def _edit_snapshot(companion, current):
     config = companion.runtime_config_json or {}
     return PersonaEditSnapshot(
         genome_id=current.genome_id,
+        display_name=companion.display_name,
+        companion_revision=companion.revision,
         persona=persona_authoring_of(normalize_persona_genome(current.genome_json)),
         preferences=ConversationPreferences.model_validate(
             config.get("conversation_preferences", {})

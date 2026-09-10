@@ -394,8 +394,6 @@ async def test_what_a_person_wrote_is_what_gets_stored(client) -> None:
                 "voice_portrait": "短句，不用感叹号",
                 "values": ["诚实"],
                 "boundaries": ["不替他做决定"],
-                "commitments": ["每周问一次他睡得好不好"],
-                "pinned_facts": ["他有一只叫阿力的猫"],
                 "safety_boundaries": ["不提他父亲"],
                 "behavior_guidance": ["先问再答"],
                 "dialogue_examples": ["「今天怎么样？」"],
@@ -412,8 +410,6 @@ async def test_what_a_person_wrote_is_what_gets_stored(client) -> None:
     assert genome["constitution"]["boundaries"] == ["不替他做决定"]
     assert genome["character"]["portrait"] == "安静，话不多，但记得住"
     assert genome["relationship"]["narrative"] == "我们是从一次很长的深夜对话开始的"
-    assert genome["relationship"]["commitments"] == ["每周问一次他睡得好不好"]
-    assert genome["relationship"]["pinned_facts"] == ["他有一只叫阿力的猫"]
     assert genome["relationship"]["safety_boundaries"] == ["不提他父亲"]
     assert genome["expression"]["voice_portrait"] == "短句，不用感叹号"
     assert genome["expression"]["behavior_guidance"] == ["先问再答"]

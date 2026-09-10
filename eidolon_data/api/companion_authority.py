@@ -421,20 +421,7 @@ def create_app(
         """
 
         authorize_service(authorization, token)
-        display_name = payload.display_name.strip()
-        if not display_name:
-            raise HTTPException(status_code=422, detail="display_name cannot be blank")
-        row = await store.companions.rename(companion_id, display_name)
-        if row is None:
-            raise HTTPException(status_code=404, detail="companion not found")
-        return CompanionIdentityResponse(
-            companion_id=row.companion_id,
-            owner_id=row.owner_id,
-            display_name=row.display_name,
-            lifecycle_state=row.lifecycle_state,
-            kind=row.kind,
-            revision=row.revision,
-        )
+        raise HTTPException(status_code=410, detail="Use versioned PUT /persona with action=rename")
 
     @app.get(
         "/api/companion-authority/v1/companions/{companion_id}/persona-timeline",
@@ -562,7 +549,7 @@ def create_app(
             return await store.persona_commands.edit(companion_id=companion_id, request=payload)
         except PersonaGenomeConflict as exc:
             raise HTTPException(
-                status_code=409,
+                status_code=404 if exc.code == "companion_missing" else 409,
                 detail={
                     "code": exc.code,
                     "message": str(exc),
@@ -583,33 +570,7 @@ def create_app(
         """Make this Companion what it was, as a new chapter rather than an undo."""
 
         authorize_service(authorization, token)
-        try:
-            restored = await store.persona_genomes.restore(
-                companion_id=companion_id,
-                genome_id=payload.genome_id,
-                change_summary=payload.change_summary,
-            )
-        except PersonaGenomeConflict as exc:
-            # The code travels, not only the sentence: a consumer telling "it is
-            # already that" from "someone changed it first" by matching English
-            # is a consumer that breaks when the wording improves.
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": exc.code,
-                    "message": str(exc),
-                    "stale_genome_id": exc.stale_genome_id,
-                },
-            ) from exc
-        return PersonaChapterResponse(
-            genome_id=restored.genome_id,
-            version=restored.version,
-            lifecycle_state=restored.status,
-            change_summary=restored.change_summary,
-            restored_from_version=(restored.source_json or {}).get("restored_version"),
-            is_current=True,
-            created_at=restored.created_at.isoformat(),
-        )
+        raise HTTPException(status_code=410, detail="Use versioned PUT /persona with action=restore")
 
     @app.get(
         "/api/companion-authority/v1/companions/{companion_id}/runtime-snapshot",
