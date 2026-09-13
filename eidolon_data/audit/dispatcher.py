@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from eidolon_sdk.biz.audit import AuditPublisher
+from eidolon_sdk.integrations.audit import should_report_publish_failure
 
 from eidolon_data.audit.outbox import AuditOutboxRepository
+
+logger = logging.getLogger(__name__)
 
 
 class AuditOutboxDispatcher:
@@ -39,6 +43,17 @@ class AuditOutboxDispatcher:
         try:
             acknowledged = await self._publisher.publish_many(events)
         except Exception as exc:
+            # Caught so a bus that is down cannot take this authority with it —
+            # but said out loud, which it was not. The outbox column was the only
+            # record for 5336 failures over six days, and nothing reads it.
+            attempt = batch.max_attempt_count + 1
+            if should_report_publish_failure(attempt):
+                logger.warning(
+                    "audit publish failed (attempt %d, %d event(s) waiting): %s",
+                    attempt,
+                    len(events),
+                    exc,
+                )
             await self._outbox.mark_failed(
                 ids,
                 error=f"{type(exc).__name__}: {exc}",

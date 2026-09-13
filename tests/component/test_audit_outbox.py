@@ -175,3 +175,45 @@ async def test_the_dispatcher_only_runs_when_a_bus_is_configured(tmp_path) -> No
             if task.get_name() == "eidolon-data-audit-dispatcher"
         ]
         assert running == []
+
+
+async def test_the_first_failure_reaches_a_log_and_not_only_a_column(store, caplog) -> None:
+    """Catching a transport failure is right; hiding it was not.
+
+    The dispatcher swallows transport errors on purpose — a bus that is down must
+    not take this authority with it, and the rows it could not send are rows its
+    Owner can still read. But the only record was ``audit_outbox.last_error``,
+    which no operator surface reads, so one Host published nothing for six days
+    across 5336 attempts while answering /health with 200 and logging nothing.
+    """
+
+    import logging
+
+    await _enqueue(store, "audit-loud")
+    dispatcher = AuditOutboxDispatcher(store.audit_outbox, Publisher(fail=True))
+
+    with caplog.at_level(logging.WARNING, logger="eidolon_data.audit.dispatcher"):
+        assert await dispatcher.dispatch_once() == 0
+
+    assert "audit publish failed" in caplog.text
+    assert "transport unavailable" in caplog.text
+    # The column still carries it too; the log is an addition, not a move.
+    state = await store.audit_outbox.get_delivery_state("audit-loud")
+    assert state is not None and state.last_error == "RuntimeError: transport unavailable"
+
+
+async def test_a_failure_that_keeps_failing_does_not_keep_shouting(store, caplog) -> None:
+    """Replacing silence with 5336 log lines would be the same defect."""
+
+    import logging
+
+    await _enqueue(store, "audit-quiet")
+    dispatcher = AuditOutboxDispatcher(store.audit_outbox, Publisher(fail=True))
+
+    with caplog.at_level(logging.WARNING, logger="eidolon_data.audit.dispatcher"):
+        await dispatcher.dispatch_once()   # attempt 1 — reported
+        caplog.clear()
+        await dispatcher.dispatch_once()   # attempt 2 — recorded, not reported
+        await dispatcher.dispatch_once()   # attempt 3
+
+    assert caplog.text == ""
