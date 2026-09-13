@@ -10,7 +10,13 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 license = { text = "PolyForm-Noncommercial-1.0.0" }
 dependencies = [
-    "eidolon-sdk",
+    # ``[audit]`` is not optional for this authority. It writes governance facts
+    # to ``audit_outbox`` and runs the dispatcher that publishes them, so the
+    # SDK's NATS publisher is a runtime dependency here, not an extra a Host may
+    # skip. Declared plain, it resolved without ``nats-py`` and every publish
+    # raised ``install eidolon-sdk[audit]`` into a column nobody reads — 5336
+    # retries over six days, no log line, health still 200.
+    "eidolon-sdk[audit]",
     "aiosqlite>=0.20",
     "alembic>=1.13",
     "pydantic>=2.8",
