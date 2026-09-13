@@ -11,6 +11,7 @@ from uuid import UUID
 
 from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
 from eidolon_sdk.biz.persona import ConversationPreferences, PersonaAuthoring
+from eidolon_sdk.integrations.audit import require_audit_transport
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -249,6 +250,14 @@ def create_app(
         # whole history rather than losing it quietly.
         dispatcher: asyncio.Task | None = None
         if store.settings.audit_nats_url:
+            # Configured to publish means it must be able to. Checked here, in
+            # front of the task, because a task's failure has nowhere to be
+            # reported: the dispatcher catches transport errors into
+            # ``last_error`` on purpose, and a missing dependency looks exactly
+            # like a bus that is down until somebody reads that column six days
+            # later. A bus that is down is survivable; a Host that could never
+            # publish is a broken deployment and should refuse to start.
+            require_audit_transport()
             dispatcher = asyncio.create_task(
                 run_audit_dispatcher(
                     store.audit_outbox,
