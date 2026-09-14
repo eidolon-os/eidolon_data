@@ -100,17 +100,27 @@ async def test_record_observation_is_owner_scoped_and_audited(store) -> None:
         )
 
 
-async def test_proposal_rejects_stale_base_hash_and_wrong_owner(store) -> None:
-    workspace = await _workspace(store)
-    bad_hash = _proposal(workspace.persona_genome, genome_id="bad-hash")
-    bad_hash = bad_hash.model_copy(update={"base_genome_hash": "pg_invalid"})
-    with pytest.raises(PersonaGenomeConflict, match="hash") as stale_hash:
-        await store.persona_commands.create_evolution_proposal(bad_hash)
-    # Its own code although it also means "stale": a hash that moved under a
-    # matching id means something rewrote a genome in place, which is a
-    # different problem from having lost a race.
-    assert stale_hash.value.code == "base_hash_mismatch"
+async def test_the_swap_compares_the_base_pointer_not_its_digest(store) -> None:
+    """A base that is still current is still the content it was.
 
+    The check runs under the Companion row lock and genome rows are
+    append-only, so ``current_genome_id == base_genome_id`` settles the race on
+    its own. ``base_genome_hash`` rides along as provenance; comparing it too
+    only guarded a genome being rewritten in place, which no path does.
+    """
+
+    workspace = await _workspace(store)
+    stale_digest = _proposal(workspace.persona_genome, genome_id="stale-digest").model_copy(
+        update={"base_genome_hash": "pg_invalid"}
+    )
+
+    proposed = await store.persona_commands.create_evolution_proposal(stale_digest)
+
+    assert proposed.genome_id == "stale-digest"
+
+
+async def test_proposal_rejects_wrong_owner(store) -> None:
+    workspace = await _workspace(store)
     wrong_owner = _proposal(
         workspace.persona_genome,
         genome_id="wrong-owner",
@@ -228,12 +238,11 @@ async def test_new_genome_base_must_belong_to_same_companion(store) -> None:
 
 
 async def test_a_proposal_against_an_older_genome_says_which_kind_of_stale(store) -> None:
-    """The two staleness codes, told apart on purpose.
+    """Staleness says so in a word the caller can act on.
 
     ``base_not_current`` means the work is fine and out of date — re-read and
-    propose again. ``base_hash_mismatch`` means the genome that id names is not
-    the content it named. A consumer that could not tell them apart would retry
-    both or neither.
+    propose again. A caller that only saw a sentence would have to match on
+    prose to know that retrying is worth it.
     """
 
     workspace = await _workspace(store)

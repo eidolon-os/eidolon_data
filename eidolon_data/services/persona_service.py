@@ -345,11 +345,16 @@ class PersonaService:
                     code="base_not_current",
                     stale_genome_id=proposal.base_genome_id,
                 )
+            # The pointer check above is the whole compare-and-swap: it runs
+            # under the Companion row lock, and genome rows are append-only, so
+            # a base that is still current is still the content it was. The
+            # hash comparison that used to stand here guarded a row being
+            # rewritten in place, which no path does.
             base = await session.get(PersonaGenomeRow, proposal.base_genome_id)
-            if base is None or base.genome_hash != proposal.base_genome_hash:
+            if base is None:
                 raise PersonaGenomeConflict(
-                    "proposal base hash does not match current genome",
-                    code="base_hash_mismatch",
+                    "proposal base genome is missing",
+                    code="base_not_current",
                     stale_genome_id=proposal.base_genome_id,
                 )
             validate_persona_evolution(normalize_persona_genome(base.genome_json), proposal)
