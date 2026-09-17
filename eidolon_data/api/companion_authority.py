@@ -15,13 +15,13 @@ from eidolon_sdk.biz.persona import (
     PersonaEditRequest,
     PersonaEditSnapshot,
     PersonaPresetCatalog,
-    persona_preset_catalog,
 )
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.repositories.persona import PersonaGenomeConflict
+from eidolon_data.services.persona_presets import load_persona_presets
 
 from .service_auth import authorize_service, required_service_token
 
@@ -479,7 +479,7 @@ def create_app(
         authorization: str | None = Header(default=None, alias="Authorization"),
     ):
         authorize_service(authorization, token)
-        return persona_preset_catalog()
+        return load_persona_presets()
 
     @app.get(
         "/api/companion-authority/v1/persona-authoring-template",

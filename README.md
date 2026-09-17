@@ -16,6 +16,7 @@ Owned here:
 - Owner identity, profile, settings, and lifecycle;
 - Companion identity, role, lifecycle, and governed runtime configuration;
 - immutable Persona Genome versions and the current pointer;
+- the packaged official Companion preset catalogue ([content and voice design](docs/companion-presets.md));
 - Memory Realm catalog pointers only;
 - Companion face and Owner face-profile integrity metadata;
 - low-frequency Guard-to-Device policy bindings, where `device_id` is an opaque

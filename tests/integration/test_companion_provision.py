@@ -546,3 +546,37 @@ async def test_an_unknown_authoring_field_is_refused_rather_than_ignored(
         headers=_auth(),
     )
     assert response.status_code == 422, response.text
+
+
+async def test_published_presets_create_independent_companion_snapshots(client):
+    from eidolon_sdk.biz.persona import PersonaPresetCatalog
+
+    http, store, settings = client
+    await _owner_with_one(store)
+    app = companion_authority_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://persona.test") as reader,
+    ):
+        path = "/api/companion-authority/v1/persona-presets"
+        assert (await reader.get(path)).status_code == 401
+        response = await reader.get(path, headers={"Authorization": f"Bearer {COMPANION_TOKEN}"})
+        assert response.status_code == 200, response.text
+        catalog = PersonaPresetCatalog.model_validate(response.json())
+        preset = next(p for p in catalog.presets if p.preset_id == "curious")
+        original = preset.persona.model_copy(deep=True)
+        created = await http.put(
+            PATH.format(owner="owner-1", operation=OPERATION),
+            json={"companion_display_name": "星野", "persona": preset.persona.model_dump(mode="json")},
+            headers=_auth(),
+        )
+        assert created.status_code == 200, created.text
+        companion_id = created.json()["companion"]["companion_id"]
+        snapshot = await store.persona_commands.read_edit_snapshot(companion_id)
+        assert snapshot.persona == original
+        # A caller's edited draft cannot alter either published content or a created companion.
+        preset.persona.voice_portrait = "caller changed the draft"
+        refreshed = await reader.get(path, headers={"Authorization": f"Bearer {COMPANION_TOKEN}"})
+        assert refreshed.json() == response.json()
+        assert (await store.persona_commands.read_edit_snapshot(companion_id)).persona == original
+
