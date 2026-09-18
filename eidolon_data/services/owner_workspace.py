@@ -758,6 +758,7 @@ class CompanionWorkspaceService:
         owner_id: str,
         operation_id: str,
         request_fingerprint: str,
+        replay_fingerprints: tuple[str, ...] = (),
         companion_display_name: str,
         kind: str = "conversational",
         persona: PersonaAuthoring | None = None,
@@ -793,6 +794,8 @@ class CompanionWorkspaceService:
         canonical_operation_id = _validate_operation_id(operation_id)
         if not REQUEST_FINGERPRINT_RE.fullmatch(request_fingerprint):
             raise OwnerWorkspaceError("request_fingerprint must be a sha256 digest")
+        if any(not REQUEST_FINGERPRINT_RE.fullmatch(value) for value in replay_fingerprints):
+            raise OwnerWorkspaceError("replay fingerprints must be sha256 digests")
         if kind not in COMPANION_KINDS:
             raise OwnerWorkspaceError("kind must be conversational, guard, specialist, or system")
         display_name = companion_display_name.strip()
@@ -808,6 +811,7 @@ class CompanionWorkspaceService:
                     owner_id=owner_id,
                     operation_id=canonical_operation_id,
                     request_fingerprint=request_fingerprint,
+                    replay_fingerprints=replay_fingerprints,
                 )
             realm_before = await _active_realm_for_owner(session, owner_id)
             result = await _provision_workspace_in_session(
@@ -1295,6 +1299,7 @@ async def _load_provision_result(
     owner_id: str,
     operation_id: str,
     request_fingerprint: str,
+    replay_fingerprints: tuple[str, ...] = (),
 ) -> CompanionProvisionResult:
     """Reconstruct a completed provision from the rows it created.
 
@@ -1315,14 +1320,15 @@ async def _load_provision_result(
     metadata = (companion.metadata_json or {}).get(PROVISION_METADATA_KEY)
     if not isinstance(metadata, dict) or metadata.get("operation_id") != operation_id:
         raise OwnerWorkspaceConflict("operation_id belongs to another operation")
-    if metadata.get("request_fingerprint") != request_fingerprint:
+    stored_fingerprint = metadata.get("request_fingerprint")
+    if stored_fingerprint not in (request_fingerprint, *replay_fingerprints):
         raise OwnerWorkspaceConflict("operation_id is already in use for another request")
     realm = await _active_realm_for_owner(session, owner_id)
     if realm is None:
         raise OwnerWorkspaceError("companion provision resources are incomplete")
     return CompanionProvisionResult(
         operation_id=operation_id,
-        request_fingerprint=request_fingerprint,
+        request_fingerprint=stored_fingerprint,
         companion=companion,
         persona_genome=genome,
         memory_realm=realm,

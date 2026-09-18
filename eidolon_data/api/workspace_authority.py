@@ -64,9 +64,7 @@ class CompanionProvisionRequest(BaseModel):
     #: the claim and never re-derives it, and nothing reads it back — a created
     #: Eidolon owes its preset nothing afterwards.
     source_preset_id: str | None = Field(default=None, min_length=1, max_length=64)
-    source_preset_revision: str | None = Field(
-        default=None, min_length=1, max_length=32
-    )
+    source_preset_revision: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class ProvisionedCompanionResponse(BaseModel):
@@ -425,6 +423,7 @@ def create_app(
                 owner_id=owner_id,
                 operation_id=str(operation_id),
                 request_fingerprint=fingerprint,
+                replay_fingerprints=(_provision_fingerprint(payload, include_null_source=True),),
                 companion_display_name=payload.companion_display_name,
                 kind=payload.kind,
                 persona=payload.persona,
@@ -595,17 +594,27 @@ def _owner_identity(row) -> OwnerIdentityResponse:
     )
 
 
-def _provision_fingerprint(payload: CompanionProvisionRequest) -> str:
+def _provision_fingerprint(
+    payload: CompanionProvisionRequest, *, include_null_source: bool = False
+) -> str:
     """The request's content, canonically, so a retry hashes the same.
 
     Same construction as the onboarding fingerprint. It is compared, never
     parsed: its only job is to tell "this request again" from "a different
     request wearing the same operation id".
     """
+    excluded = {"preferences"} if payload.preferences is None else set()
+    # Preserve pre-provenance receipts when the caller declares no source.
+    # The briefly deployed null-inclusive form is accepted for replays only;
+    # it is computed from this same request, never supplied by a caller.
+    if not include_null_source:
+        excluded.update(
+            field
+            for field in ("source_preset_id", "source_preset_revision")
+            if getattr(payload, field) is None
+        )
     canonical = json.dumps(
-        payload.model_dump(
-            mode="json", exclude={"preferences"} if payload.preferences is None else set()
-        ),
+        payload.model_dump(mode="json", exclude=excluded),
         ensure_ascii=False,
         sort_keys=True,
     )

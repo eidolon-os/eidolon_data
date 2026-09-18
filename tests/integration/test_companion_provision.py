@@ -13,6 +13,9 @@ The write is small. What matters is what it must not do:
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import httpx
 import pytest
 from httpx import ASGITransport
@@ -57,9 +60,7 @@ async def client(tmp_path):
     app = create_app(settings, service_token=TOKEN)
     async with (
         app.router.lifespan_context(app),
-        httpx.AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://data.test"
-        ) as http,
+        httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://data.test") as http,
     ):
         # The settings travel with the client so a test that needs the *other*
         # authority can build it on the same store.
@@ -97,9 +98,7 @@ async def _realms(store: DataStore, owner_id: str = "owner-1") -> int:
 
 
 async def _owner(http: httpx.AsyncClient, owner_id: str = "owner-1") -> dict:
-    response = await http.get(
-        f"/api/workspace-authority/v1/owners/{owner_id}", headers=_auth()
-    )
+    response = await http.get(f"/api/workspace-authority/v1/owners/{owner_id}", headers=_auth())
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -226,9 +225,7 @@ async def test_creating_one_does_not_move_the_default(client) -> None:
     )
 
     after = await _owner(http)
-    assert (
-        after["default_companion_id"] == before["default_companion_id"] == "c-first-owner-1"
-    )
+    assert after["default_companion_id"] == before["default_companion_id"] == "c-first-owner-1"
     assert after["revision"] == before["revision"], "the Owner aggregate is untouched"
 
 
@@ -296,7 +293,7 @@ async def test_two_operations_make_two_companions(client) -> None:
 
 
 async def test_an_unknown_owner_is_not_created_by_asking(client) -> None:
-    http, store, _settings = client
+    http, _store, _settings = client
 
     answered = await http.put(
         PATH.format(owner="owner-nobody", operation=OPERATION),
@@ -492,9 +489,7 @@ async def test_the_template_is_what_asking_for_nothing_would_have_written(
         headers=_auth(),
     )
     assert created.status_code == 200, created.text
-    round_tripped = await _genome_of(
-        store, created.json()["companion"]["companion_id"]
-    )
+    round_tripped = await _genome_of(store, created.json()["companion"]["companion_id"])
 
     # ... and compare with what asking for nothing writes.
     default = await http.put(
@@ -519,14 +514,10 @@ async def test_the_template_needs_the_authority_credential(tmp_path) -> None:
     app = companion_authority_app(settings)
     async with (
         app.router.lifespan_context(app),
-        httpx.AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://persona.test"
-        ) as http,
+        httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://persona.test") as http,
     ):
         assert (
-            await http.get(
-                "/api/companion-authority/v1/persona-authoring-template"
-            )
+            await http.get("/api/companion-authority/v1/persona-authoring-template")
         ).status_code == 401
 
 
@@ -556,7 +547,9 @@ async def test_published_presets_create_independent_companion_snapshots(client):
     app = companion_authority_app(settings)
     async with (
         app.router.lifespan_context(app),
-        httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://persona.test") as reader,
+        httpx.AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://persona.test"
+        ) as reader,
     ):
         path = "/api/companion-authority/v1/persona-presets"
         assert (await reader.get(path)).status_code == 401
@@ -567,7 +560,10 @@ async def test_published_presets_create_independent_companion_snapshots(client):
         original = preset.persona.model_copy(deep=True)
         created = await http.put(
             PATH.format(owner="owner-1", operation=OPERATION),
-            json={"companion_display_name": "星野", "persona": preset.persona.model_dump(mode="json")},
+            json={
+                "companion_display_name": "星野",
+                "persona": preset.persona.model_dump(mode="json"),
+            },
             headers=_auth(),
         )
         assert created.status_code == 200, created.text
@@ -579,7 +575,6 @@ async def test_published_presets_create_independent_companion_snapshots(client):
         refreshed = await reader.get(path, headers={"Authorization": f"Bearer {COMPANION_TOKEN}"})
         assert refreshed.json() == response.json()
         assert (await store.persona_commands.read_edit_snapshot(companion_id)).persona == original
-
 
 
 async def test_a_preset_taken_untouched_is_recorded_as_where_it_came_from(client):
@@ -630,3 +625,50 @@ async def test_an_authored_companion_claims_no_preset(client):
     # Stored documents drop what carries nothing, so claiming no preset is the
     # key being absent as much as it being null.
     assert provenance.get("source_preset_id") is None
+
+
+@pytest.mark.parametrize("null_source", [False, True])
+@pytest.mark.parametrize("with_preferences", [False, True])
+async def test_previously_written_receipts_replay_after_optional_source_fields(
+    client, null_source, with_preferences
+):
+    """Replay both deployed encodings without accepting a changed request."""
+    from eidolon_sdk.biz.persona import ConversationPreferences
+
+    http, store, _settings = client
+    await _owner_with_one(store)
+    preferences = ConversationPreferences(response_length="brief") if with_preferences else None
+    body = {"companion_display_name": "小南"}
+    if preferences is not None:
+        body["preferences"] = preferences.model_dump(mode="json")
+    # Historical request documents, independent of today's model defaults.
+    document = {**body, "kind": "conversational", "persona": None}
+    if null_source:
+        document.update(source_preset_id=None, source_preset_revision=None)
+    fingerprint = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(document, ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()
+    )
+    original = await store.companion_workspaces.provision_companion(
+        owner_id="owner-1",
+        operation_id=OPERATION,
+        request_fingerprint=fingerprint,
+        companion_display_name="小南",
+        preferences=preferences,
+    )
+    url = PATH.format(owner="owner-1", operation=OPERATION)
+    replay = await http.put(url, headers=_auth(), json=body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["replayed"] is True
+    assert replay.json()["request_fingerprint"] == fingerprint
+    assert replay.json()["companion"]["companion_id"] == original.companion.companion_id
+    for changed in (
+        {**body, "companion_display_name": "另一个"},
+        {**body, "source_preset_id": "gentle", "source_preset_revision": "1"},
+        {**body, "preferences": {"response_length": "balanced"}},
+    ):
+        refusal = await http.put(url, headers=_auth(), json=changed)
+        assert refusal.status_code == 409, refusal.text
+    assert len(await store.companions.page_for_owner("owner-1", limit=10)) == 2
