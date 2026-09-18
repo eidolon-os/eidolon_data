@@ -798,6 +798,17 @@ class CompanionWorkspaceService:
             raise OwnerWorkspaceError("replay fingerprints must be sha256 digests")
         if kind not in COMPANION_KINDS:
             raise OwnerWorkspaceError("kind must be conversational, guard, specialist, or system")
+        # A preset claim is recorded, never re-derived — so the only thing to
+        # check is whether it could be true at all. A revision names nothing
+        # without the preset it is a revision of, and a claim to have taken a
+        # preset untouched cannot be made about a genome this authority is
+        # about to default into existence. Both would store a false record.
+        # An id without a revision is merely less than the whole story, so it
+        # is allowed: this refuses what is wrong, not what is incomplete.
+        if source_preset_revision is not None and source_preset_id is None:
+            raise OwnerWorkspaceError("source_preset_revision requires source_preset_id")
+        if source_preset_id is not None and persona is None:
+            raise OwnerWorkspaceError("a source preset claim requires the persona it claims")
         display_name = companion_display_name.strip()
         if not display_name:
             raise OwnerWorkspaceError("companion_display_name cannot be blank")
@@ -841,8 +852,18 @@ class CompanionWorkspaceService:
                     # A genome somebody wrote and a genome the Host defaulted to
                     # are different facts, and the record has to be able to tell
                     # them apart long after both look like text in a column.
+                    # Taking a published preset and leaving it alone is a third
+                    # fact, and this column has to draw the same three lines
+                    # ``provenance.origin`` draws below — ``persona_service``
+                    # derives one from the other, so a column that called an
+                    # untouched preset ``owner_authored`` would be the same
+                    # claim that nobody wrote, wearing the other name.
                     "source_type": (
-                        "owner_authored" if persona is not None else "companion_provision"
+                        "companion_preset"
+                        if source_preset_id is not None
+                        else "owner_authored"
+                        if persona is not None
+                        else "companion_provision"
                     ),
                     "owner_id": owner_id,
                     "operation_id": canonical_operation_id,

@@ -16,7 +16,33 @@ SDK 只保留跨进程模型 `PersonaPreset` / `PersonaPresetCatalog`，不再�
 **它只是记录。** 人格在创建时整份写定，所以提升模板 `revision` 不会回溯已创建的
 伙伴；没有任何读取路径会去解析这两个字段来决定行为，伙伴此后的自进化与模板无关。
 声明由客户端给出——只有它持有草稿、知道用户有没有改过；Data 只记录，不比对推断。
-原封不动取用一份模板时 `origin` 记为 `template`，改写过则是 `owner_authored`。
+
+### 怎么读这份 provenance
+
+`origin` 一个词不够用，必须和 `source_preset_id` 一起读。四种形状：
+
+| origin | source_preset_id | 含义 |
+| --- | --- | --- |
+| `template` | 有 | 原封不动取用了这份官方模板 |
+| `template` | 无 | SDK 内置默认人格（onboarding 建的第一个伙伴，或创建时没带 persona） |
+| `owner_authored` | 无 | 从零写的 |
+| `owner_authored` | 有 | 从这份模板起步，之后被改写过 |
+
+第四种是**正常且有意**的：`source_preset_id` 说的是 v1 从哪来，`origin` 说的是当前
+这一版怎么来的。编辑、改名、恢复都会把 `source_preset_id` 继续带给后代版本，因为
+"它从哪开始"不会因为后来被改过就不再为真。
+
+genome 行的 `source_json.source_type` 画同样三条线（`companion_preset` /
+`owner_authored` / `companion_provision`），不是两条。`persona_service` 会从
+`source_type` 反推 `origin`，两列若能各说各话，同一件事就成了两件事。
+
+### Data 只拒绝不可能为真的声明
+
+不比对正文去猜"这份人格是不是那个模板"——那种推断在悄悄出错之前一直是对的。
+能拒的只有当面就假的声明，两条：没有 `source_preset_id` 的 `source_preset_revision`
+（一个不属于任何模板的版本号），以及不带 persona 的模板声明（那会把主机自己造的
+默认人格标成用户选的模板）。有 id 无 revision 是**残缺但为真**，因此放行——
+"哪份模板被选了"这个问题，光靠 id 就能回答。
 
 四份模板为原创内容，借鉴下面的产品机制，不复制竞品角色或提示词。
 
