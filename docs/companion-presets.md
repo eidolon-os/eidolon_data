@@ -10,7 +10,13 @@
 SDK 只保留跨进程模型 `PersonaPreset` / `PersonaPresetCatalog`，不再提供目录工厂或
 任何官方模板内容。Admin 继续转发 Data 接口，Mobile/Web 读取同一份目录。
 修改模板内容必须提升 `revision`。创建沿用完整人格快照写入流程，更新模板不会
-覆盖已创建伙伴。来源模板 ID/版本的持久化尚未实现，本次不把它描述为已完成。
+覆盖已创建伙伴。
+
+来源模板会记进 provenance：`source_preset_id` 与 `source_preset_revision`。
+**它只是记录。** 人格在创建时整份写定，所以提升模板 `revision` 不会回溯已创建的
+伙伴；没有任何读取路径会去解析这两个字段来决定行为，伙伴此后的自进化与模板无关。
+声明由客户端给出——只有它持有草稿、知道用户有没有改过；Data 只记录，不比对推断。
+原封不动取用一份模板时 `origin` 记为 `template`，改写过则是 `owner_authored`。
 
 四份模板为原创内容，借鉴下面的产品机制，不复制竞品角色或提示词。
 
