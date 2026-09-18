@@ -36,6 +36,14 @@ genome 行的 `source_json.source_type` 画同样三条线（`companion_preset` 
 `owner_authored` / `companion_provision`），不是两条。`persona_service` 会从
 `source_type` 反推 `origin`，两列若能各说各话，同一件事就成了两件事。
 
+### 早于本次修正的既有行
+
+`pi5-preset-provenance-20260918b` 期间建出来的伙伴，`origin` 已经是 `template`，
+但 `source_type` 仍写着 `owner_authored`——那一版只改了两列中的一列。没有读取路径
+依赖这一列（只有 `owner_restore` 被读到），所以行为不受影响，但按上表去读这些行会
+在第一列和第三列之间看到矛盾。要统一得补录，而补录**不能重算 `genome_hash`**：
+会话把 genome_hash 钉在对话元数据里，改了它，正在进行的对话会在下一轮直接失败。
+
 ### Data 只拒绝不可能为真的声明
 
 不比对正文去猜"这份人格是不是那个模板"——那种推断在悄悄出错之前一直是对的。
