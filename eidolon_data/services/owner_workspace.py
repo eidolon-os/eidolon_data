@@ -762,6 +762,8 @@ class CompanionWorkspaceService:
         kind: str = "conversational",
         persona: PersonaAuthoring | None = None,
         preferences: ConversationPreferences | None = None,
+        source_preset_id: str | None = None,
+        source_preset_revision: str | None = None,
     ) -> CompanionProvisionResult:
         """Add a Companion to an Owner who already has one, exactly once.
 
@@ -844,7 +846,17 @@ class CompanionWorkspaceService:
                 genome_json=persona_genome_to_json(
                     build_persona_genome_from_draft(
                         PersonaAuthoringDraft.for_companion(persona, name=display_name),
-                        origin=("owner_authored" if persona is not None else "template"),
+                        # A preset taken and left alone did not become someone
+                        # the Owner wrote just because the client sent the whole
+                        # snapshot. The client says which of the two happened;
+                        # this authority does not compare prose to guess.
+                        origin=(
+                            "template"
+                            if source_preset_id is not None or persona is None
+                            else "owner_authored"
+                        ),
+                        source_preset_id=source_preset_id,
+                        source_preset_revision=source_preset_revision,
                     )
                 ),
                 realm_id=ids["realm_id"],

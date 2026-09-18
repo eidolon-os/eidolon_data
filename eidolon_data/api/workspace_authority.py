@@ -58,6 +58,15 @@ class CompanionProvisionRequest(BaseModel):
     #: field added to the genome cannot be silently dropped in transit.
     persona: PersonaAuthoring | None = None
     preferences: ConversationPreferences | None = None
+    #: Which published preset this came from, when the caller took one and left
+    #: it alone. Declared by the client because the client is what knows: it
+    #: held the draft and saw whether anybody edited it. This authority records
+    #: the claim and never re-derives it, and nothing reads it back — a created
+    #: Eidolon owes its preset nothing afterwards.
+    source_preset_id: str | None = Field(default=None, min_length=1, max_length=64)
+    source_preset_revision: str | None = Field(
+        default=None, min_length=1, max_length=32
+    )
 
 
 class ProvisionedCompanionResponse(BaseModel):
@@ -420,6 +429,8 @@ def create_app(
                 kind=payload.kind,
                 persona=payload.persona,
                 preferences=payload.preferences,
+                source_preset_id=payload.source_preset_id,
+                source_preset_revision=payload.source_preset_revision,
             )
         except OwnerWorkspaceError as exc:
             raise HTTPException(status_code=_workspace_error_status(exc), detail=str(exc)) from exc

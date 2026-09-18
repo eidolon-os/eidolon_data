@@ -580,3 +580,53 @@ async def test_published_presets_create_independent_companion_snapshots(client):
         assert refreshed.json() == response.json()
         assert (await store.persona_commands.read_edit_snapshot(companion_id)).persona == original
 
+
+
+async def test_a_preset_taken_untouched_is_recorded_as_where_it_came_from(client):
+    # Provenance, not a pointer. The genome was written whole at creation, so
+    # raising a preset's revision later cannot reach back into this Eidolon —
+    # what is kept is only which revision it was written from.
+    http, store, _ = client
+    await _owner_with_one(store)
+    from eidolon_data.services.persona_presets import load_persona_presets
+
+    preset = next(p for p in load_persona_presets().presets if p.preset_id == "curious")
+    response = await http.put(
+        PATH.format(owner="owner-1", operation=OPERATION),
+        json={
+            "companion_display_name": preset.default_name,
+            "persona": preset.persona.model_dump(mode="json"),
+            "source_preset_id": preset.preset_id,
+            "source_preset_revision": preset.revision,
+        },
+        headers=_auth(),
+    )
+    assert response.status_code == 200, response.text
+    companion_id = response.json()["companion"]["companion_id"]
+    genome = (await store.persona_commands.read_edit_snapshot(companion_id)).persona
+    assert genome == preset.persona
+    provenance = (await _genome_of(store, companion_id))["genome"]["provenance"]
+    assert provenance["source_preset_id"] == "curious"
+    assert provenance["source_preset_revision"] == preset.revision
+    # Taking a preset and leaving it alone is not authoring it.
+    assert provenance["origin"] == "template"
+
+
+async def test_an_authored_companion_claims_no_preset(client):
+    http, store, _ = client
+    await _owner_with_one(store)
+    response = await http.put(
+        PATH.format(owner="owner-1", operation=OPERATION),
+        json={
+            "companion_display_name": "自己写的",
+            "persona": {"character_portrait": "我自己写的"},
+        },
+        headers=_auth(),
+    )
+    assert response.status_code == 200, response.text
+    companion_id = response.json()["companion"]["companion_id"]
+    provenance = (await _genome_of(store, companion_id))["genome"]["provenance"]
+    assert provenance["origin"] == "owner_authored"
+    # Stored documents drop what carries nothing, so claiming no preset is the
+    # key being absent as much as it being null.
+    assert provenance.get("source_preset_id") is None
