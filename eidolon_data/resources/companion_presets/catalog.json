@@ -1,8 +1,9 @@
 {
   "presets": [
-    "gentle",
-    "direct",
-    "playful",
-    "curious"
+    "metal",
+    "wood",
+    "water",
+    "fire",
+    "earth"
   ]
 }

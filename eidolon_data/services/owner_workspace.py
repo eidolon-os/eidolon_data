@@ -293,6 +293,10 @@ class CompanionWorkspaceService:
         request_fingerprint: str,
         owner_display_name: str,
         companion_display_name: str,
+        persona: PersonaAuthoring | None = None,
+        preferences: ConversationPreferences | None = None,
+        source_preset_id: str | None = None,
+        source_preset_revision: str | None = None,
     ) -> OwnerWorkspaceInitializationResult:
         """Atomically initialize the first Owner workspace for one operation.
 
@@ -310,6 +314,10 @@ class CompanionWorkspaceService:
             raise OwnerWorkspaceError("owner_display_name cannot be blank")
         if not companion_name:
             raise OwnerWorkspaceError("companion_display_name cannot be blank")
+        if source_preset_revision is not None and source_preset_id is None:
+            raise OwnerWorkspaceError("source_preset_revision requires source_preset_id")
+        if source_preset_id is not None and persona is None:
+            raise OwnerWorkspaceError("a source preset claim requires the persona it claims")
         ids = _onboarding_ids(canonical_operation_id)
 
         async with self._session_factory() as session, session.begin():
@@ -348,7 +356,14 @@ class CompanionWorkspaceService:
                 companion_display_name=companion_name,
                 kind="conversational",
                 companion_profile_json={},
-                companion_runtime_config_json={},
+                companion_runtime_config_json=(
+                    {}
+                    if preferences is None
+                    else {
+                        "conversation_preferences": preferences.model_dump(mode="json"),
+                        "preference_revision": 1,
+                    }
+                ),
                 companion_metadata_json={
                     "source": "owner_onboarding",
                     ONBOARDING_METADATA_KEY: {
@@ -358,11 +373,28 @@ class CompanionWorkspaceService:
                 },
                 genome_id=ids["genome_id"],
                 genome_source_json={
-                    "source_type": "owner_onboarding",
+                    "source_type": (
+                        "companion_preset"
+                        if source_preset_id is not None
+                        else "owner_authored"
+                        if persona is not None
+                        else "owner_onboarding"
+                    ),
                     "owner_id": owner.owner_id,
                     "operation_id": canonical_operation_id,
                 },
-                genome_json=None,
+                genome_json=(
+                    None
+                    if persona is None
+                    else persona_genome_to_json(
+                        build_persona_genome_from_draft(
+                            PersonaAuthoringDraft.for_companion(persona, name=companion_name),
+                            origin="template" if source_preset_id is not None else "owner_authored",
+                            source_preset_id=source_preset_id,
+                            source_preset_revision=source_preset_revision,
+                        )
+                    )
+                ),
                 realm_id=ids["realm_id"],
                 memory_engine="mempalace",
                 memory_engine_config_json={},

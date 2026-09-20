@@ -148,9 +148,7 @@ async def test_owner_name_is_readable_and_correctable(tmp_path) -> None:
         assert read.json()["lifecycle_state"] == "active"
         assert read.json()["operation"] == "owner.identity"
 
-        renamed = await client.patch(
-            path, json={"display_name": "  曼森  "}, headers=headers
-        )
+        renamed = await client.patch(path, json={"display_name": "  曼森  "}, headers=headers)
         assert renamed.status_code == 200
         assert renamed.json()["display_name"] == "曼森"
         assert renamed.json()["owner_id"] == owner_id
@@ -228,3 +226,98 @@ async def test_the_workspace_operation_survives_the_owner_changing_default(
         resumed = await client.get(path, headers=headers)
         assert resumed.status_code == 200, resumed.text
         assert resumed.json()["workspace"]["primary_companion_id"] == first_companion
+
+
+@pytest.mark.parametrize("use_preset", [True, False])
+async def test_first_companion_keeps_full_authoring_and_content_bound_retry(tmp_path, use_preset):
+    from sqlalchemy import select
+
+    from eidolon_data.schema import CompanionRow, PersonaGenomeRow
+    from eidolon_data.services.persona_presets import load_persona_presets
+
+    settings = DataSettings(sqlite_path=str(tmp_path / "authored-first.sqlite3"))
+    store = DataStore.open(settings)
+    await store.init_schema()
+    preset = load_persona_presets().presets[2]
+    persona = preset.persona.model_copy(deep=True)
+    if not use_preset:
+        persona.character_portrait = "由用户自定义的第一位伙伴"
+    payload = {
+        "owner_display_name": "Owner",
+        "companion_display_name": "第一位伙伴",
+        "persona": persona.model_dump(mode="json"),
+        "preferences": {
+            "response_length": "detailed",
+            "advice": "when_asked",
+            "follow_up": "when_needed",
+        },
+        **(
+            {"source_preset_id": preset.preset_id, "source_preset_revision": preset.revision}
+            if use_preset
+            else {}
+        ),
+    }
+    token = "workspace-authority-token-authored"
+    headers = {"Authorization": f"Bearer {token}"}
+    path = "/api/workspace-authority/v1/operations/376ce102-149f-41e6-a2a5-b3f205e41d5b"
+    app = create_app(settings, service_token=token)
+    try:
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+            ) as http,
+        ):
+            first = await http.put(path, json=payload, headers=headers)
+            assert first.status_code == 200, first.text
+            replay = await http.put(path, json=payload, headers=headers)
+            assert replay.json() == first.json()
+            changed = {
+                **payload,
+                "preferences": {**payload["preferences"], "response_length": "brief"},
+            }
+            assert (await http.put(path, json=changed, headers=headers)).status_code == 409
+            changed = {
+                **payload,
+                "persona": {**payload["persona"], "character_portrait": "换一种性格"},
+            }
+            assert (await http.put(path, json=changed, headers=headers)).status_code == 409
+            companion_id = first.json()["workspace"]["primary_companion_id"]
+            snapshot = await store.persona_commands.read_edit_snapshot(companion_id)
+            assert snapshot.persona == persona
+            async with store._engine.connect() as connection:
+                companions = (await connection.execute(select(CompanionRow))).mappings().all()
+                assert len(companions) == 1
+                assert (
+                    companions[0]["runtime_config_json"]["conversation_preferences"][
+                        "response_length"
+                    ]
+                    == "detailed"
+                )
+                genome = (await connection.execute(select(PersonaGenomeRow))).mappings().one()
+                provenance = genome["genome_json"]["provenance"]
+                assert provenance["origin"] == ("template" if use_preset else "owner_authored")
+                assert provenance.get("source_preset_id") == (
+                    preset.preset_id if use_preset else None
+                )
+    finally:
+        await store.close()
+
+
+def test_legacy_onboarding_fingerprint_ignores_only_absent_new_fields():
+    import hashlib
+
+    from eidolon_data.api.workspace_authority import (
+        WorkspaceInitializeRequest,
+        _request_fingerprint,
+    )
+
+    legacy = {"owner_display_name": "Owner", "companion_display_name": "Eidolon"}
+    expected = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(legacy, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    assert _request_fingerprint(WorkspaceInitializeRequest(**legacy)) == expected
+    assert _request_fingerprint(WorkspaceInitializeRequest(**legacy, persona=None)) == expected

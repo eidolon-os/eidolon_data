@@ -29,12 +29,16 @@ from .service_auth import authorize_service, required_service_token
 
 
 class WorkspaceInitializeRequest(BaseModel):
-    """Minimal first-use input; later persona editing is a separate product flow."""
+    """First-use input with the same full persona snapshot as later companions."""
 
     model_config = ConfigDict(extra="forbid")
 
     owner_display_name: str = Field(min_length=1, max_length=128)
     companion_display_name: str = Field(default="Eidolon", min_length=1, max_length=128)
+    persona: PersonaAuthoring | None = None
+    preferences: ConversationPreferences | None = None
+    source_preset_id: str | None = Field(default=None, min_length=1, max_length=64)
+    source_preset_revision: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class OwnerRenameRequest(BaseModel):
@@ -309,6 +313,10 @@ def create_app(
                 request_fingerprint=fingerprint,
                 owner_display_name=payload.owner_display_name,
                 companion_display_name=payload.companion_display_name,
+                persona=payload.persona,
+                preferences=payload.preferences,
+                source_preset_id=payload.source_preset_id,
+                source_preset_revision=payload.source_preset_revision,
             )
         except OwnerWorkspaceError as exc:
             raise HTTPException(status_code=_workspace_error_status(exc), detail=str(exc)) from exc
@@ -622,8 +630,14 @@ def _provision_fingerprint(
 
 
 def _request_fingerprint(payload: WorkspaceInitializeRequest) -> str:
+    document = payload.model_dump(mode="json")
+    # Omitted optional authoring preserves receipts written by older Hosts.
+    # Keep nested fields intact: the complete persona participates in identity.
+    for key in ("persona", "preferences", "source_preset_id", "source_preset_revision"):
+        if document[key] is None:
+            del document[key]
     canonical = json.dumps(
-        payload.model_dump(mode="json"),
+        document,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

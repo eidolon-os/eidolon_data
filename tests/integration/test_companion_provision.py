@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -556,7 +557,7 @@ async def test_published_presets_create_independent_companion_snapshots(client):
         response = await reader.get(path, headers={"Authorization": f"Bearer {COMPANION_TOKEN}"})
         assert response.status_code == 200, response.text
         catalog = PersonaPresetCatalog.model_validate(response.json())
-        preset = next(p for p in catalog.presets if p.preset_id == "curious")
+        preset = next(p for p in catalog.presets if p.preset_id == "wood")
         original = preset.persona.model_copy(deep=True)
         created = await http.put(
             PATH.format(owner="owner-1", operation=OPERATION),
@@ -585,7 +586,7 @@ async def test_a_preset_taken_untouched_is_recorded_as_where_it_came_from(client
     await _owner_with_one(store)
     from eidolon_data.services.persona_presets import load_persona_presets
 
-    preset = next(p for p in load_persona_presets().presets if p.preset_id == "curious")
+    preset = next(p for p in load_persona_presets().presets if p.preset_id == "wood")
     response = await http.put(
         PATH.format(owner="owner-1", operation=OPERATION),
         json={
@@ -602,7 +603,7 @@ async def test_a_preset_taken_untouched_is_recorded_as_where_it_came_from(client
     assert genome == preset.persona
     written = await _genome_of(store, companion_id)
     provenance = written["genome"]["provenance"]
-    assert provenance["source_preset_id"] == "curious"
+    assert provenance["source_preset_id"] == "wood"
     assert provenance["source_preset_revision"] == preset.revision
     # Taking a preset and leaving it alone is not authoring it.
     assert provenance["origin"] == "template"
@@ -725,7 +726,7 @@ async def test_a_preset_claim_that_could_not_be_true_is_refused(client, body, re
 async def test_an_incomplete_preset_claim_is_still_a_true_one(client):
     """An id with no revision is less than the whole story, not a false one.
 
-    The product question this record exists for — which of the four somebody
+    The product question this record exists for — which preset somebody
     chose — is answered by the id alone. Refusing it would be strictness that
     buys nothing, so the line is drawn at claims that would be *wrong*.
     """
@@ -733,7 +734,7 @@ async def test_an_incomplete_preset_claim_is_still_a_true_one(client):
     await _owner_with_one(store)
     from eidolon_data.services.persona_presets import load_persona_presets
 
-    preset = next(p for p in load_persona_presets().presets if p.preset_id == "gentle")
+    preset = next(p for p in load_persona_presets().presets if p.preset_id == "water")
     response = await http.put(
         PATH.format(owner="owner-1", operation=OPERATION),
         json={
@@ -748,7 +749,7 @@ async def test_an_incomplete_preset_claim_is_still_a_true_one(client):
     provenance = (await _genome_of(store, response.json()["companion"]["companion_id"]))["genome"][
         "provenance"
     ]
-    assert provenance["source_preset_id"] == "gentle"
+    assert provenance["source_preset_id"] == "water"
     assert provenance.get("source_preset_revision") is None
     assert provenance["origin"] == "template"
 
@@ -766,7 +767,7 @@ async def test_declaring_a_preset_is_a_different_request_than_not(client):
     await _owner_with_one(store)
     from eidolon_data.services.persona_presets import load_persona_presets
 
-    preset = next(p for p in load_persona_presets().presets if p.preset_id == "playful")
+    preset = next(p for p in load_persona_presets().presets if p.preset_id == "fire")
     silent = {
         "companion_display_name": preset.default_name,
         "persona": preset.persona.model_dump(mode="json"),
@@ -802,8 +803,8 @@ async def test_where_it_began_survives_being_written_over(client):
     ``origin=owner_authored`` beside a ``source_preset_id`` is not a stale field
     nobody cleared. The two answer different questions: the id is where version
     one came from, the origin is how *this* version came to be. Somebody who
-    started from 小禾 and rewrote half of it did both things, and a record that
-    dropped the first would lose the only answer to "which of the four did
+    started from 小铮 and rewrote half of it did both things, and a record that
+    dropped the first would lose the only answer to "which preset did
     people actually pick" the moment anyone edited anything.
     """
     from eidolon_sdk.biz.persona import PersonaAuthoring, PersonaEditRequest
@@ -812,7 +813,7 @@ async def test_where_it_began_survives_being_written_over(client):
     await _owner_with_one(store)
     from eidolon_data.services.persona_presets import load_persona_presets
 
-    preset = next(p for p in load_persona_presets().presets if p.preset_id == "direct")
+    preset = next(p for p in load_persona_presets().presets if p.preset_id == "metal")
     created = await http.put(
         PATH.format(owner="owner-1", operation=OPERATION),
         json={
@@ -839,5 +840,33 @@ async def test_where_it_began_survives_being_written_over(client):
 
     provenance = (await _genome_of(store, companion_id))["genome"]["provenance"]
     assert provenance["origin"] == "owner_authored", "this version is the Owner's"
-    assert provenance["source_preset_id"] == "direct", "and it still began as direct"
+    assert provenance["source_preset_id"] == "metal", "and it still began as metal"
     assert provenance["source_preset_revision"] == preset.revision
+
+
+async def test_retired_preset_snapshot_remains_creatable_and_replayable(client):
+    """Catalogue retirement must not invalidate a phone's already loaded draft."""
+    from eidolon_sdk.biz.persona import PersonaAuthoring
+
+    http, store, _ = client
+    await _owner_with_one(store)
+    fixture = Path(__file__).parents[1] / "fixtures" / "retired_gentle_v3.json"
+    persona = PersonaAuthoring.model_validate(json.loads(fixture.read_text())["persona"])
+    body = {
+        "companion_display_name": "小禾",
+        "persona": persona.model_dump(mode="json"),
+        "source_preset_id": "gentle",
+        "source_preset_revision": "3",
+    }
+    path = PATH.format(owner="owner-1", operation=OPERATION)
+    first = await http.put(path, json=body, headers=_auth())
+    assert first.status_code == 200, first.text
+    replay = await http.put(path, json=body, headers=_auth())
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["replayed"] is True
+    companion_id = first.json()["companion"]["companion_id"]
+    assert replay.json()["companion"]["companion_id"] == companion_id
+    assert (await store.persona_commands.read_edit_snapshot(companion_id)).persona == persona
+    provenance = (await _genome_of(store, companion_id))["genome"]["provenance"]
+    assert provenance["source_preset_id"] == "gentle"
+    assert provenance["source_preset_revision"] == "3"

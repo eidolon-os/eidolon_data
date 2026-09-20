@@ -28,12 +28,13 @@ def catalogue_files(tmp_path):
 def test_installed_presets_produce_distinct_complete_genomes(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     presets = load_persona_presets().presets
-    assert [preset.preset_id for preset in presets] == ["gentle", "direct", "playful", "curious"]
+    assert [preset.preset_id for preset in presets] == ["metal", "wood", "water", "fire", "earth"]
     genomes = [
         build_persona_genome_from_draft(PersonaAuthoringDraft.for_companion(p.persona, name="伙伴"))
         for p in presets
     ]
     assert len({g.character.portrait for g in genomes}) == len(presets)
+    assert len({tuple(t.value for t in p.persona.traits.values()) for p in presets}) == len(presets)
     for preset, genome in zip(presets, genomes, strict=True):
         assert persona_authoring_of(genome) == preset.persona
         assert genome.expression.modality_notes["voice"] == preset.persona.modality_notes["voice"]
@@ -50,7 +51,7 @@ def test_editing_a_draft_does_not_mutate_the_next_catalogue():
     assert load_persona_presets() == original
 
 
-@pytest.mark.parametrize("ids", [["gentle", "gentle"], ["../gentle"], []])
+@pytest.mark.parametrize("ids", [["metal", "metal"], ["../metal"], []])
 def test_rejects_duplicate_unsafe_or_empty_index(catalogue_files, ids):
     (catalogue_files / "catalog.json").write_text(json.dumps({"presets": ids}))
     with pytest.raises(ValueError):
@@ -62,7 +63,7 @@ def test_rejects_duplicate_unsafe_or_empty_index(catalogue_files, ids):
     ["missing", "unlisted", "wrong_id", "incomplete", "unknown", "no_revision", "blank_example"],
 )
 def test_rejects_invalid_catalogue_without_defaulting(catalogue_files, change):
-    path = catalogue_files / "gentle.json"
+    path = catalogue_files / "metal.json"
     payload = json.loads(path.read_text())
     if change == "missing":
         path.unlink()
