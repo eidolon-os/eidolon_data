@@ -23,6 +23,7 @@
         "required": ["companion_id", "display_name", "kind", "lifecycle_state", "revision", "created_at", "updated_at", "current_genome_id", "memory_realm_id"],
         "properties": {
           "companion_id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "artwork_id": {"description": "Persisted versioned display artwork, independent of persona and face assets.", "type": ["string", "null"], "maxLength": 128},
           "display_name": {"type": "string", "maxLength": 128},
           "kind": {"type": "string", "minLength": 1, "maxLength": 32},
           "lifecycle_state": {"enum": ["active", "retiring", "archived", "deleting"]},

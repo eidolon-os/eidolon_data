@@ -11,3 +11,5 @@ Run from the `eidolon_data` project root:
 ```bash
 uv run alembic upgrade head
 ```
+
+`0002_companion_artwork` is an additive presentation metadata migration on V2. It records only known revision-1 initial presets, preserves all existing profile keys and visual choices, and does not change persona, memory or face assets. Downgrade retains this optional metadata.

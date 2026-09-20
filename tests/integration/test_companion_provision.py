@@ -603,6 +603,7 @@ async def test_a_preset_taken_untouched_is_recorded_as_where_it_came_from(client
     assert genome == preset.persona
     written = await _genome_of(store, companion_id)
     provenance = written["genome"]["provenance"]
+    assert (await store.companions.get(companion_id)).profile_json["artwork_id"] == "five-elements/1/wood"
     assert provenance["source_preset_id"] == "wood"
     assert provenance["source_preset_revision"] == preset.revision
     # Taking a preset and leaving it alone is not authoring it.

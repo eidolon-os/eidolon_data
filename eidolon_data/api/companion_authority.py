@@ -156,6 +156,7 @@ class CompanionSummaryResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    artwork_id: str | None = Field(default=None, max_length=128)
     companion_id: str = Field(min_length=1, max_length=64)
     display_name: str = Field(default="", max_length=128)
     kind: str = Field(min_length=1, max_length=32)
@@ -337,6 +338,7 @@ def create_app(
             default_companion_id=owner.default_companion_id,
             companions=[
                 CompanionSummaryResponse(
+                    artwork_id=(row.profile_json or {}).get("artwork_id"),
                     companion_id=row.companion_id,
                     display_name=row.display_name,
                     kind=row.kind,

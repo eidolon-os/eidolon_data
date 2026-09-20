@@ -30,7 +30,7 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
         }
         assert tables == EXPECTED_TABLES | {"alembic_version"}
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0001_system_data_v2",
+            "0002_companion_artwork",
         )
         for table_name, table in Base.metadata.tables.items():
             actual_columns = {
@@ -57,7 +57,7 @@ def test_clean_baseline_can_downgrade_and_reapply(tmp_path, monkeypatch) -> None
     command.upgrade(config, "head")
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0001_system_data_v2",
+            "0002_companion_artwork",
         )
 
 
@@ -148,16 +148,14 @@ def test_database_constraints_enforce_the_three_identity_axes(tmp_path, monkeypa
         )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "INSERT INTO memory_realms(realm_id, owner_id) "
-                "VALUES ('realm-a-second', 'owner-a')"
+                "INSERT INTO memory_realms(realm_id, owner_id) VALUES ('realm-a-second', 'owner-a')"
             )
         # Retiring the first one frees the Owner to have another.
         connection.execute(
             "UPDATE memory_realms SET status = 'inactive' WHERE realm_id = 'realm-a'"
         )
         connection.execute(
-            "INSERT INTO memory_realms(realm_id, owner_id) "
-            "VALUES ('realm-a-second', 'owner-a')"
+            "INSERT INTO memory_realms(realm_id, owner_id) VALUES ('realm-a-second', 'owner-a')"
         )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
@@ -175,3 +173,46 @@ def test_database_constraints_enforce_the_three_identity_axes(tmp_path, monkeypa
                 "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"
                 ")"
             )
+
+
+def test_artwork_upgrade_uses_initial_preset_and_preserves_explicit_choices(tmp_path, monkeypatch):
+    import json
+
+    path = tmp_path / "artwork.sqlite3"
+    monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "0001_system_data_v2")
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("INSERT INTO owners(owner_id) VALUES ('o')")
+        for identity, profile, preset, rev in [
+            ("water", {"other": 1}, "water", "1"),
+            ("custom", {}, None, None),
+            ("future", {}, "fire", "9"),
+            ("chosen", {"artwork_id": "my-choice"}, "earth", "1"),
+        ]:
+            connection.execute(
+                "INSERT INTO companions(companion_id,owner_id,profile_json) VALUES (?, 'o', ?)",
+                (identity, json.dumps(profile)),
+            )
+            genome = {"provenance": {"source_preset_id": preset, "source_preset_revision": rev}}
+            connection.execute(
+                "INSERT INTO persona_genomes(genome_id,companion_id,version,schema_version,genome_hash,realizer_version,genome_json) VALUES (?,?,1,'eidolon.persona_genome','hash','eidolon.persona_realizer',?)",
+                (identity, identity, json.dumps(genome)),
+            )
+        connection.commit()
+    command.upgrade(config, "head")
+    command.downgrade(config, "0001_system_data_v2")
+    command.upgrade(config, "head")
+    with closing(sqlite3.connect(path)) as connection:
+        profiles = {
+            identity: json.loads(raw)
+            for identity, raw in connection.execute(
+                "SELECT companion_id,profile_json FROM companions"
+            )
+        }
+    assert profiles == {
+        "water": {"other": 1, "artwork_id": "five-elements/1/water"},
+        "custom": {},
+        "future": {},
+        "chosen": {"artwork_id": "my-choice"},
+    }

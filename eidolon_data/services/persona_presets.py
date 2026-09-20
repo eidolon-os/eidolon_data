@@ -49,3 +49,10 @@ def _read_catalog(root: Traversable) -> PersonaPresetCatalog:
             raise ValueError(f"persona preset requires nonblank examples: {key}")
         presets.append(preset)
     return PersonaPresetCatalog(presets=presets)
+
+
+def initial_companion_artwork(preset_id: str | None, revision: str | None) -> dict:
+    """Snapshot the published visual choice once; later persona edits do not change it."""
+    if revision == "1" and preset_id in {"metal", "wood", "water", "fire", "earth"}:
+        return {"artwork_id": f"five-elements/1/{preset_id}"}
+    return {}

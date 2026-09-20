@@ -40,6 +40,7 @@ from eidolon_data.schema import (
     OwnerRow,
     PersonaGenomeRow,
 )
+from eidolon_data.services.persona_presets import initial_companion_artwork
 
 OWNER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$")
 GENERATED_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -355,7 +356,7 @@ class CompanionWorkspaceService:
                 companion_id=ids["companion_id"],
                 companion_display_name=companion_name,
                 kind="conversational",
-                companion_profile_json={},
+                companion_profile_json=initial_companion_artwork(source_preset_id, source_preset_revision),
                 companion_runtime_config_json=(
                     {}
                     if preferences is None
@@ -863,7 +864,7 @@ class CompanionWorkspaceService:
                 companion_id=ids["companion_id"],
                 companion_display_name=display_name,
                 kind=kind,
-                companion_profile_json=None,
+                companion_profile_json=initial_companion_artwork(source_preset_id, source_preset_revision),
                 companion_runtime_config_json=(
                     None
                     if preferences is None
