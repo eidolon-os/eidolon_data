@@ -35,6 +35,7 @@ a universal repository and not a required standalone microservice.
 | Memory Realm ID/engine/policy catalog | System Data | sovereignty pointer only |
 | Companion/Owner face integrity metadata | System Data | governed desired asset metadata |
 | Guard Companion policy binding | System Data | low-frequency owner policy; Device ID is opaque |
+| Smart-home registry (areas, devices, scenes, Eidolon device placements) | System Data | Owner master data edited from mobile; device state belongs to its Provider |
 | Device admission/manifest/revocation | Hub | Hub creates and arbitrates admission |
 | Device mount/attachment/revision | Kernel | Kernel owns local resource lifecycle |
 | Session/conversation/turn/message/job | Agent | Agent creates runtime history |
@@ -42,14 +43,17 @@ a universal repository and not a required standalone microservice.
 | Memory payload/vector/graph operations | Memory | Memory owns storage and realization |
 | global audit query timeline | independent projection | rebuildable read model, never a business authority |
 
-This produces exactly nine System Data tables:
+This produces exactly fifteen System Data tables:
 
 ```text
 owners                         companion_face_assets
 companions                     guard_bindings
 persona_genomes                owner_face_profile_revisions
 memory_realms                  owner_face_references
-audit_outbox
+audit_outbox                   smarthome_registries
+smarthome_areas                smarthome_devices
+smarthome_scenes               smarthome_scene_actions
+smarthome_placements
 ```
 
 There are no V2 tables or APIs for Device, body commands, Guard runtime

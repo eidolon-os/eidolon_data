@@ -26,6 +26,12 @@ def test_schema_contains_only_system_data_authority_tables() -> None:
         "owner_face_profile_revisions",
         "owner_face_references",
         "audit_outbox",
+        "smarthome_registries",
+        "smarthome_areas",
+        "smarthome_devices",
+        "smarthome_scenes",
+        "smarthome_scene_actions",
+        "smarthome_placements",
     }
 
 
