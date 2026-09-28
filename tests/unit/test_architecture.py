@@ -83,10 +83,12 @@ def test_dependency_directions_are_acyclic() -> None:
     assert violations == []
 
 
-def test_migration_history_is_one_clean_baseline() -> None:
+def test_migration_history_has_one_baseline_and_additive_revisions() -> None:
     versions = sorted((PACKAGE / "db" / "migrations" / "versions").glob("*.py"))
     assert [path.name for path in versions if path.name != "__init__.py"] == [
-        "0001_system_data_v2.py"
+        "0001_system_data_v2.py",
+        "0002_companion_artwork.py",
+        "0003_smarthome_registry.py",
     ]
     source = versions[0].read_text(encoding="utf-8")
     for retired_table in (
