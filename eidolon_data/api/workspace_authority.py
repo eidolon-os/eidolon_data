@@ -26,6 +26,7 @@ from eidolon_data.services.owner_workspace import (
 )
 
 from .service_auth import authorize_service, required_service_token
+from .smarthome_authority import create_smarthome_router
 
 
 class WorkspaceInitializeRequest(BaseModel):
@@ -290,6 +291,8 @@ def create_app(
         version="1.0.0",
         lifespan=lifespan,
     )
+
+    app.include_router(create_smarthome_router(store.smarthome_registry, service_token=token))
 
     @app.get("/health", tags=["operations"])
     async def health() -> dict[str, str]:

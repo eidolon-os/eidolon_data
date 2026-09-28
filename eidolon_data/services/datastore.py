@@ -24,6 +24,7 @@ from eidolon_data.services.owner_deletion import OwnerDeletionService
 from eidolon_data.services.owner_workspace import CompanionWorkspaceService, OwnerService
 from eidolon_data.services.persona_access import CompanionsAccess, PersonaAccess
 from eidolon_data.services.persona_service import PersonaService
+from eidolon_data.services.smarthome import SmartHomeRegistryService
 from eidolon_data.settings import DataSettings
 
 
@@ -127,6 +128,10 @@ class DataStore:
     @property
     def companion_deletion(self) -> CompanionDeletionService:
         return CompanionDeletionService(self._session_factory)
+
+    @property
+    def smarthome_registry(self) -> SmartHomeRegistryService:
+        return SmartHomeRegistryService(self._session_factory)
 
     @property
     def owner_deletion(self) -> OwnerDeletionService:

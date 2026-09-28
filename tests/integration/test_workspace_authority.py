@@ -321,3 +321,37 @@ def test_legacy_onboarding_fingerprint_ignores_only_absent_new_fields():
     )
     assert _request_fingerprint(WorkspaceInitializeRequest(**legacy)) == expected
     assert _request_fingerprint(WorkspaceInitializeRequest(**legacy, persona=None)) == expected
+
+
+async def test_workspace_authority_mounts_smarthome_registry(tmp_path) -> None:
+    settings = DataSettings(sqlite_path=str(tmp_path / "workspace-smarthome.sqlite3"))
+    store = DataStore.open(settings)
+    await store.init_schema()
+    await store.owner_commands.create_owner(owner_id="owner-home")
+    await store.close()
+
+    token = "workspace-authority-smarthome-token"
+    path = "/api/workspace-authority/v1/owners/owner-home/smarthome"
+    app = create_app(settings, service_token=token)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://data.test"
+        ) as client,
+    ):
+        assert (await client.get(f"{path}/registry")).status_code == 401
+        headers = {"Authorization": f"Bearer {token}"}
+        empty = await client.get(f"{path}/registry", headers=headers)
+        assert empty.status_code == 200
+        assert empty.json()["revision"] == 0
+        created = await client.post(
+            f"{path}/areas",
+            headers=headers,
+            json={
+                "expected_revision": 0,
+                "area": {"area_id": "living", "name": "客厅", "order": 0},
+            },
+        )
+        assert created.status_code == 200
+        assert created.json()["revision"] == 1
+        assert (await client.get(f"{path}/registry", headers=headers)).json() == created.json()
