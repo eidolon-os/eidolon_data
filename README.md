@@ -21,6 +21,8 @@ Owned here:
 - Companion face and Owner face-profile integrity metadata;
 - low-frequency Guard-to-Device policy bindings, where `device_id` is an opaque
   external reference;
+- the Owner's smart-home registry (areas, devices, scenes, and which area each
+  Eidolon device stands in), validated by `eidolon_sdk.biz.smarthome`;
 - the System Data transactional audit outbox.
 
 Not owned here:

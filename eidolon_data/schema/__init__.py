@@ -17,6 +17,14 @@ from eidolon_data.schema.core import (
     PersonaGenomeRow,
 )
 from eidolon_data.schema.guard import GuardBindingRow
+from eidolon_data.schema.smarthome import (
+    SmartHomeAreaRow,
+    SmartHomeDeviceRow,
+    SmartHomePlacementRow,
+    SmartHomeRegistryRow,
+    SmartHomeSceneActionRow,
+    SmartHomeSceneRow,
+)
 
 __all__ = [
     "AuditOutboxRow",
@@ -28,4 +36,10 @@ __all__ = [
     "OwnerFaceReferenceRow",
     "OwnerRow",
     "PersonaGenomeRow",
+    "SmartHomeAreaRow",
+    "SmartHomeDeviceRow",
+    "SmartHomePlacementRow",
+    "SmartHomeRegistryRow",
+    "SmartHomeSceneActionRow",
+    "SmartHomeSceneRow",
 ]
