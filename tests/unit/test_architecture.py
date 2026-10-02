@@ -89,6 +89,7 @@ def test_migration_history_has_one_baseline_and_additive_revisions() -> None:
         "0001_system_data_v2.py",
         "0002_companion_artwork.py",
         "0003_smarthome_registry.py",
+        "0004_smarthome_v2_columns.py",
     ]
     source = versions[0].read_text(encoding="utf-8")
     for retired_table in (

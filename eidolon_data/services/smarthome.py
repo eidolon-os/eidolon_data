@@ -221,8 +221,8 @@ class SmartHomeRegistryService:
                 SmartHomeSceneRow(
                     owner_id=owner_id,
                     scene_id=scene.scene_id,
-                    name=scene.name,
                     position=await c.next_position(SmartHomeSceneRow),
+                    **_scene_columns(scene),
                 )
             )
             await c.session.flush()
@@ -237,7 +237,8 @@ class SmartHomeRegistryService:
             if row is None:
                 raise SmartHomeRegistryNotFound("scene not found for owner")
             c.propose(scenes=_replace(c.current.scenes, "scene_id", scene))
-            row.name = scene.name
+            for column, value in _scene_columns(scene).items():
+                setattr(row, column, value)
             row.updated_at = utc_now()
             # The actions are the scene's content, so a new list replaces the
             # old one whole rather than being merged into it.
@@ -347,7 +348,7 @@ class SmartHomeRegistryService:
             )
             c.session.add_all(
                 SmartHomeSceneRow(
-                    owner_id=owner_id, scene_id=scene.scene_id, name=scene.name, position=index
+                    owner_id=owner_id, scene_id=scene.scene_id, position=index, **_scene_columns(scene)
                 )
                 for index, scene in enumerate(sample.scenes)
             )
@@ -513,7 +514,17 @@ def _device_columns(device: Device) -> dict[str, Any]:
         "area_id": device.area_id,
         "provider": device.provider,
         "provider_ref": device.provider_ref,
+        "traits_json": None if device.traits is None else list(device.traits),
+        "limits_json": None if device.limits is None else device.limits.model_dump(mode="json"),
+        "source": device.source,
+        "overrides_json": list(device.overrides),
+        "synced_at_ms": device.synced_at_ms,
+        "orphaned": device.orphaned,
     }
+
+
+def _scene_columns(scene: Scene) -> dict[str, Any]:
+    return {"name": scene.name, "provider": scene.provider, "provider_ref": scene.provider_ref}
 
 
 def _action_rows(owner_id: str, scene: Scene) -> list[SmartHomeSceneActionRow]:

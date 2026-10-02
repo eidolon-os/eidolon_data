@@ -92,11 +92,23 @@ async def load_registry(session: AsyncSession, owner_id: str, *, revision: int) 
                 area_id=row.area_id,
                 provider=row.provider,
                 provider_ref=row.provider_ref,
+                traits=None if row.traits_json is None else tuple(row.traits_json),
+                limits=row.limits_json,
+                source=row.source or "manual",
+                overrides=tuple(row.overrides_json or ()),
+                synced_at_ms=row.synced_at_ms,
+                orphaned=bool(row.orphaned),
             )
             for row in devices
         ),
         scenes=tuple(
-            Scene(scene_id=row.scene_id, name=row.name, actions=tuple(actions[row.scene_id]))
+            Scene(
+                scene_id=row.scene_id,
+                name=row.name,
+                actions=tuple(actions[row.scene_id]),
+                provider=row.provider,
+                provider_ref=row.provider_ref,
+            )
             for row in scenes
         ),
         placements=tuple(

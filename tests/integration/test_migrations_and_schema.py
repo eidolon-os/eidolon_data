@@ -30,7 +30,7 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
         }
         assert tables == EXPECTED_TABLES | {"alembic_version"}
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0003_smarthome_registry",
+            "0004_smarthome_v2_columns",
         )
         for table_name, table in Base.metadata.tables.items():
             actual_columns = {
@@ -57,7 +57,7 @@ def test_clean_baseline_can_downgrade_and_reapply(tmp_path, monkeypatch) -> None
     command.upgrade(config, "head")
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0003_smarthome_registry",
+            "0004_smarthome_v2_columns",
         )
 
 

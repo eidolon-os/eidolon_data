@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -29,6 +30,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql.expression import false as sa_false
 
 from eidolon_data.db.base import Base, utc_now
 
@@ -90,6 +92,14 @@ class SmartHomeDeviceRow(Base):
     area_id: Mapped[str | None] = mapped_column(String(128))
     provider: Mapped[str] = mapped_column(String(128), default="virtual")
     provider_ref: Mapped[str | None] = mapped_column(String(128))
+    #: v2 (2026-10-02): what the device really supports and where it came from.
+    #: ``None`` traits mean the type's preset; the vocabulary stays the SDK's.
+    traits_json: Mapped[JsonList | None] = mapped_column(nullable=True)
+    limits_json: Mapped[JsonDict | None] = mapped_column(nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="manual", server_default="manual")
+    overrides_json: Mapped[JsonList] = mapped_column(default=list)
+    synced_at_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    orphaned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false())
     position: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -113,6 +123,9 @@ class SmartHomeSceneRow(Base):
     )
     scene_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     name: Mapped[str] = mapped_column(String(32))
+    #: v2: a scene a Provider runs as a whole has no action rows of its own.
+    provider: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     position: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
