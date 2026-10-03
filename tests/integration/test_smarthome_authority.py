@@ -238,3 +238,65 @@ async def test_device_scene_and_placement_routes_round_trip(client) -> None:
         "scenes": [],
         "placements": [],
     }
+
+
+async def test_v2_fields_round_trip_through_rows(client) -> None:
+    await client.post(
+        f"{BASE}/areas", json={"expected_revision": 0, "area": LIVING}, headers=HEADERS
+    )
+    imported = {
+        **LAMP,
+        "provider": "homeassistant:acc_1",
+        "provider_ref": "light.living_lamp",
+        "traits": ["on_off"],
+        "limits": None,
+        "source": "imported",
+        "overrides": ["name"],
+        "synced_at_ms": 1_700_000_000_000,
+        "orphaned": False,
+    }
+    created = await client.post(
+        f"{BASE}/devices", json={"expected_revision": 1, "device": imported}, headers=HEADERS
+    )
+    assert created.status_code == 200, created.text
+    stored = created.json()["devices"][0]
+    assert stored["traits"] == ["on_off"] and stored["source"] == "imported"
+    assert stored["overrides"] == ["name"] and stored["synced_at_ms"] == 1_700_000_000_000
+    ac = {
+        "device_id": "living.ac",
+        "name": "空调",
+        "type": "climate",
+        "area_id": "living",
+        "provider": "homeassistant:acc_1",
+        "provider_ref": "climate.ac",
+        "limits": {"target_c": [18, 28], "modes": ["cool", "heat"]},
+        "source": "imported",
+    }
+    created = await client.post(
+        f"{BASE}/devices", json={"expected_revision": 2, "device": ac}, headers=HEADERS
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["devices"][1]["limits"] == {
+        "target_c": [18, 28],
+        "modes": ["cool", "heat"],
+    }
+    scene = {
+        "scene_id": "scene.home",
+        "name": "回家",
+        "provider_ref": "scene.home",
+        "provider": "homeassistant:acc_1",
+    }
+    created = await client.post(
+        f"{BASE}/scenes", json={"expected_revision": 3, "scene": scene}, headers=HEADERS
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["scenes"][0] == {**scene, "actions": []}
+    orphaned = await client.put(
+        f"{BASE}/devices/living.lamp",
+        json={"expected_revision": 4, "device": {**imported, "orphaned": True}},
+        headers=HEADERS,
+    )
+    assert orphaned.status_code == 200 and orphaned.json()["devices"][0]["orphaned"] is True
+    # Read back through the registry route: the same document.
+    registry = await client.get(f"{BASE}/registry", headers=HEADERS)
+    assert registry.json() == orphaned.json()
