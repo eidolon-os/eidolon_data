@@ -15,3 +15,12 @@ uv run alembic upgrade head
 `0002_companion_artwork` is an additive presentation metadata migration on V2. It records only known revision-1 initial presets, preserves all existing profile keys and visual choices, and does not change persona, memory or face assets. Downgrade retains this optional metadata.
 
 `0003_smarthome_registry` additively creates the Owner's smart-home registry tables (areas, devices, scenes and their actions, Eidolon device placements, one revision per Owner). References between them include `owner_id` and do not cascade. Downgrade drops these tables and their rows.
+
+`0005_conversation_preferences` repairs the September 17 development voice shape.
+Only a `conversation_preferences.voice_profile_id` matching the independent
+`companion_voice.profile_id` is removed; the entire voice snapshot, unrelated
+runtime settings, preference revision and timestamps remain unchanged. Missing
+or conflicting snapshots and unknown/invalid policy values abort before any row
+is changed. Back up the database before upgrading. Downgrade preserves the
+repaired shape. Its historical vocabulary is frozen in the migration; live
+writes and runtime snapshot reads use the SDK `ConversationPreferences` model.

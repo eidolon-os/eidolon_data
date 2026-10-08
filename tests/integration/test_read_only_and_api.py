@@ -1196,3 +1196,26 @@ def _persona_action(snapshot, action, **fields):
         "action": action,
         **fields,
     }
+
+
+async def test_runtime_snapshot_rejects_unmigrated_preferences_at_authority(tmp_path):
+    path = tmp_path / "invalid-preferences.sqlite3"
+    settings = await _seed(path)
+    # Simulate an older build or external SQL; current ORM writes forbid this.
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("UPDATE companions SET runtime_config_json = ?", (
+            json.dumps({"conversation_preferences": {"unknown": "meaningful"}}),
+        ))
+        db.commit()
+    token = "companion-authority-token-000001"
+    app = create_app(settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as client:
+        response = await client.get(
+            "/api/companion-authority/v1/companions/companion-1/runtime-snapshot",
+            params={"owner_id": "owner-1"},
+        )
+        assert response.status_code == 409
+        assert "stored conversation preferences" in response.json()["detail"]

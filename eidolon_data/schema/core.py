@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from eidolon_sdk.biz.persona import ConversationPreferences
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
@@ -16,7 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from eidolon_data.db.base import Base, utc_now
 
@@ -107,6 +108,14 @@ class CompanionRow(Base):
     )
     profile_json: Mapped[JsonDict] = mapped_column(default=dict)
     runtime_config_json: Mapped[JsonDict] = mapped_column(default=dict)
+
+    @validates("runtime_config_json")
+    def _validate_runtime_config(self, key: str, value: JsonDict) -> JsonDict:
+        # Include raw workspace initialization in the public write contract.
+        # Other runtime namespaces are independent and must be preserved.
+        ConversationPreferences.model_validate(value.get("conversation_preferences", {}))
+        return value
+
     metadata_json: Mapped[JsonDict] = mapped_column(default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

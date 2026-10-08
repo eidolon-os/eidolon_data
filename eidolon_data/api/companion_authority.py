@@ -11,13 +11,14 @@ from typing import Any, Literal
 
 from eidolon_sdk.biz.contracts.companion import CompanionLifecycleState
 from eidolon_sdk.biz.persona import (
+    ConversationPreferences,
     PersonaAuthoring,
     PersonaEditRequest,
     PersonaEditSnapshot,
     PersonaPresetCatalog,
 )
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from eidolon_data import DataSettings, DataStore, load_settings
 from eidolon_data.repositories.persona import PersonaGenomeConflict
@@ -804,10 +805,19 @@ async def _runtime_snapshot(
     if genome.companion_id != companion.companion_id or genome.status != "committed":
         raise HTTPException(status_code=412, detail="persona genome is not committed in scope")
 
+    runtime_config = dict(companion.runtime_config_json or {})
+    try:
+        ConversationPreferences.model_validate(runtime_config.get("conversation_preferences", {}))
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="stored conversation preferences are incompatible; migrate or repair the companion configuration",
+        ) from exc
+
     return CompanionRuntimeSnapshotResponse(
         owner_id=companion.owner_id,
         companion_id=companion.companion_id,
-        runtime_config=dict(companion.runtime_config_json or {}),
+        runtime_config=runtime_config,
         memory_realm=MemoryRealmSnapshot(realm_id=realm.realm_id),
         persona_genome=PersonaGenomeSnapshot(
             genome_id=genome.genome_id,
