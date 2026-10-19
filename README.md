@@ -36,6 +36,25 @@ Not owned here:
 There are no Device, body-command, runtime-delivery, generic Event, or Memory
 operation compatibility APIs in V2.
 
+## Packaged smart-home example
+
+Host releases include the SDK's `apartment` example (18 virtual devices,
+7 areas, 4 scenes). First Owner onboarding writes this registry in the same
+transaction as the Owner and first Companion, so an admitted Korvo can sync
+it without a separate mobile setup step. Retrying onboarding does not reload it.
+
+On workspace-authority startup, an upgrade also initializes active existing
+Owners whose registry has never been written (revision zero). Any previously
+written registry is left alone, including one the Owner intentionally emptied.
+Initialization uses the normal revision compare-and-swap and audit facts;
+concurrent user edits win and are never merged with the example.
+
+The catalogue comes from the packaged SDK, not an untracked configuration or
+ESP32 firmware. Hub's `virtual` provider (enabled in the shipped Host settings)
+executes these devices. The existing mobile sample loader remains available
+for explicit use. Low-level `OwnerService.create_owner` creates identity only;
+product onboarding and authority startup own the default home lifecycle.
+
 ## Code structure
 
 ```text

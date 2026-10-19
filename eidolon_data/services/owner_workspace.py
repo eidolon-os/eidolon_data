@@ -41,6 +41,7 @@ from eidolon_data.schema import (
     PersonaGenomeRow,
 )
 from eidolon_data.services.persona_presets import initial_companion_artwork
+from eidolon_data.services.smarthome import initialize_owner_home
 
 OWNER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$")
 GENERATED_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -350,6 +351,7 @@ class CompanionWorkspaceService:
                 )
             )
             await session.flush()
+            await initialize_owner_home(session, owner.owner_id, trace_id=canonical_operation_id)
             workspace = await _provision_workspace_in_session(
                 session,
                 owner_id=owner.owner_id,

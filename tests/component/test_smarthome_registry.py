@@ -495,3 +495,49 @@ async def test_deleting_the_owner_takes_the_whole_registry_with_it(store, regist
 async def test_a_negative_expected_revision_is_a_caller_error(registry) -> None:
     with pytest.raises(ValueError, match="non-negative"):
         await registry.create_area(owner_id="owner-a", area=LIVING, expected_revision=-1)
+
+
+async def test_host_initialization_preserves_existing_and_emptied_homes(store, registry):
+    custom = await registry.create_area(owner_id="owner-a", area=LIVING, expected_revision=0)
+    await registry.create_area(owner_id="owner-b", area=MASTER, expected_revision=0)
+    emptied = await registry.delete_area(owner_id="owner-b", area_id="master", expected_revision=1)
+    await store.owner_commands.create_owner(owner_id="owner-new")
+    await store.owner_commands.create_owner(owner_id="owner-archived")
+    await store.owner_commands.archive_owner("owner-archived")
+
+    assert await registry.initialize_default_homes() == 1
+    assert await registry.get_registry("owner-new") == apartment()
+    assert await registry.get_registry("owner-a") == custom
+    assert await registry.get_registry("owner-b") == emptied
+    assert await registry.get_registry("owner-archived") == Registry(revision=0)
+    facts = await _facts(store)
+    assert facts[-1].owner_id == "owner-new"
+    assert facts[-1].payload == {
+        "revision": 1, "change": "sample.loaded", "target": "apartment"
+    }
+    assert await registry.initialize_default_homes() == 0
+    assert len(await _facts(store)) == len(facts)
+
+
+async def test_concurrent_host_initialization_writes_each_home_once(store, registry):
+    counts = await asyncio.gather(
+        registry.initialize_default_homes(), registry.initialize_default_homes()
+    )
+    assert sum(counts) == 2
+    for owner_id in ("owner-a", "owner-b"):
+        assert await registry.get_registry(owner_id) == apartment()
+    assert len(await _facts(store)) == 2
+
+
+async def test_host_initialization_preserves_a_concurrent_first_user_edit(registry, monkeypatch):
+    load = registry.load_sample
+
+    async def edit_before_sample(*, owner_id, name, expected_revision):
+        if owner_id == "owner-a":
+            await registry.create_area(owner_id=owner_id, area=LIVING, expected_revision=0)
+        return await load(owner_id=owner_id, name=name, expected_revision=expected_revision)
+
+    monkeypatch.setattr(registry, "load_sample", edit_before_sample)
+    assert await registry.initialize_default_homes() == 1
+    assert await registry.get_registry("owner-a") == Registry(revision=1, areas=(LIVING,))
+    assert await registry.get_registry("owner-b") == apartment()

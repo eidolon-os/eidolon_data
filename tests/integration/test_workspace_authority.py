@@ -62,10 +62,25 @@ async def test_workspace_authority_auth_idempotency_and_query(tmp_path) -> None:
             body
         )
 
+        home_path = f"/api/workspace-authority/v1/owners/{body['owner']['owner_id']}/smarthome"
+        home = (await client.get(f"{home_path}/registry", headers=headers)).json()
+        assert home["revision"] == 1
+        assert len(home["devices"]) == 18
+        assert len(home["areas"]) == 7
+        assert len(home["scenes"]) == 4
+        assert all(device["provider"] == "virtual" for device in home["devices"])
+        # A retry must preserve edits made after the first onboarding.
+        edited = await client.put(
+            f"{home_path}/areas/living", headers=headers,
+            json={"expected_revision": 1,
+                  "area": {"area_id": "living", "name": "我的客厅", "order": 0}},
+        )
+        assert edited.status_code == 200, edited.text
         replay = await client.put(path, json=payload, headers=headers)
         queried = await client.get(path, headers=headers)
         assert replay.status_code == 200
         assert replay.json() == body
+        assert (await client.get(f"{home_path}/registry", headers=headers)).json() == edited.json()
         assert queried.status_code == 200
         assert queried.json() == body
 
@@ -341,17 +356,29 @@ async def test_workspace_authority_mounts_smarthome_registry(tmp_path) -> None:
     ):
         assert (await client.get(f"{path}/registry")).status_code == 401
         headers = {"Authorization": f"Bearer {token}"}
-        empty = await client.get(f"{path}/registry", headers=headers)
-        assert empty.status_code == 200
-        assert empty.json()["revision"] == 0
+        home = await client.get(f"{path}/registry", headers=headers)
+        assert home.status_code == 200
+        assert home.json()["revision"] == 1
+        assert len(home.json()["devices"]) == 18
         created = await client.post(
             f"{path}/areas",
             headers=headers,
             json={
-                "expected_revision": 0,
-                "area": {"area_id": "living", "name": "客厅", "order": 0},
+                "expected_revision": 1,
+                "area": {"area_id": "study", "name": "书房", "order": 7},
             },
         )
         assert created.status_code == 200
-        assert created.json()["revision"] == 1
+        assert created.json()["revision"] == 2
+        assert (await client.get(f"{path}/registry", headers=headers)).json() == created.json()
+
+
+    # A release restart must retain the edited registry, including its revision.
+    restarted = create_app(settings, service_token=token)
+    async with (
+        restarted.router.lifespan_context(restarted),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=restarted), base_url="http://data.test"
+        ) as client,
+    ):
         assert (await client.get(f"{path}/registry", headers=headers)).json() == created.json()

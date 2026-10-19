@@ -252,6 +252,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await store.validate_schema()
+        # Host upgrades initialize only never-written homes. New Owners get
+        # the same sample atomically with their onboarding transaction.
+        await store.smarthome_registry.initialize_default_homes()
         # One dispatcher, in the process that writes the facts. This authority
         # serves two apps over one database, and two loops draining one outbox
         # would publish the same events twice — harmlessly, because the

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+from eidolon_sdk.biz.smarthome import Registry
+from eidolon_sdk.biz.smarthome.samples import apartment
 
 from eidolon_data.services.owner_workspace import OwnerWorkspaceError
 
@@ -109,7 +111,9 @@ async def test_owner_workspace_onboarding_is_atomic_durable_and_idempotent(store
     assert [event.trace_id for event in await store.audit_outbox.list_pending()] == [
         operation_id,
         operation_id,
+        operation_id,
     ]
+    assert await store.smarthome_registry.get_registry(first.owner.owner_id) == apartment()
 
     with pytest.raises(OwnerWorkspaceError, match="already in use"):
         await store.companion_workspaces.initialize_owner_workspace(
@@ -141,6 +145,9 @@ async def test_owner_workspace_onboarding_rolls_back_owner_on_workspace_collisio
 
     assert await store.owners.get(f"owner_{operation_hex}") is None
     assert await store.companions.get(f"c_{operation_hex}") is None
+    assert await store.smarthome_registry.get_registry(f"owner_{operation_hex}") == Registry(revision=0)
+    assert all(event.owner_id != f"owner_{operation_hex}"
+               for event in await store.audit_outbox.list_pending())
 
 
 async def test_workspace_collision_rolls_back_without_partial_companion(store) -> None:
@@ -290,3 +297,27 @@ async def test_archiving_owner_archives_its_companions_and_clears_the_default(st
         "inactive"
     }
     assert (await store.guard_bindings.get(binding.binding_id)).state == "disabled"
+
+
+async def test_home_initialization_failure_rolls_back_onboarding(store, monkeypatch):
+    from eidolon_data.services import smarthome
+
+    populate = smarthome._populate_sample
+
+    async def fail_after_writes(change, sample):
+        await populate(change, sample)
+        raise RuntimeError("sample write failed")
+
+    monkeypatch.setattr(smarthome, "_populate_sample", fail_after_writes)
+    with pytest.raises(RuntimeError, match="sample write failed"):
+        await store.companion_workspaces.initialize_owner_workspace(
+            operation_id="f8b886ff-d2e5-4d73-bb10-53d4a43f319e",
+            request_fingerprint="sha256:" + "a" * 64,
+            owner_display_name="Owner",
+            companion_display_name="Companion",
+        )
+    assert await store.owners.list() == []
+    assert await store.smarthome_registry.get_registry(
+        "owner_f8b886ffd2e54d73bb1053d4a43f319e"
+    ) == Registry(revision=0)
+    assert await store.audit_outbox.list_pending() == []

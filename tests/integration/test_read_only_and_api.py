@@ -949,7 +949,13 @@ async def test_what_happened_to_this_owners_things_is_readable_newest_first(
         # Newest first, and the archive is two facts because it was two moves in
         # one transaction — the record says the retirement happened, because it
         # did.
-        assert actions[:2] == ["companion.archived", "companion.retirement_begun"]
+        # Startup backfilled the never-written home after those lifecycle moves.
+        assert actions[:3] == [
+            "smarthome.registry.changed", "companion.archived", "companion.retirement_begun"
+        ]
+        assert body["events"][0]["payload"] == {
+            "revision": 1, "change": "sample.loaded", "target": "apartment"
+        }
         # Everything that made this Owner what it is, in one record: two
         # Companions arriving, the pointer moving, and the one being put away.
         assert "companion.workspace.initialized" in actions
@@ -964,7 +970,8 @@ async def test_what_happened_to_this_owners_things_is_readable_newest_first(
         assert moved["payload"]["companion_id"] == "companion-2"
         assert moved["payload"]["previous_companion_id"] == "companion-1"
         assert actions[-1] == "owner.created"
-        assert body["events"][0]["subject_id"] == "companion-1"
+        assert body["events"][0]["subject_id"] == "owner-1"
+        assert body["events"][1]["subject_id"] == "companion-1"
 
         # One page at a time, and the cursor walks backwards through it.
         first = await client.get(path, params={"limit": 2}, headers=headers)
@@ -985,7 +992,9 @@ async def test_what_happened_to_this_owners_things_is_readable_newest_first(
             headers=headers,
         )
         assert theirs.status_code == 200
-        assert [event["action"] for event in theirs.json()["events"]] == ["owner.created"]
+        assert [event["action"] for event in theirs.json()["events"]] == [
+            "smarthome.registry.changed", "owner.created"
+        ]
         assert all(event["subject_id"] == "owner-2" for event in theirs.json()["events"])
         nobody = await client.get(
             "/api/workspace-authority/v1/owners/owner-nowhere/governance-events",

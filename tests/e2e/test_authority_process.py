@@ -211,5 +211,10 @@ async def test_real_workspace_authority_process_is_concurrently_idempotent(tmp_p
         assert companions[0].kind == "conversational"
         assert owners[0].default_companion_id == companions[0].companion_id
         assert len(await persisted.memory_realms.list_for_owner(owners[0].owner_id)) == 1
+        home = await persisted.smarthome_registry.get_registry(owners[0].owner_id)
+        assert home.revision == 1
+        assert (len(home.devices), len(home.areas), len(home.scenes)) == (18, 7, 4)
+        facts = await persisted.audit_outbox.list_pending()
+        assert sum(f.action == "smarthome.registry.changed" for f in facts) == 1
     finally:
         await persisted.close()

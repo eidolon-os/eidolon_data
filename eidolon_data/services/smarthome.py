@@ -301,6 +301,33 @@ class SmartHomeRegistryService:
 
     # --- Samples ----------------------------------------------------------
 
+    async def initialize_default_homes(self) -> int:
+        """Backfill active Owners whose home has never been written.
+
+        The registry revision is the durable initialization marker. A home
+        somebody emptied still has a revision and must stay empty on restart.
+        CAS at revision zero also preserves a concurrent first user write.
+        """
+        async with self._session_factory() as session:
+            owner_ids = list(
+                await session.scalars(
+                    select(OwnerRow.owner_id)
+                    .outerjoin(SmartHomeRegistryRow, SmartHomeRegistryRow.owner_id == OwnerRow.owner_id)
+                    .where(OwnerRow.status == "active", SmartHomeRegistryRow.owner_id.is_(None))
+                    .order_by(OwnerRow.owner_id)
+                )
+            )
+        initialized = 0
+        for owner_id in owner_ids:
+            try:
+                await self.load_sample(owner_id=owner_id, name="apartment", expected_revision=0)
+            except (SmartHomeRegistryConflict, SmartHomeRegistryNotFound):
+                # Another writer initialized the home or deleted the Owner
+                # after the candidate read. Never retry with a newer revision.
+                continue
+            initialized += 1
+        return initialized
+
     async def load_sample(self, *, owner_id: str, name: str, expected_revision: int) -> Registry:
         """Fill an empty registry with one of the SDK's sample homes.
 
@@ -314,53 +341,7 @@ class SmartHomeRegistryService:
             raise SmartHomeRegistryNotFound(f"unknown smart home sample {name!r}")
         sample = factory()
         async with self._change(owner_id, expected_revision, "sample.loaded", name) as c:
-            current = c.current
-            if current.areas or current.devices or current.scenes or current.placements:
-                raise SmartHomeRegistryRefused(
-                    "a sample can only be loaded into an empty smart home registry",
-                    code=REGISTRY_NOT_EMPTY,
-                )
-            c.propose(
-                areas=sample.areas,
-                devices=sample.devices,
-                scenes=sample.scenes,
-                placements=sample.placements,
-            )
-            c.session.add_all(
-                SmartHomeAreaRow(
-                    owner_id=owner_id,
-                    area_id=area.area_id,
-                    name=area.name,
-                    sort_order=area.order,
-                    position=index,
-                )
-                for index, area in enumerate(sample.areas)
-            )
-            await c.session.flush()
-            c.session.add_all(
-                SmartHomeDeviceRow(
-                    owner_id=owner_id,
-                    device_id=device.device_id,
-                    position=index,
-                    **_device_columns(device),
-                )
-                for index, device in enumerate(sample.devices)
-            )
-            c.session.add_all(
-                SmartHomeSceneRow(
-                    owner_id=owner_id, scene_id=scene.scene_id, position=index, **_scene_columns(scene)
-                )
-                for index, scene in enumerate(sample.scenes)
-            )
-            await c.session.flush()
-            for scene in sample.scenes:
-                c.session.add_all(_action_rows(owner_id, scene))
-            c.session.add_all(
-                SmartHomePlacementRow(
-                    owner_id=owner_id, device_ref=placement.device_ref, area_id=placement.area_id
-                )
-                for placement in sample.placements
-            )
+            await _populate_sample(c, sample)
         return c.registry
 
     # --- Transaction ------------------------------------------------------
@@ -398,6 +379,73 @@ class SmartHomeRegistryService:
                     },
                 )
             )
+
+
+async def initialize_owner_home(session: AsyncSession, owner_id: str, *, trace_id: str) -> None:
+    """Create the packaged home in the new Owner's onboarding transaction."""
+    revision = await _advance_revision(session, owner_id, 0)
+    change = _Change(session, owner_id, Registry(revision=0), revision)
+    await _populate_sample(change, SAMPLES["apartment"]())
+    session.add(
+        governance_fact(
+            owner_id=owner_id,
+            subject_type="smarthome_registry",
+            subject_id=owner_id,
+            action="smarthome.registry.changed",
+            payload={"revision": revision, "change": "sample.loaded", "target": "apartment"},
+            trace_id=trace_id,
+        )
+    )
+
+
+async def _populate_sample(c: _Change, sample: Registry) -> None:
+    current = c.current
+    if current.areas or current.devices or current.scenes or current.placements:
+        raise SmartHomeRegistryRefused(
+            "a sample can only be loaded into an empty smart home registry",
+            code=REGISTRY_NOT_EMPTY,
+        )
+    c.propose(
+        areas=sample.areas,
+        devices=sample.devices,
+        scenes=sample.scenes,
+        placements=sample.placements,
+    )
+    c.session.add_all(
+        SmartHomeAreaRow(
+            owner_id=c.owner_id,
+            area_id=area.area_id,
+            name=area.name,
+            sort_order=area.order,
+            position=index,
+        )
+        for index, area in enumerate(sample.areas)
+    )
+    await c.session.flush()
+    c.session.add_all(
+        SmartHomeDeviceRow(
+            owner_id=c.owner_id,
+            device_id=device.device_id,
+            position=index,
+            **_device_columns(device),
+        )
+        for index, device in enumerate(sample.devices)
+    )
+    c.session.add_all(
+        SmartHomeSceneRow(
+            owner_id=c.owner_id, scene_id=scene.scene_id, position=index, **_scene_columns(scene)
+        )
+        for index, scene in enumerate(sample.scenes)
+    )
+    await c.session.flush()
+    for scene in sample.scenes:
+        c.session.add_all(_action_rows(c.owner_id, scene))
+    c.session.add_all(
+        SmartHomePlacementRow(
+            owner_id=c.owner_id, device_ref=placement.device_ref, area_id=placement.area_id
+        )
+        for placement in sample.placements
+    )
 
 
 class _Change:
