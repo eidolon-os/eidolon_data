@@ -10,6 +10,9 @@ from eidolon_data.schema.assets import (
     OwnerFaceReferenceRow,
 )
 from eidolon_data.schema.audit import AuditOutboxRow
+from eidolon_data.schema.voiceprints import (  # noqa: F401
+    SpeakerProfileRow, VoicePolicyRow, SpeakerBindingRow, VoiceEnrollmentRow,
+)
 from eidolon_data.schema.core import (
     CompanionRow,
     MemoryRealmRow,

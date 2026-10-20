@@ -26,6 +26,11 @@ def test_schema_contains_only_system_data_authority_tables() -> None:
         "owner_face_profile_revisions",
         "owner_face_references",
         "audit_outbox",
+        "speaker_profiles",
+        "speaker_recordings",
+        "companion_speaker_bindings",
+        "companion_voice_policies",
+        "voice_enrollments",
         "smarthome_registries",
         "smarthome_areas",
         "smarthome_devices",
@@ -91,6 +96,8 @@ def test_migration_history_has_one_baseline_and_additive_revisions() -> None:
         "0003_smarthome_registry.py",
         "0004_smarthome_v2_columns.py",
         "0005_conversation_preferences.py",
+        "0006_voiceprints.py",
+        "0007_voice_recordings.py",
     ]
     source = versions[0].read_text(encoding="utf-8")
     for retired_table in (

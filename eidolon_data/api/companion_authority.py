@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import binascii
 import hashlib
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from typing import Any, Literal
 
@@ -253,9 +254,14 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await store.validate_schema()
+        from eidolon_data.services.voiceprint_maintenance import expire_voiceprint_enrollments
+        expiry_task = asyncio.create_task(expire_voiceprint_enrollments(store.voiceprints))
         try:
             yield
         finally:
+            expiry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await expiry_task
             await store.close()
 
     app = FastAPI(
@@ -263,6 +269,8 @@ def create_app(
         version="1.0.0",
         lifespan=lifespan,
     )
+    from .routers.voiceprints import create_voiceprint_router
+    app.include_router(create_voiceprint_router(store, token))
 
     @app.get("/health", tags=["operations"])
     async def health() -> dict[str, str]:

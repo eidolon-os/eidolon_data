@@ -136,3 +136,8 @@ class DataStore:
     @property
     def owner_deletion(self) -> OwnerDeletionService:
         return OwnerDeletionService(self._session_factory)
+
+    @property
+    def voiceprints(self):
+        from eidolon_data.services.voiceprints import Voiceprints
+        return Voiceprints(self._session_factory)
