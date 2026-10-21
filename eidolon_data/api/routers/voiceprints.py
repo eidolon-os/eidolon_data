@@ -1,19 +1,21 @@
 """Internal authenticated voice identity authority; no audio or model runtime."""
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from eidolon_sdk.biz.voiceprint import (
+    AdmissionRequest,
+    AdmissionResponse,
+    EnrollmentCompletion,
     EnrollmentCreate,
+    EnrollmentEvidence,
     EnrollmentView,
     ExtractedSample,
     PolicyUpdate,
     SpeakerProfileView,
+    VoiceAudioRequest,
     VoicePolicySnapshot,
     VoicePolicyView,
-    AdmissionRequest,
-    AdmissionResponse,
-    EnrollmentCompletion,
-    VoiceAudioRequest,
 )
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
+
 from eidolon_data.api.service_auth import authorize_service
 from eidolon_data.services.voiceprints import VoiceprintConflict
 
@@ -66,6 +68,10 @@ def create_voiceprint_router(store, token):
     async def enrollment(owner_id: str, companion_id: str, enrollment_id: str):
         return await call(store.voiceprints.enrollment, owner_id, companion_id, enrollment_id)
 
+    @router.get(prefix + "/enrollments/{enrollment_id}/evidence", response_model=EnrollmentEvidence)
+    async def evidence(owner_id: str, companion_id: str, enrollment_id: str):
+        return await call(store.voiceprints.evidence, owner_id, companion_id, enrollment_id)
+
     @router.delete(prefix + "/enrollments/{enrollment_id}", response_model=EnrollmentView)
     async def cancel(owner_id: str, companion_id: str, enrollment_id: str):
         return await call(store.voiceprints.cancel, owner_id, companion_id, enrollment_id)
@@ -88,12 +94,14 @@ def create_voiceprint_router(store, token):
         prefix + "/enrollments/{enrollment_id}/complete", response_model=SpeakerProfileView
     )
     async def complete(
-        owner_id: str, companion_id: str, enrollment_id: str, payload: EnrollmentCompletion | ExtractedSample
+        owner_id: str, companion_id: str, enrollment_id: str, payload: EnrollmentCompletion
     ):
         return await call(
-            store.voiceprints.complete, owner_id, companion_id, enrollment_id,
-            payload.sample if isinstance(payload, EnrollmentCompletion) else payload,
-            recording=payload.recording if isinstance(payload, EnrollmentCompletion) else None,
+            store.voiceprints.complete,
+            owner_id,
+            companion_id,
+            enrollment_id,
+            payload,
         )
 
     @router.get(
