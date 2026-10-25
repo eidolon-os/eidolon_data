@@ -17,14 +17,18 @@ from contextlib import asynccontextmanager
 from eidolon_sdk.biz.voiceprint import (
     EnrollmentCompletion,
     EnrollmentCreate,
+    EnrollmentEvaluation,
     EnrollmentEvidence,
     EnrollmentView,
     ExtractedSample,
     PolicyUpdate,
     SpeakerProfileView,
     VoiceAudioRequest,
+    VoicePolicyApproval,
+    VoicePolicyEvidence,
     VoicePolicySnapshot,
     VoicePolicyView,
+    VoiceProfileEvidence,
     VoiceTemplate,
     enrollment_evidence_digest,
 )
@@ -80,6 +84,55 @@ class Voiceprints:
     async def _bump(self, s, companion):
         p = await self._policy(s, companion)
         p.revision += 1
+        p.approval_json = None
+
+    async def _bound_profiles(self, s, owner, companion):
+        return (
+            await s.scalars(
+                select(SpeakerProfileRow)
+                .join(
+                    SpeakerBindingRow, SpeakerBindingRow.profile_id == SpeakerProfileRow.profile_id
+                )
+                .where(
+                    SpeakerBindingRow.companion_id == companion, SpeakerProfileRow.owner_id == owner
+                )
+                .order_by(SpeakerProfileRow.profile_id)
+            )
+        ).all()
+
+    async def _policy_evidence(self, s, owner, companion, revision):
+        rows = await self._bound_profiles(s, owner, companion)
+        if not rows:
+            raise VoiceprintConflict("add an allowed voice before enabling admission")
+        profiles = []
+        for row in rows:
+            enrollment = await s.get(VoiceEnrollmentRow, row.enrollment_id)
+            if enrollment is None or enrollment.state != "ready":
+                raise VoiceprintConflict("enrollment evidence unavailable")
+            try:
+                evaluation = EnrollmentEvaluation.model_validate(
+                    enrollment.samples_json.get("evaluation")
+                )
+            except ValueError:
+                raise VoiceprintConflict(
+                    "enrollment evidence unavailable; record this voice again"
+                ) from None
+            if evaluation.template != ExtractedSample.model_validate(row.template_json):
+                raise VoiceprintConflict("enrollment template changed")
+            profiles.append(
+                VoiceProfileEvidence(
+                    profile_id=row.profile_id, revision=row.revision, evaluation=evaluation
+                )
+            )
+        return VoicePolicyEvidence(
+            owner_id=owner, companion_id=companion, revision=revision, profiles=profiles
+        )
+
+    async def policy_evidence(self, owner, companion):
+        async with self._transaction() as s:
+            await self._owned(s, owner, companion)
+            p = await self._policy(s, companion)
+            return await self._policy_evidence(s, owner, companion, p.revision)
 
     async def view(self, owner, companion):
         async with self._sessions() as s:
@@ -108,12 +161,22 @@ class Voiceprints:
                     )
                 ).all()
             )
+            approval = _approval(p)
             return VoicePolicyView(
                 companion_id=companion,
                 mode=p.mode if p else "off",
                 revision=p.revision if p else 0,
-                profiles=[_profile(x, x.profile_id in recorded) for x in profiles],
+                profiles=[
+                    _profile(
+                        x,
+                        x.profile_id in recorded,
+                        validated=bool(approval) and x.profile_id in ids,
+                    )
+                    for x in profiles
+                ],
                 allowed_profile_ids=list(ids),
+                admission_state="ready" if approval else "unvalidated",
+                calibration_digest=approval.calibration_digest if approval else "",
             )
 
     async def set_policy(self, owner, companion, request: PolicyUpdate):
@@ -123,7 +186,17 @@ class Voiceprints:
             if p.revision != request.expected_revision:
                 raise VoiceprintConflict("policy revision changed; refresh")
             if request.mode == "allowlist":
-                raise VoiceprintConflict("voice admission is not available; calibration required")
+                approval = getattr(request, "approval", None)
+                if approval is None:
+                    raise VoiceprintConflict(
+                        "voice admission is not available; calibration required"
+                    )
+                evidence = await self._policy_evidence(s, owner, companion, p.revision)
+                if approval.evidence_digest != evidence.digest():
+                    raise VoiceprintConflict("voice list or enrollment changed; validate again")
+                p.approval_json = approval.model_dump(mode="json")
+            else:
+                p.approval_json = None
             p.mode = request.mode
             p.revision += 1
             self._audit(s, owner, companion, "voice_policy.changed", {"mode": p.mode})
@@ -399,11 +472,13 @@ class Voiceprints:
                     )
                 )
             ).all()
+            approval = _approval(p)
             return VoicePolicySnapshot(
                 companion_id=companion,
                 owner_id=c.owner_id,
                 mode=p.mode,
                 revision=p.revision,
+                calibration_digest=approval.calibration_digest if approval else "",
                 templates=[
                     VoiceTemplate(
                         profile_id=r.profile_id,
@@ -414,7 +489,9 @@ class Voiceprints:
                 ],
             )
 
-    async def admit(self, companion, revision, profile_id):
+    async def admit(
+        self, companion, revision, profile_id, *, profile_revision=None, calibration_digest=""
+    ):
         async with self._transaction() as s:
             c = await s.get(CompanionRow, companion)
             if c is None or c.lifecycle_state != "active":
@@ -422,9 +499,20 @@ class Voiceprints:
             p = await self._policy(s, companion)
             if p.revision != revision:
                 return False
-            # No calibrated identity approval is currently published. Saved
-            # collection data and legacy bindings must not become implicit grants.
-            return p.mode == "off"
+            if p.mode == "off":
+                return True
+            approval = _approval(p)
+            if approval is None or approval.calibration_digest != calibration_digest:
+                return False
+            binding = (
+                await s.get(SpeakerBindingRow, (companion, profile_id)) if profile_id else None
+            )
+            profile = await s.get(SpeakerProfileRow, profile_id) if binding else None
+            return bool(
+                profile is not None
+                and profile.owner_id == c.owner_id
+                and profile.revision == profile_revision
+            )
 
     @staticmethod
     def _audit(s, owner, companion, action, payload):
@@ -439,14 +527,24 @@ class Voiceprints:
         )
 
 
-def _profile(p, recording_available=False):
+def _profile(p, recording_available=False, *, validated=False):
     return SpeakerProfileView(
         profile_id=p.profile_id,
         display_name=p.display_name,
         revision=p.revision,
         enrollment_id=p.enrollment_id,
         recording_available=recording_available,
+        validation_state="validated" if validated else "unvalidated",
     )
+
+
+def _approval(policy):
+    if policy is None or policy.mode != "allowlist" or not policy.approval_json:
+        return None
+    try:
+        return VoicePolicyApproval.model_validate(policy.approval_json)
+    except ValueError:
+        return None
 
 
 def _enrollment(e):

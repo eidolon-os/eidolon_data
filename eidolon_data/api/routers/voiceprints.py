@@ -8,9 +8,10 @@ from eidolon_sdk.biz.voiceprint import (
     EnrollmentEvidence,
     EnrollmentView,
     ExtractedSample,
-    PolicyUpdate,
     SpeakerProfileView,
     VoiceAudioRequest,
+    VoicePolicyActivation,
+    VoicePolicyEvidence,
     VoicePolicySnapshot,
     VoicePolicyView,
 )
@@ -40,8 +41,13 @@ def create_voiceprint_router(store, token):
         return await call(store.voiceprints.view, owner_id, companion_id)
 
     @router.put(prefix + "/policy", response_model=VoicePolicyView)
-    async def policy(owner_id: str, companion_id: str, payload: PolicyUpdate):
+    async def policy(owner_id: str, companion_id: str, payload: VoicePolicyActivation):
         return await call(store.voiceprints.set_policy, owner_id, companion_id, payload)
+
+    @router.get(prefix + "/policy-evidence", response_model=VoicePolicyEvidence)
+    async def policy_evidence(owner_id: str, companion_id: str, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return await call(store.voiceprints.policy_evidence, owner_id, companion_id)
 
     @router.put(prefix + "/bindings/{profile_id}", response_model=VoicePolicyView)
     async def bind(owner_id: str, companion_id: str, profile_id: str):
@@ -116,7 +122,12 @@ def create_voiceprint_router(store, token):
     async def admit(companion_id: str, payload: AdmissionRequest):
         return AdmissionResponse(
             allowed=await call(
-                store.voiceprints.admit, companion_id, payload.revision, payload.profile_id
+                store.voiceprints.admit,
+                companion_id,
+                payload.revision,
+                payload.profile_id,
+                profile_revision=payload.profile_revision,
+                calibration_digest=payload.calibration_digest,
             )
         )
 

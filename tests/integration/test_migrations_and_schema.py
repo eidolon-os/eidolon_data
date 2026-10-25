@@ -30,7 +30,7 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
         }
         assert tables == EXPECTED_TABLES | {"alembic_version"}
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0007_voice_recordings",
+            "0008_voice_admission",
         )
         for table_name, table in Base.metadata.tables.items():
             actual_columns = {
@@ -57,8 +57,39 @@ def test_clean_baseline_can_downgrade_and_reapply(tmp_path, monkeypatch) -> None
     command.upgrade(config, "head")
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0007_voice_recordings",
+            "0008_voice_admission",
         )
+
+
+def test_voice_release_migration_preserves_policy_and_refuses_unsafe_downgrade(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "voice-release.sqlite3"
+    monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "0007_voice_recordings")
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("INSERT INTO owners(owner_id) VALUES ('o')")
+        connection.execute("INSERT INTO companions(companion_id, owner_id) VALUES ('c', 'o')")
+        connection.execute(
+            "INSERT INTO companion_voice_policies(companion_id, mode, revision) "
+            "VALUES ('c', 'allowlist', 4)"
+        )
+        connection.commit()
+    command.upgrade(config, "head")
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute(
+            "SELECT mode, revision, approval_json FROM companion_voice_policies"
+        ).fetchone() == ("allowlist", 4, None)
+    with pytest.raises(RuntimeError, match="disable voice admission"):
+        command.downgrade(config, "0007_voice_recordings")
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "0008_voice_admission",
+        )
+        connection.execute("UPDATE companion_voice_policies SET mode = 'off'")
+        connection.commit()
+    command.downgrade(config, "0007_voice_recordings")
 
 
 async def test_migrated_database_passes_fail_closed_schema_validation(

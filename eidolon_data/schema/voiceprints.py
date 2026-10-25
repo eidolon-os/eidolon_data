@@ -1,8 +1,10 @@
 """Data owns speaker identity and Companion authorization, never inference."""
 
 from typing import Any
-from sqlalchemy import ForeignKey, Integer, JSON, String, Float, LargeBinary
+
+from sqlalchemy import JSON, Float, ForeignKey, Integer, LargeBinary, String
 from sqlalchemy.orm import Mapped, mapped_column
+
 from eidolon_data.db.base import Base
 
 
@@ -25,6 +27,7 @@ class VoicePolicyRow(Base):
     )
     mode: Mapped[str] = mapped_column(String(16), default="off")
     revision: Mapped[int] = mapped_column(Integer, default=0)
+    approval_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class SpeakerRecordingRow(Base):

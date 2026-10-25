@@ -85,6 +85,28 @@ async def test_http_enrollment_secrecy_and_live_revocation(store):
         snapshot = await runtime.get_voiceprint_snapshot("c")
         assert len(snapshot.templates) == 1
         # Policy remains off; this is not an identity validation.
+        private = await h.get(prefix + "/policy-evidence")
+        assert private.status_code == 200 and private.headers["cache-control"] == "no-store"
+        assert (
+            await h.get(prefix + "/policy-evidence", headers={"Authorization": "Bearer wrong"})
+        ).status_code == 403
+        from eidolon_sdk.biz.voiceprint import VoicePolicyEvidence
+
+        evidence = VoicePolicyEvidence.model_validate(private.json())
+        activated = await h.put(
+            prefix + "/policy",
+            json={
+                "mode": "allowlist",
+                "expected_revision": evidence.revision,
+                "approval": {"calibration_digest": "c" * 64, "evidence_digest": evidence.digest()},
+            },
+        )
+        assert activated.status_code == 200
+        approved = await runtime.get_voiceprint_snapshot("c")
+        assert await runtime.admit_voiceprint(
+            "c", approved.revision, profile, profile_revision=1, calibration_digest="c" * 64
+        )
+        assert not await runtime.admit_voiceprint("c", approved.revision, profile)
         assert snapshot.mode == "off"
         assert (await h.delete(prefix + f"/bindings/{profile}")).status_code == 200
         assert not await runtime.admit_voiceprint("c", snapshot.revision, profile)
