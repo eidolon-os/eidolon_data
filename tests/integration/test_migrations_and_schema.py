@@ -30,7 +30,7 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
         }
         assert tables == EXPECTED_TABLES | {"alembic_version"}
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0008_voice_admission",
+            "0010_person_voiceprints",
         )
         for table_name, table in Base.metadata.tables.items():
             actual_columns = {
@@ -40,25 +40,13 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
     command.check(Config("alembic.ini"))
 
 
-def test_clean_baseline_can_downgrade_and_reapply(tmp_path, monkeypatch) -> None:
+def test_retired_admission_is_not_restored_by_downgrade(tmp_path, monkeypatch):
     path = tmp_path / "migration-cycle.sqlite3"
     monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
     config = Config("alembic.ini")
     command.upgrade(config, "head")
-    command.downgrade(config, "base")
-    with closing(sqlite3.connect(path)) as connection:
-        remaining = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
-        assert remaining == {"alembic_version"}
-    command.upgrade(config, "head")
-    with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0008_voice_admission",
-        )
+    with pytest.raises(RuntimeError, match="admission is retired"):
+        command.downgrade(config, "0009_persons")
 
 
 def test_voice_release_migration_preserves_policy_and_refuses_unsafe_downgrade(
@@ -76,7 +64,7 @@ def test_voice_release_migration_preserves_policy_and_refuses_unsafe_downgrade(
             "VALUES ('c', 'allowlist', 4)"
         )
         connection.commit()
-    command.upgrade(config, "head")
+    command.upgrade(config, "0008_voice_admission")
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute(
             "SELECT mode, revision, approval_json FROM companion_voice_policies"
@@ -231,9 +219,9 @@ def test_artwork_upgrade_uses_initial_preset_and_preserves_explicit_choices(tmp_
                 (identity, identity, json.dumps(genome)),
             )
         connection.commit()
-    command.upgrade(config, "head")
+    command.upgrade(config, "0009_persons")
     command.downgrade(config, "0001_system_data_v2")
-    command.upgrade(config, "head")
+    command.upgrade(config, "0009_persons")
     with closing(sqlite3.connect(path)) as connection:
         profiles = {
             identity: json.loads(raw)
@@ -247,3 +235,57 @@ def test_artwork_upgrade_uses_initial_preset_and_preserves_explicit_choices(tmp_
         "future": {},
         "chosen": {"artwork_id": "my-choice"},
     }
+
+
+def test_person_migration_preserves_unassigned_voiceprints_and_blocks_data_loss(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "people.sqlite3"
+    monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "0008_voice_admission")
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("INSERT INTO owners(owner_id) VALUES ('o')")
+        db.execute("INSERT INTO speaker_profiles VALUES ('p', 'o', '甲', 3, 'e', '{}')")
+        db.commit()
+    command.upgrade(config, "0009_persons")
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("SELECT profile_id, revision FROM speaker_profiles").fetchall() == [
+            ("p", 3)
+        ]
+        assert db.execute("SELECT count(*) FROM persons").fetchone() == (0,)
+        db.execute("INSERT INTO persons VALUES ('person', 'o', '甲', 'active', 1, '{}')")
+        db.commit()
+    with pytest.raises(RuntimeError, match="person downgrade requires"):
+        command.downgrade(config, "0008_voice_admission")
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("SELECT person_id FROM persons").fetchall() == [("person",)]
+
+
+def test_voiceprint_migration_keeps_recording_evidence_without_companion(tmp_path, monkeypatch):
+    path = tmp_path / 'voice-to-person.sqlite3'
+    monkeypatch.setenv('EIDOLON_DATA_DATABASE_URL', f'sqlite+aiosqlite:///{path}')
+    config = Config('alembic.ini')
+    command.upgrade(config, '0009_persons')
+    pcm = b'\x01\x00' * 24000
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("INSERT INTO owners(owner_id) VALUES ('o')")
+        db.execute("INSERT INTO companions(companion_id,owner_id) VALUES ('c','o')")
+        db.execute("INSERT INTO speaker_profiles VALUES ('p','o','甲',7,'e','{}')")
+        db.execute("INSERT INTO speaker_recordings VALUES ('p',?)", (pcm,))
+        db.execute("INSERT INTO voice_enrollments VALUES ('e','o','c','p','{}','{\"evaluation\":{\"v\":1}}','ready',0)")
+        db.execute("INSERT INTO voice_enrollments VALUES ('pending','o','c','new','{}','{\"sample\":1}','collecting',0)")
+        db.execute("INSERT INTO companion_voice_policies VALUES ('c','allowlist',9,'{}')")
+        db.execute("INSERT INTO companion_speaker_bindings VALUES ('c','p')")
+        db.commit()
+    command.upgrade(config, 'head')
+    with closing(sqlite3.connect(path)) as db:
+        db.execute('PRAGMA foreign_keys=ON')
+        db.execute("DELETE FROM companions WHERE companion_id='c'")
+        db.commit()
+        assert db.execute('SELECT profile_id,revision,person_id FROM speaker_profiles').fetchall() == [('p',7,None)]
+        assert db.execute('SELECT pcm FROM speaker_recordings').fetchone() == (pcm,)
+        assert db.execute("SELECT samples_json FROM voice_enrollments WHERE enrollment_id='e'").fetchone() == ('{"evaluation":{"v":1}}',)
+        assert db.execute("SELECT state,samples_json FROM voice_enrollments WHERE enrollment_id='pending'").fetchone() == ('cancelled','{}')
+        assert not db.execute("SELECT name FROM sqlite_master WHERE name IN ('companion_voice_policies','companion_speaker_bindings')").fetchall()
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []

@@ -2,8 +2,6 @@ import base64
 import hashlib
 
 import httpx
-import pytest
-from eidolon_sdk.biz.system_data import SystemDataRuntimeClient
 from eidolon_sdk.biz.voiceprint import ExtractedSample, enrollment_evidence_digest
 from fastapi import FastAPI
 
@@ -12,21 +10,20 @@ from eidolon_data.api.routers.voiceprints import create_voiceprint_router
 
 async def test_http_enrollment_secrecy_and_live_revocation(store):
     await store.owner_commands.create_owner(owner_id="o")
-    await store.companion_workspaces.provision_workspace(
-        owner_id="o", companion_id="c", genome_id="g", realm_id="r", kind="conversational"
-    )
+    from eidolon_sdk.biz.person import PersonCreate
+    await store.persons.create("o", PersonCreate(person_id="a" * 32, display_name="甲"))
     app = FastAPI()
     app.include_router(create_voiceprint_router(store, "secret"))
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as h:
-        prefix = "/api/companion-authority/v1/owners/o/companions/c/voiceprints"
+        prefix = "/api/companion-authority/v1/owners/o/voiceprints"
         assert (await h.get(prefix)).status_code == 401
         h.headers["Authorization"] = "Bearer secret"
         assert (await h.get(prefix.replace("/owners/o/", "/owners/other/"))).status_code == 404
         e = (
             await h.post(
-                prefix + "/enrollments", json={"display_name": "甲", "operation_id": "one"}
+                prefix + "/enrollments", json={"display_name": "甲", "operation_id": "one", "person_id": "a" * 32}
             )
         ).json()
         sample = {
@@ -72,64 +69,6 @@ async def test_http_enrollment_secrecy_and_live_revocation(store):
         assert (await h.get(audio_path.replace("/owners/o/", "/owners/other/"))).status_code == 404
         view = (await h.get(prefix)).json()
         assert "vector" not in str(view)
-        assert view["allowed_profile_ids"] == []
-        assert (await h.put(prefix + f"/bindings/{profile}")).status_code == 200
-        view = (await h.get(prefix)).json()
-        assert (
-            await h.put(
-                prefix + "/policy",
-                json={"mode": "allowlist", "expected_revision": view["revision"]},
-            )
-        ).status_code == 409
-        runtime = SystemDataRuntimeClient(h, "http://test", service_token="secret")
-        snapshot = await runtime.get_voiceprint_snapshot("c")
-        assert len(snapshot.templates) == 1
-        # Policy remains off; this is not an identity validation.
-        private = await h.get(prefix + "/policy-evidence")
-        assert private.status_code == 200 and private.headers["cache-control"] == "no-store"
-        assert (
-            await h.get(prefix + "/policy-evidence", headers={"Authorization": "Bearer wrong"})
-        ).status_code == 403
-        from eidolon_sdk.biz.voiceprint import VoicePolicyEvidence
-
-        evidence = VoicePolicyEvidence.model_validate(private.json())
-        activated = await h.put(
-            prefix + "/policy",
-            json={
-                "mode": "allowlist",
-                "expected_revision": evidence.revision,
-                "approval": {"calibration_digest": "c" * 64, "evidence_digest": evidence.digest()},
-            },
-        )
-        assert activated.status_code == 200
-        approved = await runtime.get_voiceprint_snapshot("c")
-        assert await runtime.admit_voiceprint(
-            "c", approved.revision, profile, profile_revision=1, calibration_digest="c" * 64
-        )
-        assert not await runtime.admit_voiceprint("c", approved.revision, profile)
-        assert snapshot.mode == "off"
-        assert (await h.delete(prefix + f"/bindings/{profile}")).status_code == 200
-        assert not await runtime.admit_voiceprint("c", snapshot.revision, profile)
-
-
-async def test_cross_owner_binding_is_rejected(store):
-    from eidolon_data.schema.voiceprints import SpeakerProfileRow
-
-    await store.owner_commands.create_owner(owner_id="a")
-    await store.owner_commands.create_owner(owner_id="b")
-    await store.companion_workspaces.provision_workspace(
-        owner_id="a", companion_id="c", genome_id="g", realm_id="r", kind="conversational"
-    )
-    async with store._session_factory() as s, s.begin():
-        s.add(
-            SpeakerProfileRow(
-                profile_id="p",
-                owner_id="b",
-                display_name="other",
-                revision=1,
-                enrollment_id="e",
-                template_json={},
-            )
-        )
-    with pytest.raises(LookupError):
-        await store.voiceprints.bind("a", "c", "p")
+        assert view["profiles"][0]["person_id"] == "a" * 32
+        assert (await h.put(prefix + "/policy", json={})).status_code == 404
+        assert (await h.get("/api/companion-authority/v1/companions/c/voiceprint-snapshot")).status_code == 404

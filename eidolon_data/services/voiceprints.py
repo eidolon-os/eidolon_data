@@ -1,4 +1,4 @@
-"""Transactional speaker enrollment and versioned Companion admission authority.
+"""Transactional Owner-scoped enrollment and Person voiceprint evidence.
 
 No audio codecs or ML dependencies live in Data. Small bounded embeddings are
 transactional JSON. A successful trial may retain one bounded original PCM
@@ -17,31 +17,24 @@ from contextlib import asynccontextmanager
 from eidolon_sdk.biz.voiceprint import (
     EnrollmentCompletion,
     EnrollmentCreate,
-    EnrollmentEvaluation,
     EnrollmentEvidence,
     EnrollmentView,
     ExtractedSample,
-    PolicyUpdate,
     SpeakerProfileView,
     VoiceAudioRequest,
-    VoicePolicyApproval,
-    VoicePolicyEvidence,
-    VoicePolicySnapshot,
-    VoicePolicyView,
-    VoiceProfileEvidence,
     VoiceTemplate,
     enrollment_evidence_digest,
 )
 from sqlalchemy import select, text, update
 
 from eidolon_data.audit import governance_fact
-from eidolon_data.schema import CompanionRow
+from eidolon_data.schema import OwnerRow
+from eidolon_data.schema.persons import PersonRow
+from eidolon_sdk.biz.voiceprint import VoiceprintCollection, PersonVoiceTemplates
 from eidolon_data.schema.voiceprints import (
-    SpeakerBindingRow,
     SpeakerProfileRow,
     SpeakerRecordingRow,
     VoiceEnrollmentRow,
-    VoicePolicyRow,
 )
 
 
@@ -56,9 +49,7 @@ class Voiceprints:
     @asynccontextmanager
     async def _transaction(self):
         async with self._sessions() as s:
-            # Serialize read/check/write and admission with revocations on SQLite.
-            # A successful admit is the authorization commit boundary, not a
-            # reusable grant. Calls after a revocation cannot use old evidence.
+            # Serialize evidence replacement and identity changes on SQLite.
             await s.execute(text("BEGIN IMMEDIATE"))
             try:
                 yield s
@@ -67,89 +58,28 @@ class Voiceprints:
                 await s.rollback()
                 raise
 
-    async def _owned(self, s, owner, companion):
-        c = await s.get(CompanionRow, companion)
-        if c is None or c.owner_id != owner:
-            raise LookupError("companion not found for owner")
-        return c
+    async def _owner(self, s, owner):
+        row = await s.get(OwnerRow, owner)
+        if row is None or row.status != "active":
+            raise LookupError("active owner not found")
 
-    async def _policy(self, s, companion):
-        p = await s.get(VoicePolicyRow, companion)
-        if p is None:
-            p = VoicePolicyRow(companion_id=companion, mode="off", revision=0)
-            s.add(p)
-            await s.flush()
-        return p
+    async def _person(self, s, owner, person_id):
+        await self._owner(s, owner)
+        row = await s.get(PersonRow, person_id) if person_id else None
+        if row is None or row.owner_id != owner:
+            raise LookupError("person not found for owner")
+        if row.status != "active":
+            raise VoiceprintConflict("person is inactive")
+        return row
 
-    async def _bump(self, s, companion):
-        p = await self._policy(s, companion)
-        p.revision += 1
-        p.approval_json = None
-
-    async def _bound_profiles(self, s, owner, companion):
-        return (
-            await s.scalars(
-                select(SpeakerProfileRow)
-                .join(
-                    SpeakerBindingRow, SpeakerBindingRow.profile_id == SpeakerProfileRow.profile_id
-                )
-                .where(
-                    SpeakerBindingRow.companion_id == companion, SpeakerProfileRow.owner_id == owner
-                )
-                .order_by(SpeakerProfileRow.profile_id)
-            )
-        ).all()
-
-    async def _policy_evidence(self, s, owner, companion, revision):
-        rows = await self._bound_profiles(s, owner, companion)
-        if not rows:
-            raise VoiceprintConflict("add an allowed voice before enabling admission")
-        profiles = []
-        for row in rows:
-            enrollment = await s.get(VoiceEnrollmentRow, row.enrollment_id)
-            if enrollment is None or enrollment.state != "ready":
-                raise VoiceprintConflict("enrollment evidence unavailable")
-            try:
-                evaluation = EnrollmentEvaluation.model_validate(
-                    enrollment.samples_json.get("evaluation")
-                )
-            except ValueError:
-                raise VoiceprintConflict(
-                    "enrollment evidence unavailable; record this voice again"
-                ) from None
-            if evaluation.template != ExtractedSample.model_validate(row.template_json):
-                raise VoiceprintConflict("enrollment template changed")
-            profiles.append(
-                VoiceProfileEvidence(
-                    profile_id=row.profile_id, revision=row.revision, evaluation=evaluation
-                )
-            )
-        return VoicePolicyEvidence(
-            owner_id=owner, companion_id=companion, revision=revision, profiles=profiles
-        )
-
-    async def policy_evidence(self, owner, companion):
-        async with self._transaction() as s:
-            await self._owned(s, owner, companion)
-            p = await self._policy(s, companion)
-            return await self._policy_evidence(s, owner, companion, p.revision)
-
-    async def view(self, owner, companion):
+    async def view(self, owner):
         async with self._sessions() as s:
-            await self._owned(s, owner, companion)
-            p = await s.get(VoicePolicyRow, companion)
-            profiles = (
+            await self._owner(s, owner)
+            rows = (
                 await s.scalars(
                     select(SpeakerProfileRow)
                     .where(SpeakerProfileRow.owner_id == owner)
                     .order_by(SpeakerProfileRow.profile_id)
-                )
-            ).all()
-            ids = (
-                await s.scalars(
-                    select(SpeakerBindingRow.profile_id)
-                    .where(SpeakerBindingRow.companion_id == companion)
-                    .order_by(SpeakerBindingRow.profile_id)
                 )
             ).all()
             recorded = set(
@@ -161,96 +91,71 @@ class Voiceprints:
                     )
                 ).all()
             )
-            approval = _approval(p)
-            return VoicePolicyView(
-                companion_id=companion,
-                mode=p.mode if p else "off",
-                revision=p.revision if p else 0,
-                profiles=[
-                    _profile(
-                        x,
-                        x.profile_id in recorded,
-                        validated=bool(approval) and x.profile_id in ids,
-                    )
-                    for x in profiles
-                ],
-                allowed_profile_ids=list(ids),
-                admission_state="ready" if approval else "unvalidated",
-                calibration_digest=approval.calibration_digest if approval else "",
+            return VoiceprintCollection(
+                profiles=[_profile(p, p.profile_id in recorded) for p in rows]
             )
 
-    async def set_policy(self, owner, companion, request: PolicyUpdate):
+    async def assign(self, owner, profile_id, request):
         async with self._transaction() as s:
-            await self._owned(s, owner, companion)
-            p = await self._policy(s, companion)
-            if p.revision != request.expected_revision:
-                raise VoiceprintConflict("policy revision changed; refresh")
-            if request.mode == "allowlist":
-                approval = getattr(request, "approval", None)
-                if approval is None:
-                    raise VoiceprintConflict(
-                        "voice admission is not available; calibration required"
-                    )
-                evidence = await self._policy_evidence(s, owner, companion, p.revision)
-                if approval.evidence_digest != evidence.digest():
-                    raise VoiceprintConflict("voice list or enrollment changed; validate again")
-                p.approval_json = approval.model_dump(mode="json")
-            else:
-                p.approval_json = None
-            p.mode = request.mode
-            p.revision += 1
-            self._audit(s, owner, companion, "voice_policy.changed", {"mode": p.mode})
-        return await self.view(owner, companion)
-
-    async def bind(self, owner, companion, profile_id):
-        async with self._transaction() as s:
-            await self._owned(s, owner, companion)
-            await self._profile_owned(s, owner, profile_id)
-            if await s.get(SpeakerBindingRow, (companion, profile_id)) is None:
-                count = len(
-                    (
-                        await s.scalars(
-                            select(SpeakerBindingRow).where(
-                                SpeakerBindingRow.companion_id == companion
-                            )
+            await self._person(s, owner, request.person_id)
+            profile = await self._profile_owned(s, owner, profile_id)
+            if profile.revision != request.expected_revision:
+                raise VoiceprintConflict("profile revision changed")
+            if profile.person_id is not None and profile.person_id != request.person_id:
+                raise VoiceprintConflict(
+                    "already assigned; do not silently transfer biometric identity"
+                )
+            if profile.person_id is None:
+                profile.person_id = request.person_id
+                profile.revision += 1
+                enrollments = (
+                    await s.scalars(
+                        select(VoiceEnrollmentRow).where(
+                            VoiceEnrollmentRow.profile_id == profile_id
                         )
-                    ).all()
-                )
-                if count >= 5:
-                    raise VoiceprintConflict("at most five speakers per companion")
-                s.add(SpeakerBindingRow(companion_id=companion, profile_id=profile_id))
-                await self._bump(s, companion)
-                self._audit(s, owner, companion, "voice_speaker.bound", {"profile_id": profile_id})
-        return await self.view(owner, companion)
-
-    async def unbind(self, owner, companion, profile_id):
-        async with self._transaction() as s:
-            await self._owned(s, owner, companion)
-            row = await s.get(SpeakerBindingRow, (companion, profile_id))
-            if row:
-                await s.delete(row)
-                await self._bump(s, companion)
+                    )
+                ).all()
+                for enrollment in enrollments:
+                    enrollment.person_id = request.person_id
                 self._audit(
-                    s, owner, companion, "voice_speaker.unbound", {"profile_id": profile_id}
+                    s, owner, profile_id, "voice_speaker.assigned", {"person_id": request.person_id}
                 )
-        return await self.view(owner, companion)
+            return _profile(profile, await s.get(SpeakerRecordingRow, profile_id) is not None)
 
-    async def delete_profile(self, owner, companion, profile_id):
+    async def templates(self, owner, person_id):
+        async with self._sessions() as s:
+            person = await self._person(s, owner, person_id)
+            rows = (
+                await s.scalars(
+                    select(SpeakerProfileRow)
+                    .where(
+                        SpeakerProfileRow.owner_id == owner,
+                        SpeakerProfileRow.person_id == person_id,
+                    )
+                    .order_by(SpeakerProfileRow.profile_id)
+                )
+            ).all()
+            return PersonVoiceTemplates(
+                owner_id=owner,
+                person_id=person_id,
+                person_revision=person.revision,
+                templates=[
+                    VoiceTemplate(
+                        profile_id=p.profile_id,
+                        revision=p.revision,
+                        sample=ExtractedSample.model_validate(p.template_json),
+                    )
+                    for p in rows
+                ],
+            )
+
+    async def delete_profile(self, owner, profile_id):
         async with self._transaction() as s:
-            await self._owned(s, owner, companion)
+            await self._owner(s, owner)
             p = await s.get(SpeakerProfileRow, profile_id)
             if p is not None and p.owner_id != owner:
                 raise LookupError("speaker not found for owner")
             if p is not None:
-                ids = (
-                    await s.scalars(
-                        select(SpeakerBindingRow.companion_id).where(
-                            SpeakerBindingRow.profile_id == profile_id
-                        )
-                    )
-                ).all()
-                for cid in ids:
-                    await self._bump(s, cid)
                 await s.delete(p)
                 # Completed enrollments must not resurrect deleted biometric data.
                 es = (
@@ -263,9 +168,9 @@ class Voiceprints:
                 for e in es:
                     await s.delete(e)
                 self._audit(
-                    s, owner, companion, "voice_speaker.deleted", {"profile_id": profile_id}
+                    s, owner, profile_id, "voice_speaker.deleted", {"profile_id": profile_id}
                 )
-        return await self.view(owner, companion)
+        return await self.view(owner)
 
     async def _profile_owned(self, s, owner, profile_id):
         p = await s.get(SpeakerProfileRow, profile_id)
@@ -286,15 +191,11 @@ class Voiceprints:
             )
             return result.rowcount
 
-    async def create_enrollment(self, owner, companion, request: EnrollmentCreate):
-        eid = (
-            "ve_"
-            + hashlib.sha256(f"{owner}:{companion}:{request.operation_id}".encode()).hexdigest()[
-                :40
-            ]
-        )
+    async def create_enrollment(self, owner, request: EnrollmentCreate):
+        eid = "ve_" + hashlib.sha256(f"{owner}:{request.operation_id}".encode()).hexdigest()[:40]
         async with self._transaction() as s:
-            await self._owned(s, owner, companion)
+            await self._owner(s, owner)
+            await self._person(s, owner, request.person_id)
             e = await s.get(VoiceEnrollmentRow, eid)
             payload = request.model_dump(mode="json")
             if e:
@@ -304,11 +205,13 @@ class Voiceprints:
                 return _enrollment(e)
             if request.profile_id:
                 original = await self._profile_owned(s, owner, request.profile_id)
+                if original.person_id != request.person_id:
+                    raise VoiceprintConflict("profile belongs to another person")
                 payload["_target_revision"] = original.revision
             e = VoiceEnrollmentRow(
                 enrollment_id=eid,
                 owner_id=owner,
-                companion_id=companion,
+                person_id=request.person_id,
                 profile_id=request.profile_id or "sp_" + uuid.uuid4().hex,
                 request_json=payload,
                 samples_json={},
@@ -318,30 +221,30 @@ class Voiceprints:
             s.add(e)
             return _enrollment(e)
 
-    async def _enrollment_owned(self, s, owner, companion, eid):
-        await self._owned(s, owner, companion)
+    async def _enrollment_owned(self, s, owner, eid):
+        await self._owner(s, owner)
         e = await s.get(VoiceEnrollmentRow, eid)
-        if e is None or e.owner_id != owner or e.companion_id != companion:
+        if e is None or e.owner_id != owner:
             raise LookupError("enrollment not found")
         return e
 
-    async def enrollment(self, owner, companion, eid):
+    async def enrollment(self, owner, eid):
         async with self._transaction() as s:
-            e = await self._enrollment_owned(s, owner, companion, eid)
+            e = await self._enrollment_owned(s, owner, eid)
             if e.state == "collecting" and e.expires_at < time.time():
                 e.state, e.samples_json = "expired", {}
             return _enrollment(e)
 
-    async def cancel(self, owner, companion, eid):
+    async def cancel(self, owner, eid):
         async with self._transaction() as s:
-            e = await self._enrollment_owned(s, owner, companion, eid)
+            e = await self._enrollment_owned(s, owner, eid)
             if e.state != "ready":
                 e.state, e.samples_json = "cancelled", {}
             return _enrollment(e)
 
-    async def evidence(self, owner, companion, eid):
+    async def evidence(self, owner, eid):
         async with self._transaction() as s:
-            e = await self._enrollment_owned(s, owner, companion, eid)
+            e = await self._enrollment_owned(s, owner, eid)
             self._collecting(e)
             return EnrollmentEvidence(enrollment=_enrollment(e), samples=e.samples_json)
 
@@ -349,9 +252,9 @@ class Voiceprints:
         if e.state != "collecting" or e.expires_at < time.time():
             raise VoiceprintConflict("enrollment is not collecting or has expired")
 
-    async def add_sample(self, owner, companion, eid, sample_id, sample: ExtractedSample):
+    async def add_sample(self, owner, eid, sample_id, sample: ExtractedSample):
         async with self._transaction() as s:
-            e = await self._enrollment_owned(s, owner, companion, eid)
+            e = await self._enrollment_owned(s, owner, eid)
             self._collecting(e)
             samples = dict(e.samples_json)
             value = sample.model_dump(mode="json")
@@ -367,16 +270,16 @@ class Voiceprints:
                 e.samples_json = samples
             return _enrollment(e)
 
-    async def recording(self, owner, companion, profile_id):
+    async def recording(self, owner, profile_id):
         async with self._sessions() as s:
-            await self._owned(s, owner, companion)
+            await self._owner(s, owner)
             await self._profile_owned(s, owner, profile_id)
             row = await s.get(SpeakerRecordingRow, profile_id)
             if row is None:
                 raise LookupError("no recording; enroll this voice again to enable playback")
             return VoiceAudioRequest(pcm_base64=base64.b64encode(row.pcm).decode("ascii"))
 
-    async def complete(self, owner, companion, eid, request: EnrollmentCompletion):
+    async def complete(self, owner, eid, request: EnrollmentCompletion):
         recording = request.recording
         evaluation = request.evaluation
         try:
@@ -388,13 +291,14 @@ class Voiceprints:
         if hashlib.sha256(pcm).hexdigest() != evaluation.recording_sha256:
             raise VoiceprintConflict("evaluation does not match reference recording")
         async with self._transaction() as s:
-            e = await self._enrollment_owned(s, owner, companion, eid)
+            e = await self._enrollment_owned(s, owner, eid)
             if e.state == "ready":
                 current = await self._profile_owned(s, owner, e.profile_id)
                 if current.enrollment_id != eid:
                     raise VoiceprintConflict("enrollment was replaced; refresh profiles")
                 return _profile(current, await s.get(SpeakerRecordingRow, e.profile_id) is not None)
             self._collecting(e)
+            await self._person(s, owner, e.person_id)
             samples_by_id = {
                 key: ExtractedSample.model_validate(x) for key, x in e.samples_json.items()
             }
@@ -412,7 +316,9 @@ class Voiceprints:
             ):
                 raise VoiceprintConflict("profile changed while recording; refresh and start again")
             if p is None:
-                p = SpeakerProfileRow(profile_id=e.profile_id, owner_id=owner, revision=0)
+                p = SpeakerProfileRow(
+                    profile_id=e.profile_id, owner_id=owner, person_id=e.person_id, revision=0
+                )
                 s.add(p)
             p.display_name = e.request_json["display_name"]
             p.template_json = evaluation.template.model_dump(mode="json")
@@ -424,14 +330,6 @@ class Voiceprints:
                 s.add(SpeakerRecordingRow(profile_id=p.profile_id, pcm=pcm))
             else:
                 previous.pcm = pcm
-            for cid in (
-                await s.scalars(
-                    select(SpeakerBindingRow.companion_id).where(
-                        SpeakerBindingRow.profile_id == p.profile_id
-                    )
-                )
-            ).all():
-                await self._bump(s, cid)
             # Keep versioned evidence with its profile's enrollment, not in logs
             # or model assets. Replacing a profile erases its superseded evidence.
             old_enrollments = (
@@ -450,77 +348,18 @@ class Voiceprints:
                 "registration": e.samples_json,
                 "evaluation": evaluation.model_dump(mode="json"),
             }
-            self._audit(s, owner, companion, "voice_speaker.enrolled", {"profile_id": p.profile_id})
+            self._audit(
+                s, owner, p.profile_id, "voice_speaker.enrolled", {"profile_id": p.profile_id}
+            )
             return _profile(p, True)
 
-    async def snapshot(self, companion):
-        async with self._transaction() as s:
-            c = await s.get(CompanionRow, companion)
-            if c is None:
-                raise LookupError("companion not found")
-            p = await self._policy(s, companion)
-            rows = (
-                await s.scalars(
-                    select(SpeakerProfileRow)
-                    .join(
-                        SpeakerBindingRow,
-                        SpeakerBindingRow.profile_id == SpeakerProfileRow.profile_id,
-                    )
-                    .where(
-                        SpeakerBindingRow.companion_id == companion,
-                        SpeakerProfileRow.owner_id == c.owner_id,
-                    )
-                )
-            ).all()
-            approval = _approval(p)
-            return VoicePolicySnapshot(
-                companion_id=companion,
-                owner_id=c.owner_id,
-                mode=p.mode,
-                revision=p.revision,
-                calibration_digest=approval.calibration_digest if approval else "",
-                templates=[
-                    VoiceTemplate(
-                        profile_id=r.profile_id,
-                        revision=r.revision,
-                        sample=ExtractedSample.model_validate(r.template_json),
-                    )
-                    for r in rows
-                ],
-            )
-
-    async def admit(
-        self, companion, revision, profile_id, *, profile_revision=None, calibration_digest=""
-    ):
-        async with self._transaction() as s:
-            c = await s.get(CompanionRow, companion)
-            if c is None or c.lifecycle_state != "active":
-                return False
-            p = await self._policy(s, companion)
-            if p.revision != revision:
-                return False
-            if p.mode == "off":
-                return True
-            approval = _approval(p)
-            if approval is None or approval.calibration_digest != calibration_digest:
-                return False
-            binding = (
-                await s.get(SpeakerBindingRow, (companion, profile_id)) if profile_id else None
-            )
-            profile = await s.get(SpeakerProfileRow, profile_id) if binding else None
-            return bool(
-                profile is not None
-                and profile.owner_id == c.owner_id
-                and profile.revision == profile_revision
-            )
-
     @staticmethod
-    def _audit(s, owner, companion, action, payload):
+    def _audit(s, owner, profile_id, action, payload):
         s.add(
             governance_fact(
                 owner_id=owner,
-                subject_type="companion",
-                subject_id=companion,
+                subject_type="voiceprint",
+                subject_id=profile_id,
                 action=action,
                 payload=payload,
             )
@@ -530,21 +369,13 @@ class Voiceprints:
 def _profile(p, recording_available=False, *, validated=False):
     return SpeakerProfileView(
         profile_id=p.profile_id,
+        person_id=p.person_id,
         display_name=p.display_name,
         revision=p.revision,
         enrollment_id=p.enrollment_id,
         recording_available=recording_available,
         validation_state="validated" if validated else "unvalidated",
     )
-
-
-def _approval(policy):
-    if policy is None or policy.mode != "allowlist" or not policy.approval_json:
-        return None
-    try:
-        return VoicePolicyApproval.model_validate(policy.approval_json)
-    except ValueError:
-        return None
 
 
 def _enrollment(e):

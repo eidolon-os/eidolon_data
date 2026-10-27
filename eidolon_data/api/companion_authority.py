@@ -271,6 +271,8 @@ def create_app(
     )
     from .routers.voiceprints import create_voiceprint_router
     app.include_router(create_voiceprint_router(store, token))
+    from .routers.persons import create_person_router
+    app.include_router(create_person_router(store, token))
 
     @app.get("/health", tags=["operations"])
     async def health() -> dict[str, str]:

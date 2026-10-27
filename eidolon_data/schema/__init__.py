@@ -11,7 +11,7 @@ from eidolon_data.schema.assets import (
 )
 from eidolon_data.schema.audit import AuditOutboxRow
 from eidolon_data.schema.voiceprints import (  # noqa: F401
-    SpeakerProfileRow, VoicePolicyRow, SpeakerBindingRow, VoiceEnrollmentRow,
+    SpeakerProfileRow, VoiceEnrollmentRow,
 )
 from eidolon_data.schema.core import (
     CompanionRow,
@@ -46,3 +46,5 @@ __all__ = [
     "SmartHomeSceneActionRow",
     "SmartHomeSceneRow",
 ]
+
+from eidolon_data.schema.persons import PersonRow  # noqa: F401

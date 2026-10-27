@@ -46,11 +46,11 @@ def test_known_duplicate_is_migrated_without_losing_voice_or_other_config(tmp_pa
         "other_namespace": {"x": 1},
     }
     path = _database(tmp_path, monkeypatch, [old, {}])
-    command.upgrade(Config("alembic.ini"), "head")
+    command.upgrade(Config("alembic.ini"), "0009_persons")
     expected = {**old, "conversation_preferences": {"response_length": "brief"}}
     assert _configs(path) == [expected, {}]
     command.downgrade(Config("alembic.ini"), "0004_smarthome_v2_columns")
-    command.upgrade(Config("alembic.ini"), "head")
+    command.upgrade(Config("alembic.ini"), "0009_persons")
     assert _configs(path) == [expected, {}]
 
 

@@ -1,4 +1,4 @@
-"""Data owns speaker identity and Companion authorization, never inference."""
+"""Data owns Person voiceprint evidence, never inference or conversation admission."""
 
 from typing import Any
 
@@ -14,20 +14,13 @@ class SpeakerProfileRow(Base):
     owner_id: Mapped[str] = mapped_column(
         ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
     )
+    person_id: Mapped[str | None] = mapped_column(
+        ForeignKey("persons.person_id", ondelete="CASCADE"), nullable=True, index=True
+    )
     display_name: Mapped[str] = mapped_column(String(80))
     revision: Mapped[int] = mapped_column(Integer)
     enrollment_id: Mapped[str] = mapped_column(String(64))
     template_json: Mapped[dict[str, Any]] = mapped_column(JSON)
-
-
-class VoicePolicyRow(Base):
-    __tablename__ = "companion_voice_policies"
-    companion_id: Mapped[str] = mapped_column(
-        ForeignKey("companions.companion_id", ondelete="CASCADE"), primary_key=True
-    )
-    mode: Mapped[str] = mapped_column(String(16), default="off")
-    revision: Mapped[int] = mapped_column(Integer, default=0)
-    approval_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class SpeakerRecordingRow(Base):
@@ -40,24 +33,14 @@ class SpeakerRecordingRow(Base):
     pcm: Mapped[bytes] = mapped_column(LargeBinary)
 
 
-class SpeakerBindingRow(Base):
-    __tablename__ = "companion_speaker_bindings"
-    companion_id: Mapped[str] = mapped_column(
-        ForeignKey("companions.companion_id", ondelete="CASCADE"), primary_key=True
-    )
-    profile_id: Mapped[str] = mapped_column(
-        ForeignKey("speaker_profiles.profile_id", ondelete="CASCADE"), primary_key=True
-    )
-
-
 class VoiceEnrollmentRow(Base):
     __tablename__ = "voice_enrollments"
     enrollment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_id: Mapped[str] = mapped_column(
         ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
     )
-    companion_id: Mapped[str] = mapped_column(
-        ForeignKey("companions.companion_id", ondelete="CASCADE")
+    person_id: Mapped[str | None] = mapped_column(
+        ForeignKey("persons.person_id", ondelete="CASCADE"), nullable=True, index=True
     )
     profile_id: Mapped[str] = mapped_column(String(64))
     request_json: Mapped[dict[str, Any]] = mapped_column(JSON)

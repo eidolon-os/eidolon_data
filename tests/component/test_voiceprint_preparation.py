@@ -7,7 +7,6 @@ from eidolon_sdk.biz.voiceprint import (
     EnrollmentCreate,
     EnrollmentEvaluation,
     ExtractedSample,
-    PolicyUpdate,
     VoiceAudioRequest,
     enrollment_evidence_digest,
 )
@@ -17,12 +16,11 @@ from eidolon_data.services.voiceprints import VoiceprintConflict
 
 async def pending(store):
     await store.owner_commands.create_owner(owner_id="owner")
-    await store.companion_workspaces.provision_workspace(
-        owner_id="owner", companion_id="a", genome_id="g", realm_id="r", kind="conversational"
-    )
+    from eidolon_sdk.biz.person import PersonCreate
+    await store.persons.create("owner", PersonCreate(person_id="a" * 32, display_name="甲"))
     v = store.voiceprints
     e = await v.create_enrollment(
-        "owner", "a", EnrollmentCreate(operation_id="one", display_name="我")
+        "owner", EnrollmentCreate(person_id="a" * 32, operation_id="one", display_name="我")
     )
     sample = ExtractedSample(
         model_id="test",
@@ -32,7 +30,7 @@ async def pending(store):
         speech_ms=4000,
     )
     for i in range(3):
-        await v.add_sample("owner", "a", e.enrollment_id, str(i), sample)
+        await v.add_sample("owner", e.enrollment_id, str(i), sample)
     pcm = b"\x01\x00" * 32000
     completion = EnrollmentCompletion(
         evaluation=EnrollmentEvaluation(
@@ -50,10 +48,9 @@ async def pending(store):
 
 async def test_save_is_atomic_and_does_not_bind_or_enable(store):
     v, e, completion = await pending(store)
-    p = await v.complete("owner", "a", e.enrollment_id, completion)
-    view = await v.view("owner", "a")
-    assert view.allowed_profile_ids == []
-    assert view.mode == "off"
+    p = await v.complete("owner", e.enrollment_id, completion)
+    view = await v.view("owner")
+    assert p.person_id == "a" * 32
     assert p.validation_state == "unvalidated"
     assert p.recording_available
     assert "vector" not in view.model_dump_json()
@@ -63,11 +60,7 @@ async def test_save_is_atomic_and_does_not_bind_or_enable(store):
         row = await session.get(VoiceEnrollmentRow, e.enrollment_id)
         assert len(row.samples_json["registration"]) == 3
         assert row.samples_json["evaluation"]["validation_state"] == "unvalidated"
-    assert (await v.complete("owner", "a", e.enrollment_id, completion)) == p
-    with pytest.raises(VoiceprintConflict, match="not available"):
-        await v.set_policy(
-            "owner", "a", PolicyUpdate(mode="allowlist", expected_revision=view.revision)
-        )
+    assert (await v.complete("owner", e.enrollment_id, completion)) == p
 
 
 @pytest.mark.parametrize("field", ["evidence_digest", "recording_sha256"])
@@ -77,27 +70,26 @@ async def test_stale_evaluation_or_wrong_recording_cannot_save(store, field):
         update={"evaluation": completion.evaluation.model_copy(update={field: "0" * 64})}
     )
     with pytest.raises(VoiceprintConflict):
-        await v.complete("owner", "a", e.enrollment_id, bad)
-    assert (await v.view("owner", "a")).profiles == []
-    assert (await v.enrollment("owner", "a", e.enrollment_id)).state == "collecting"
+        await v.complete("owner", e.enrollment_id, bad)
+    assert (await v.view("owner")).profiles == []
+    assert (await v.enrollment("owner", e.enrollment_id)).state == "collecting"
 
 
 async def test_concurrent_rerecording_cannot_overwrite_a_newer_saved_profile(store):
     v, first, completion = await pending(store)
-    profile = await v.complete("owner", "a", first.enrollment_id, completion)
+    profile = await v.complete("owner", first.enrollment_id, completion)
     replacements = []
     for operation in ("replace-a", "replace-b"):
         e = await v.create_enrollment(
             "owner",
-            "a",
-            EnrollmentCreate(
+            EnrollmentCreate(person_id="a" * 32,
                 operation_id=operation, display_name=operation, profile_id=profile.profile_id
             ),
         )
         for i in range(3):
-            await v.add_sample("owner", "a", e.enrollment_id, str(i), completion.evaluation.trial)
+            await v.add_sample("owner", e.enrollment_id, str(i), completion.evaluation.trial)
         replacements.append(e)
-    saved = await v.complete("owner", "a", replacements[0].enrollment_id, completion)
+    saved = await v.complete("owner", replacements[0].enrollment_id, completion)
     with pytest.raises(VoiceprintConflict, match="profile changed"):
-        await v.complete("owner", "a", replacements[1].enrollment_id, completion)
-    assert (await v.view("owner", "a")).profiles == [saved]
+        await v.complete("owner", replacements[1].enrollment_id, completion)
+    assert (await v.view("owner")).profiles == [saved]
