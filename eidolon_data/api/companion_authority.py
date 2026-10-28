@@ -197,6 +197,7 @@ class MemoryRuntimeRealm(BaseModel):
     owner_id: str = Field(min_length=1, max_length=64)
     engine: str = Field(min_length=1, max_length=64)
     engine_config: dict[str, Any]
+    scope: Literal["owner", "person"]
 
 
 class MemoryRuntimeRosterResponse(BaseModel):
@@ -301,6 +302,7 @@ def create_app(
                     MemoryRuntimeRealm(
                         realm_id=realm.realm_id,
                         owner_id=realm.owner_id,
+                        scope="person" if realm.person_id is not None else "owner",
                         engine=realm.engine,
                         engine_config=dict(realm.engine_config_json or {}),
                     )

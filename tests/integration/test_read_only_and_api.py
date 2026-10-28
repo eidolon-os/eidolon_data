@@ -161,6 +161,7 @@ async def test_memory_runtime_roster_has_distinct_auth_and_exact_contract(tmp_pa
                     "owner_id": "owner-1",
                     "engine": "mempalace",
                     "engine_config": {},
+                    "scope": "owner",
                 }
             ],
         }

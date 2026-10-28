@@ -4,21 +4,55 @@
   "title": "Memory runtime roster",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contract_version", "operation", "realms"],
+  "required": [
+    "contract_version",
+    "operation",
+    "realms"
+  ],
   "properties": {
-    "contract_version": {"const": "1"},
-    "operation": {"const": "memory.runtime-roster"},
+    "contract_version": {
+      "const": "1"
+    },
+    "operation": {
+      "const": "memory.runtime-roster"
+    },
     "realms": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["realm_id", "owner_id", "engine", "engine_config"],
+        "required": [
+          "realm_id",
+          "owner_id",
+          "engine",
+          "engine_config",
+          "scope"
+        ],
         "properties": {
-          "realm_id": {"type": "string", "minLength": 1, "maxLength": 64},
-          "owner_id": {"type": "string", "minLength": 1, "maxLength": 64},
-          "engine": {"type": "string", "minLength": 1, "maxLength": 64},
-          "engine_config": {"type": "object"}
+          "realm_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "owner_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "engine": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "engine_config": {
+            "type": "object"
+          },
+          "scope": {
+            "enum": [
+              "owner",
+              "person"
+            ]
+          }
         }
       }
     }
