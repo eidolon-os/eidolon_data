@@ -44,8 +44,9 @@ class VoiceprintConflict(ValueError):
 
 
 class Voiceprints:
-    def __init__(self, sessions):
+    def __init__(self, sessions, *, promotion_policy=None):
         self._sessions = sessions
+        self._promotion_policy = promotion_policy
 
     @asynccontextmanager
     async def _transaction(self):
@@ -147,7 +148,7 @@ class Voiceprints:
         digest = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
         async with self._transaction() as s:
             person = await self._person(s, owner, value.person_id)
-            if person.deleted or person.maturity != "candidate" or person.recognition_state != "active":
+            if person.deleted or person.recognition_state != "active":
                 raise VoiceprintConflict("candidate is not accepting evidence")
             rows = (await s.scalars(select(CandidateVoiceObservationRow).where(
                 CandidateVoiceObservationRow.owner_id == owner,
@@ -162,7 +163,10 @@ class Voiceprints:
             if previous is not None:
                 if previous.request_digest != digest:
                     raise VoiceprintConflict("turn already has different evidence")
-                return CandidateEvidenceReceipt(person_id=person.person_id, accepted=False, independent_turns=count)
+                return CandidateEvidenceReceipt(person_id=person.person_id, person_revision=person.revision,
+                    maturity=person.maturity, accepted=False, independent_turns=count)
+            if person.maturity != "candidate":
+                raise VoiceprintConflict("candidate is already established")
             if value.issued_at > time.time() + 1:
                 raise VoiceprintConflict("expired candidate evidence")
             if value.expires_at <= time.time():
@@ -200,7 +204,43 @@ class Voiceprints:
                 observation_json=json.loads(value.model_dump_json())))
             s.add(governance_fact(owner_id=owner, subject_type="person", subject_id=person.person_id,
                 action="person.candidate_evidence_recorded", payload={"independent_turns": count + 1}))
-            return CandidateEvidenceReceipt(person_id=person.person_id, accepted=True, independent_turns=count + 1)
+            self._promote_candidate(s, person, rows, value)
+            return CandidateEvidenceReceipt(person_id=person.person_id, person_revision=person.revision,
+                maturity=person.maturity, accepted=True, independent_turns=count + 1)
+
+    def _promote_candidate(self, session, person, rows, value):
+        policy = self._promotion_policy
+        if policy is None:
+            return
+        # The latest match was checked against a current, complete snapshot in
+        # this transaction. Existing comparison/margin logic owns conflicts.
+        # Never mix templates, model deployments, or decision/scoring policies.
+        def eligible(observation):
+            return (observation["profile_id"] == value.profile_id
+                and observation["profile_revision"] == value.profile_revision
+                and observation["decision_version"] == policy.decision_version
+                and observation["scoring_version"] == policy.scoring_version
+                and observation["model_id"] == policy.model_id
+                and observation["weights_hash"] == policy.weights_hash
+                and observation["preprocessing_version"] == policy.preprocessing_version
+                and observation.get("cosine_similarity") is not None
+                and observation["cosine_similarity"] >= policy.min_similarity
+                and time.time() - policy.max_evidence_age_s <= observation["issued_at"] <= time.time() + 1)
+
+        latest = value.model_dump(mode="json")
+        if not eligible(latest):
+            return
+        observations = [row.observation_json for row in rows if eligible(row.observation_json)] + [latest]
+        if (len(observations) < policy.min_turns
+                or sum(item["audio_quality"]["speech_ms"] for item in observations) < policy.min_total_speech_ms):
+            return
+        person.maturity = "established"
+        person.revision += 1
+        # Realm status and all provisional facts remain untouched. Promotion is
+        # evidence maturity, not an automatic read grant or fact confirmation.
+        session.add(governance_fact(owner_id=person.owner_id, subject_type="person", subject_id=person.person_id,
+            action="person.candidate_promoted", payload={"revision": person.revision,
+                "policy_version": policy.version, "independent_turns": len(observations)}))
 
     async def templates(self, owner, person_id):
         async with self._sessions() as s:

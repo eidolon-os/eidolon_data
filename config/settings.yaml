@@ -5,3 +5,7 @@ data:
   # Normalized sensitive media only; use an encrypted volume in production.
   object_store_path: "$EIDOLON_STATE_ROOT/objects"
   echo_sql: false
+  # Automatic maturity promotion is opt-in. Supply a versioned, model-bound
+  # CandidatePromotionPolicy only after the trial thresholds are evaluated.
+  # Promotion never enables a candidate's retained Memory Realm.
+  candidate_promotion: null

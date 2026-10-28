@@ -360,3 +360,60 @@ async def test_candidate_receipt_api_requires_service_authority(store):
         assert (await client.post(path, json=request.model_dump(mode='json'))).status_code == 401
         response = await client.post(path, json=request.model_dump(mode='json'), headers={'Authorization': 'Bearer secret'})
         assert response.status_code == 200 and response.json()['independent_turns'] == 1
+
+
+def promotion_policy(**changes):
+    from eidolon_sdk.biz.candidate_evidence import CandidatePromotionPolicy
+    return CandidatePromotionPolicy(**(dict(version='promotion-trial-v1', decision_version='trial',
+        model_id='test', weights_hash='a' * 64, preprocessing_version='v1', min_similarity=0.8) | changes))
+
+
+async def test_configured_promotion_is_atomic_stable_and_does_not_grant_memory(store):
+    store.settings.candidate_promotion = promotion_policy()
+    request = await candidate_evidence_setup(store)
+    request.observation.cosine_similarity = 0.9
+    original = await store.persons.memory_state('owner', 'a' * 32)
+    for n in range(3):
+        current = request if n == 0 else another_candidate_turn(request, n)
+        result = await store.voiceprints.record_candidate_evidence('owner', current)
+        assert result.maturity == ('candidate' if n < 2 else 'established')
+    person = await store.persons.get('owner', 'a' * 32)
+    assert person.person_id == request.observation.person_id and person.is_named is False
+    assert person.revision == request.observation.person_revision + 1
+    assert result.person_revision == person.revision
+    replay = await store.voiceprints.record_candidate_evidence('owner', current)
+    assert not replay.accepted and replay.maturity == 'established'
+    assert replay.person_revision == person.revision
+    state = await store.persons.memory_state('owner', person.person_id)
+    assert state['realm_id'] == original['realm_id'] and state['state'] == 'inactive'
+    from eidolon_data.services.persons import PersonConflict
+    with pytest.raises(PersonConflict, match='inactive'):
+        await store.persons.memory_realm('owner', person.person_id)
+    assert (await store.voiceprints.recognition_candidates('owner')).revision != request.snapshot_revision
+
+
+@pytest.mark.parametrize('policy_change,similarity', [
+    ({'decision_version': 'other'}, 0.9), ({'model_id': 'other'}, 0.9),
+    ({}, 0.7), ({'min_total_speech_ms': 9000}, 0.9),
+])
+async def test_promotion_requires_matching_policy_and_sufficient_evidence(store, policy_change, similarity):
+    store.settings.candidate_promotion = promotion_policy(**policy_change)
+    request = await candidate_evidence_setup(store)
+    request.observation.cosine_similarity = similarity
+    for n in range(3):
+        await store.voiceprints.record_candidate_evidence('owner', request if n == 0 else another_candidate_turn(request, n))
+    assert (await store.persons.get('owner', 'a' * 32)).maturity == 'candidate'
+
+
+async def test_promotion_does_not_mix_decision_versions(store):
+    store.settings.candidate_promotion = promotion_policy()
+    request = await candidate_evidence_setup(store)
+    request.observation.cosine_similarity = 0.9
+    older = request.model_copy(deep=True)
+    older.observation.decision_version = 'older-trial'
+    await store.voiceprints.record_candidate_evidence('owner', older)
+    for n in (1, 2):
+        result = await store.voiceprints.record_candidate_evidence('owner', another_candidate_turn(request, n))
+        assert result.maturity == 'candidate'
+    result = await store.voiceprints.record_candidate_evidence('owner', another_candidate_turn(request, 3))
+    assert result.maturity == 'established' and result.independent_turns == 3

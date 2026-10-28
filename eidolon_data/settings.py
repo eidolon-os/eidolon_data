@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
+from eidolon_sdk.biz.candidate_evidence import CandidatePromotionPolicy
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from yaml import safe_load
@@ -35,6 +36,7 @@ class DataSettings(BaseSettings):
     sqlite_path: str = Field(default_factory=lambda: str(default_sqlite_path()))
     object_store_path: str = Field(default_factory=lambda: str(default_object_store_path()))
     echo_sql: bool = False
+    candidate_promotion: CandidatePromotionPolicy | None = None
     # Sovereign/control-plane data favors durability. Rebuildable projections
     # (for example the global audit index) use their own NORMAL profile instead
     # of weakening this database globally.

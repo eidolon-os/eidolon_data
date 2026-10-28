@@ -140,7 +140,7 @@ class DataStore:
     @property
     def voiceprints(self):
         from eidolon_data.services.voiceprints import Voiceprints
-        return Voiceprints(self._session_factory)
+        return Voiceprints(self._session_factory, promotion_policy=self.settings.candidate_promotion)
 
     @property
     def person_faces(self):
