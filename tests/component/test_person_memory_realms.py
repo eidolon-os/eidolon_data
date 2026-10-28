@@ -5,13 +5,12 @@ from eidolon_data.schema.core import MemoryRealmRow
 from eidolon_data.services.persons import PersonConflict
 
 
-async def test_private_realms_are_explicit_idempotent_and_owner_scoped(store):
+async def test_private_realms_default_on_idempotent_and_owner_scoped(store):
     await store.owner_commands.create_owner(owner_id="one")
     await store.owner_commands.create_owner(owner_id="two")
     for letter in ("a", "b"):
         await store.persons.create("one", PersonCreate(person_id=letter * 32, display_name=letter))
-    with pytest.raises(LookupError):
-        await store.persons.memory_realm("one", "a" * 32)
+    assert (await store.persons.memory_realm("one", "a" * 32))["status"] == "active"
     a = await store.persons.memory_realm("one", "a" * 32, create=True)
     b = await store.persons.memory_realm("one", "b" * 32, create=True)
     assert a["realm_id"] != b["realm_id"]
@@ -55,8 +54,7 @@ async def test_restore_requires_active_person_current_revision_and_existing_real
     await store.owner_commands.create_owner(owner_id="two")
     person_id = "a" * 32
     await store.persons.create("one", PersonCreate(person_id=person_id, display_name="a"))
-    with pytest.raises(LookupError):
-        await store.persons.restore_memory("one", person_id, 1)
+    assert (await store.persons.restore_memory("one", person_id, 1))["person_revision"] == 1
     bound = await store.persons.memory_realm("one", person_id, create=True)
     await store.persons.update("one", person_id, PersonUpdate(
         profile={}, expected_revision=1, display_name="a", status="inactive"))
@@ -86,7 +84,7 @@ async def test_memory_can_be_suspended_without_disabling_person_and_restored_in_
     await store.owner_commands.create_owner(owner_id="one")
     pid = "c" * 32
     await store.persons.create("one", PersonCreate(person_id=pid, display_name="c"))
-    assert (await store.persons.memory_state("one", pid))["state"] == "unbound"
+    assert (await store.persons.memory_state("one", pid))["state"] == "active"
     bound = await store.persons.memory_realm("one", pid, create=True)
     suspended = await store.persons.suspend_memory("one", pid, 1)
     assert suspended["state"] == "inactive"
@@ -101,3 +99,16 @@ async def test_memory_can_be_suspended_without_disabling_person_and_restored_in_
     assert restored["realm_id"] == bound["realm_id"]
     assert restored["person_revision"] == 3
     assert (await store.persons.memory_state("one", pid))["state"] == "active"
+
+
+async def test_retried_person_creation_does_not_restore_paused_memory(store):
+    await store.owner_commands.create_owner(owner_id="one")
+    request = PersonCreate(person_id="d" * 32, display_name="d")
+    await store.persons.create("one", request)
+    original = await store.persons.memory_realm("one", request.person_id)
+    await store.persons.suspend_memory("one", request.person_id, 1)
+    await store.persons.create("one", request)
+    state = await store.persons.memory_state("one", request.person_id)
+    assert state["state"] == "inactive"
+    assert state["realm_id"] == original["realm_id"]
+    assert state["person_revision"] == 2

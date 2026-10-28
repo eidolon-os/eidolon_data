@@ -70,6 +70,7 @@ class Persons:
             )
             session.add(row)
             self._audit(session, row, "person.created")
+            self._bind_memory(session, row)
             return _view(row)
 
     async def list(self, owner_id):
@@ -123,17 +124,7 @@ class Persons:
             if realm is None:
                 if not create:
                     raise LookupError("personal memory realm is not bound")
-                realm = MemoryRealmRow(
-                    realm_id=f"r_{uuid4().hex}",
-                    owner_id=owner_id,
-                    person_id=person_id,
-                    engine="mempalace",
-                    status="active",
-                    engine_config_json={},
-                    policy_json={"scope": "person"},
-                )
-                session.add(realm)
-                self._audit(session, person, "person.memory_bound")
+                realm = self._bind_memory(session, person)
                 await session.flush()
             if realm.status != "active":
                 raise PersonConflict(
@@ -146,6 +137,17 @@ class Persons:
                 "person_revision": person.revision,
                 "status": realm.status,
             }
+
+    def _bind_memory(self, session, person):
+        """Create the initial personal Realm in the same transaction as its Person."""
+        realm = MemoryRealmRow(
+            realm_id=f"r_{uuid4().hex}", owner_id=person.owner_id,
+            person_id=person.person_id, engine="mempalace", status="active",
+            engine_config_json={}, policy_json={"scope": "person"},
+        )
+        session.add(realm)
+        self._audit(session, person, "person.memory_bound")
+        return realm
 
     async def memory_state(self, owner_id, person_id):
         async with self._sessions() as session:

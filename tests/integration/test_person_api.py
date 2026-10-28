@@ -23,7 +23,7 @@ async def test_person_authority_auth_scope_and_conflicts(store):
         assert (await c.get(detail)).status_code == 404
 
 
-async def test_person_memory_catalog_requires_service_auth_and_explicit_binding(store):
+async def test_person_memory_catalog_defaults_on_but_requires_service_auth(store):
     await store.owner_commands.create_owner(owner_id="one")
     await store.owner_commands.create_owner(owner_id="two")
     app = FastAPI()
@@ -34,7 +34,7 @@ async def test_person_memory_catalog_requires_service_auth_and_explicit_binding(
         assert (await c.put(path)).status_code in (401, 403)
         c.headers["Authorization"] = "Bearer secret"
         await c.post(people, json={"person_id": "a" * 32, "display_name": "a"})
-        assert (await c.get(path)).status_code == 404
+        assert (await c.get(path)).status_code == 200
         first = await c.put(path)
         assert first.status_code == 200
         assert (await c.put(path)).json() == first.json()
