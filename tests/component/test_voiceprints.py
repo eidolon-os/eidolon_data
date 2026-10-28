@@ -417,3 +417,60 @@ async def test_promotion_does_not_mix_decision_versions(store):
         assert result.maturity == 'candidate'
     result = await store.voiceprints.record_candidate_evidence('owner', another_candidate_turn(request, 3))
     assert result.maturity == 'established' and result.independent_turns == 3
+
+
+async def test_candidate_expiry_retains_evidence_and_duplicate_does_not_extend_pool(store, monkeypatch):
+    import time
+    clock = [time.time()]
+    monkeypatch.setattr('eidolon_data.services.voiceprints.time.time', lambda: clock[0])
+    store.settings.candidate_pool_ttl_s = 60
+    request = await candidate_evidence_setup(store)
+    await store.voiceprints.record_candidate_evidence('owner', request)
+    profiles = await store.voiceprints.view('owner')
+    recording = await store.voiceprints.recording('owner', request.observation.profile_id)
+    realm = await store.persons.memory_state('owner', 'a' * 32)
+    clock[0] += 50
+    assert not (await store.voiceprints.record_candidate_evidence('owner', request)).accepted
+    clock[0] += 11
+    assert not (await store.voiceprints.recognition_candidates('owner')).persons
+    person = await store.persons.get('owner', 'a' * 32)
+    assert person.recognition_state == 'retained' and person.status == 'active'
+    assert person.revision == request.observation.person_revision + 1
+    assert await store.voiceprints.view('owner') == profiles
+    assert await store.voiceprints.recording('owner', request.observation.profile_id) == recording
+    assert (await store.persons.memory_state('owner', 'a' * 32))['realm_id'] == realm['realm_id']
+    assert not (await store.voiceprints.recognition_candidates('owner')).persons
+    assert (await store.persons.get('owner', 'a' * 32)).revision == person.revision
+
+
+async def test_only_new_independent_evidence_extends_candidate_pool(store, monkeypatch):
+    import time
+    clock = [time.time()]
+    monkeypatch.setattr('eidolon_data.services.voiceprints.time.time', lambda: clock[0])
+    store.settings.candidate_pool_ttl_s = 60
+    request = await candidate_evidence_setup(store)
+    await store.voiceprints.record_candidate_evidence('owner', request)
+    clock[0] += 50
+    fresh = another_candidate_turn(request, 1)
+    fresh.observation.issued_at = clock[0]
+    fresh.observation.expires_at = clock[0] + 10
+    await store.voiceprints.record_candidate_evidence('owner', fresh)
+    clock[0] += 11
+    assert len((await store.voiceprints.recognition_candidates('owner')).persons) == 1
+    clock[0] += 50
+    assert not (await store.voiceprints.recognition_candidates('owner')).persons
+
+
+async def test_candidate_without_receipts_expires_but_established_person_does_not(store, monkeypatch):
+    import time
+    from eidolon_sdk.biz.person import PersonCreate
+    clock = [time.time()]
+    monkeypatch.setattr('eidolon_data.services.voiceprints.time.time', lambda: clock[0])
+    store.settings.candidate_pool_ttl_s = 60
+    await store.owner_commands.create_owner(owner_id='owner')
+    for char, maturity in [('a', 'candidate'), ('b', 'established')]:
+        await store.persons.create('owner', PersonCreate(person_id=char * 32, display_name=char, maturity=maturity))
+    clock[0] += 61
+    await store.voiceprints.recognition_candidates('owner')
+    assert (await store.persons.get('owner', 'a' * 32)).recognition_state == 'retained'
+    assert (await store.persons.get('owner', 'b' * 32)).recognition_state == 'active'

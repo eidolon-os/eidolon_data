@@ -37,6 +37,7 @@ class DataSettings(BaseSettings):
     object_store_path: str = Field(default_factory=lambda: str(default_object_store_path()))
     echo_sql: bool = False
     candidate_promotion: CandidatePromotionPolicy | None = None
+    candidate_pool_ttl_s: int = Field(default=604800, ge=60, le=2592000)
     # Sovereign/control-plane data favors durability. Rebuildable projections
     # (for example the global audit index) use their own NORMAL profile instead
     # of weakening this database globally.

@@ -9,3 +9,6 @@ data:
   # CandidatePromotionPolicy only after the trial thresholds are evaluated.
   # Promotion never enables a candidate's retained Memory Realm.
   candidate_promotion: null
+  # Candidate pool retention v1: seven days from creation/accepted evidence.
+  # Expiry excludes matching and retains identity, evidence and memory data.
+  candidate_pool_ttl_s: 604800

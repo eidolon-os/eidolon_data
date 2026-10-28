@@ -27,7 +27,7 @@ from eidolon_sdk.biz.voiceprint import (
     VoiceTemplate,
     enrollment_evidence_digest,
 )
-from sqlalchemy import select, text, update
+from sqlalchemy import or_, select, text, update
 
 from eidolon_data.audit import governance_fact
 from eidolon_data.schema import OwnerRow
@@ -44,9 +44,10 @@ class VoiceprintConflict(ValueError):
 
 
 class Voiceprints:
-    def __init__(self, sessions, *, promotion_policy=None):
+    def __init__(self, sessions, *, promotion_policy=None, candidate_pool_ttl_s=604800):
         self._sessions = sessions
         self._promotion_policy = promotion_policy
+        self._candidate_pool_ttl_s = candidate_pool_ttl_s
 
     @asynccontextmanager
     async def _transaction(self):
@@ -99,9 +100,27 @@ class Voiceprints:
 
     async def recognition_candidates(self, owner):
         """One bounded, owner-scoped snapshot; no recordings or new authority."""
+        # Cheap indexed check first; healthy reads do not acquire a write lock.
+        async with self._sessions() as s:
+            await self._owner(s, owner)
+            expired = await s.scalar(select(PersonRow.person_id).where(
+                *self._expired_candidates(owner)).limit(1))
+        if expired is not None:
+            from eidolon_data.services.persons import Persons
+            async with self._transaction() as s:
+                await self._owner(s, owner)
+                rows = (await s.scalars(select(PersonRow).where(
+                    *self._expired_candidates(owner)).limit(100))).all()
+                for row in rows:
+                    Persons._retain_candidate(s, row)
         async with self._sessions() as s:
             await self._owner(s, owner)
             return await self._recognition_snapshot(s, owner)
+
+    def _expired_candidates(self, owner):
+        return (PersonRow.owner_id == owner, PersonRow.maturity == "candidate",
+            PersonRow.recognition_state == "active", PersonRow.deleted.is_(False),
+            PersonRow.candidate_activity_at <= time.time() - self._candidate_pool_ttl_s)
 
     async def _recognition_snapshot(self, s, owner):
         import json
@@ -113,7 +132,9 @@ class Voiceprints:
                 SpeakerProfileRow, (SpeakerProfileRow.person_id == PersonRow.person_id)
                 & (SpeakerProfileRow.owner_id == PersonRow.owner_id)
             ).where(PersonRow.owner_id == owner, PersonRow.status == "active",
-                    PersonRow.deleted.is_(False), PersonRow.recognition_state == "active")
+                    PersonRow.deleted.is_(False), PersonRow.recognition_state == "active",
+                    or_(PersonRow.maturity != "candidate",
+                        PersonRow.candidate_activity_at > time.time() - self._candidate_pool_ttl_s))
             .order_by(PersonRow.person_id).limit(6)
         )).all()
         if len(rows) > 5:
@@ -204,6 +225,7 @@ class Voiceprints:
                 observation_json=json.loads(value.model_dump_json())))
             s.add(governance_fact(owner_id=owner, subject_type="person", subject_id=person.person_id,
                 action="person.candidate_evidence_recorded", payload={"independent_turns": count + 1}))
+            person.candidate_activity_at = max(person.candidate_activity_at or 0, value.issued_at)
             self._promote_candidate(s, person, rows, value)
             return CandidateEvidenceReceipt(person_id=person.person_id, person_revision=person.revision,
                 maturity=person.maturity, accepted=True, independent_turns=count + 1)

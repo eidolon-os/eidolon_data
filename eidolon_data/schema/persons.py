@@ -4,6 +4,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     CheckConstraint,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -34,11 +35,13 @@ class PersonRow(Base):
     recognition_state: Mapped[str] = mapped_column(
         String(16), default="active", server_default="active"
     )
+    candidate_activity_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_named: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     archived_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     revision: Mapped[int] = mapped_column(Integer)
     profile_json: Mapped[dict] = mapped_column(JSON)
     __table_args__ = (
+        Index("ix_person_candidate_activity", "owner_id", "maturity", "recognition_state", "candidate_activity_at"),
         Index("uq_persons_owner_person", "owner_id", "person_id", unique=True),
         CheckConstraint("status IN ('active', 'inactive')", name="person_status"),
         CheckConstraint("maturity IN ('candidate', 'established')", name="person_maturity"),

@@ -1,5 +1,6 @@
 """Single Data authority for OS people; no inference or permission grants."""
 
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -73,6 +74,7 @@ class Persons:
                 owner_id=owner_id,
                 display_name=request.display_name,
                 maturity=request.maturity,
+                candidate_activity_at=time.time() if request.maturity == "candidate" else None,
                 is_named=request.is_named,
                 status="active",
                 revision=1,
@@ -135,10 +137,14 @@ class Persons:
             if row.maturity != "candidate":
                 raise PersonConflict("only candidates can leave the candidate pool")
             if row.recognition_state != "retained":
-                row.recognition_state = "retained"
-                row.revision += 1
-                self._audit(session, row, "person.candidate_retained")
+                self._retain_candidate(session, row)
             return _view(row)
+
+    @staticmethod
+    def _retain_candidate(session, row):
+        row.recognition_state = "retained"
+        row.revision += 1
+        Persons._audit(session, row, "person.candidate_retained")
 
     async def archive(self, owner_id, person_id, expected_revision):
         from eidolon_data.schema.person_faces import PersonFaceRow
