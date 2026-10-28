@@ -4,7 +4,13 @@ from typing import Literal
 
 from eidolon_sdk.biz.person import PersonCreate, PersonUpdate, PersonView
 from eidolon_sdk.biz.person_face import PersonFaceImage, PersonFaceState, PersonFaceUpdate
-from eidolon_sdk.biz.system_data.models import PersonalMemoryRealmSnapshot, PersonalMemoryState
+from eidolon_sdk.biz.system_data.models import (
+    PersonalMemoryRealmSnapshot,
+    PersonalMemoryState,
+    ProvisionalMemoryAccessSnapshot,
+    ProvisionalMemoryPolicy,
+    ProvisionalMemoryPolicyState,
+)
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
 from eidolon_data.api.service_auth import authorize_service
@@ -79,6 +85,23 @@ def create_person_router(store, token):
     @router.post("/{person_id}/recognition/retire", response_model=PersonView)
     async def retire_candidate(owner_id: str, person_id: str, expected_revision: int = Query(ge=1)):
         return await call(store.persons.retire_candidate, owner_id, person_id, expected_revision)
+
+    @router.get("/{person_id}/provisional-memory/policy", response_model=ProvisionalMemoryPolicyState)
+    async def provisional_policy(owner_id: str, person_id: str):
+        return await call(store.persons.provisional_memory_policy, owner_id, person_id)
+
+    @router.put("/{person_id}/provisional-memory/policy", response_model=ProvisionalMemoryPolicyState)
+    async def set_provisional_policy(owner_id: str, person_id: str, payload: ProvisionalMemoryPolicy,
+                                     expected_revision: int = Query(ge=1)):
+        return await call(store.persons.provisional_memory_policy, owner_id, person_id,
+                          expected_revision, payload)
+
+    @router.get("/{person_id}/provisional-memory/access", response_model=ProvisionalMemoryAccessSnapshot)
+    async def provisional_access(owner_id: str, person_id: str,
+                                 expected_revision: int = Query(ge=1),
+                                 session_id: str = Query(min_length=1, max_length=256, pattern=r"\S")):
+        return await call(store.persons.provisional_memory_policy, owner_id, person_id,
+                          expected_revision, None, session_id)
 
     @router.get("/{person_id}/memory-realm", response_model=PersonalMemoryRealmSnapshot)
     async def get_memory_realm(owner_id: str, person_id: str):

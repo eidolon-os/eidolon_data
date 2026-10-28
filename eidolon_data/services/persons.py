@@ -6,7 +6,8 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from eidolon_sdk.biz.person import PersonView
-from sqlalchemy import delete, func, select, text, update
+from eidolon_sdk.biz.system_data.models import ProvisionalMemoryPolicy
+from sqlalchemy import delete, func, select, text
 
 from eidolon_data.audit import governance_fact
 from eidolon_data.schema.core import MemoryRealmRow, OwnerRow
@@ -273,6 +274,54 @@ class Persons:
                 receipt.state = "completed"
             return _deletion_view(receipt)
 
+    async def provisional_memory_policy(self, owner_id, person_id, expected_revision=None,
+                                        policy=None, session_id=None):
+        """Read/update independent provisional controls in the existing Realm policy.
+
+        A session snapshot is catalog policy, never recognition evidence or proof
+        that Memory is ready. Runtime callers must separately check both.
+        """
+        if session_id is not None and (not session_id.strip() or len(session_id) > 256):
+            raise PersonConflict("invalid provisional session")
+        manager = self._transaction() if policy is not None else self._sessions()
+        async with manager as session:
+            person = await self._person(session, owner_id, person_id)
+            if expected_revision is not None:
+                self._revision(person, expected_revision)
+            realm = await session.scalar(select(MemoryRealmRow).where(
+                MemoryRealmRow.owner_id == owner_id, MemoryRealmRow.person_id == person_id))
+            if realm is None:
+                raise LookupError("personal memory realm is not bound")
+            current = ProvisionalMemoryPolicy.model_validate(
+                (realm.policy_json or {}).get("provisional_memory", {}))
+            if policy is not None:
+                if expected_revision is None:
+                    raise PersonConflict("policy update requires current person revision")
+                policy = ProvisionalMemoryPolicy.model_validate(policy)
+                if person.status != "active" and (
+                        policy.save_allowed or policy.session_recall_allowed):
+                    raise PersonConflict("inactive person cannot enable provisional memory")
+                if current != policy:
+                    realm.policy_json = {**(realm.policy_json or {}),
+                                         "provisional_memory": policy.model_dump()}
+                    person.revision += 1
+                    self._audit(session, person, "person.provisional_memory_policy_updated")
+                current = policy
+            if session_id is not None:
+                if expected_revision is None:
+                    raise PersonConflict("access requires current person revision")
+                if (person.status != "active" or person.recognition_state != "active"
+                        or (person.maturity == "candidate" and (
+                            person.candidate_activity_at is None or
+                            person.candidate_activity_at <= time.time() - self._candidate_pool_ttl_s))):
+                    current = ProvisionalMemoryPolicy()
+            result = {"owner_id": owner_id, "person_id": person_id,
+                      "person_revision": person.revision, "realm_id": realm.realm_id,
+                      "policy": current.model_dump()}
+            if session_id is not None:
+                result.update(session_id=session_id, scope="provisional_session")
+            return result
+
     async def memory_realm(self, owner_id, person_id, *, create=False):
         """Resolve/create a catalog pointer after service authorization, never from voice."""
         async with self._transaction() as session:
@@ -347,7 +396,10 @@ class Persons:
             )
             if realm is None:
                 raise LookupError("personal memory realm is not bound")
-            if realm.status == "active":
+            provisional = (realm.policy_json or {}).get("provisional_memory", {})
+            if realm.status == "active" or any(provisional.values()):
+                realm.policy_json = {**(realm.policy_json or {}),
+                                     "provisional_memory": ProvisionalMemoryPolicy().model_dump()}
                 realm.status = "inactive"
                 person.revision += 1
                 self._audit(session, person, "person.memory_suspended")
@@ -391,15 +443,12 @@ class Persons:
 
     @staticmethod
     async def _deactivate_memory(session, owner_id, person_id):
-        await session.execute(
-            update(MemoryRealmRow)
-            .where(
-                MemoryRealmRow.owner_id == owner_id,
-                MemoryRealmRow.person_id == person_id,
-                MemoryRealmRow.status == "active",
-            )
-            .values(status="inactive")
-        )
+        realm = await session.scalar(select(MemoryRealmRow).where(
+            MemoryRealmRow.owner_id == owner_id, MemoryRealmRow.person_id == person_id))
+        if realm is not None:
+            realm.status = "inactive"
+            realm.policy_json = {**(realm.policy_json or {}),
+                                 "provisional_memory": ProvisionalMemoryPolicy().model_dump()}
 
     @staticmethod
     def _revision(row, revision):
