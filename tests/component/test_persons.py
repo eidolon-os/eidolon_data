@@ -51,3 +51,37 @@ def test_profile_is_explicit_and_bounded():
         PersonCreate(person_id=PID, display_name="   ")
     with pytest.raises(ValidationError):
         PersonProfile(inferred_personality="asserted")
+
+
+async def test_candidate_naming_preserves_identity_and_cannot_grant_memory(store):
+    await store.owner_commands.create_owner(owner_id="one")
+    request = PersonCreate(person_id=PID, display_name="未命名用户", maturity="candidate", is_named=False)
+    candidate = await store.persons.create("one", request)
+    assert candidate.maturity == "candidate" and not candidate.is_named
+    assert candidate == await store.persons.create("one", request)
+    state = await store.persons.memory_state("one", PID)
+    assert state["state"] == "inactive" and state["realm_id"]
+    with pytest.raises(PersonConflict, match="different data"):
+        await store.persons.create("one", request.model_copy(update={"maturity": "established"}))
+    named = await store.persons.update("one", PID, PersonUpdate(
+        expected_revision=1, display_name="甲", is_named=True, status="active", profile=PersonProfile()))
+    assert named.person_id == PID and named.maturity == "candidate" and named.is_named
+    for create in (False, True):
+        with pytest.raises(PersonConflict, match="provisional"):
+            await store.persons.memory_realm("one", PID, create=create)
+    with pytest.raises(PersonConflict, match="provisional"):
+        await store.persons.restore_memory("one", PID, named.revision)
+    await store.persons.archive("one", PID, named.revision)
+    restored = await store.persons.restore("one", PID, named.revision + 1)
+    assert restored.maturity == "candidate" and restored.is_named
+    assert (await store.persons.memory_state("one", PID))["realm_id"] == state["realm_id"]
+
+
+async def test_legacy_update_preserves_anonymous_established_person(store):
+    await store.owner_commands.create_owner(owner_id="one")
+    person = await store.persons.create("one", PersonCreate(
+        person_id=PID, display_name="未命名用户", is_named=False))
+    changed = await store.persons.update("one", PID, PersonUpdate(
+        expected_revision=person.revision, display_name="显示名称", status="active", profile=PersonProfile()))
+    assert changed.maturity == "established" and not changed.is_named
+    assert (await store.persons.memory_realm("one", PID))["person_id"] == PID

@@ -56,7 +56,9 @@ class Persons:
                 if existing.owner_id != owner_id:
                     raise PersonConflict("person id unavailable")
                 if (
-                    existing.display_name != request.display_name
+                    existing.maturity != request.maturity
+                    or existing.is_named != request.is_named
+                    or existing.display_name != request.display_name
                     or existing.profile_json != request.profile.model_dump()
                 ):
                     raise PersonConflict("person id already exists with different data")
@@ -70,6 +72,8 @@ class Persons:
                 person_id=request.person_id,
                 owner_id=owner_id,
                 display_name=request.display_name,
+                maturity=request.maturity,
+                is_named=request.is_named,
                 status="active",
                 revision=1,
                 profile_json=request.profile.model_dump(),
@@ -109,6 +113,8 @@ class Persons:
         async with self._transaction() as session:
             row = await self._person(session, owner_id, person_id)
             self._revision(row, request.expected_revision)
+            if request.is_named is not None:
+                row.is_named = request.is_named
             row.display_name = request.display_name
             row.status = request.status
             if request.status == "inactive":
@@ -228,6 +234,8 @@ class Persons:
         """Resolve/create a catalog pointer after service authorization, never from voice."""
         async with self._transaction() as session:
             person = await self._person(session, owner_id, person_id)
+            if person.maturity != "established":
+                raise PersonConflict("candidate memory requires scoped provisional access")
             if person.status != "active":
                 raise PersonConflict("person is inactive")
             realm = await session.scalar(
@@ -259,7 +267,7 @@ class Persons:
             owner_id=person.owner_id,
             person_id=person.person_id,
             engine="mempalace",
-            status="active",
+            status="active" if person.maturity == "established" else "inactive",
             engine_config_json={},
             policy_json={"scope": "person"},
         )
@@ -314,6 +322,8 @@ class Persons:
         async with self._transaction() as session:
             person = await self._person(session, owner_id, person_id)
             self._revision(person, expected_revision)
+            if person.maturity != "established":
+                raise PersonConflict("candidate memory requires scoped provisional access")
             if person.status != "active":
                 raise PersonConflict("person is inactive")
             realm = await session.scalar(
@@ -374,6 +384,8 @@ def _view(row, *, deletion_state="none"):
         status=row.status,
         revision=row.revision,
         profile=row.profile_json,
+        maturity=row.maturity or "established",
+        is_named=row.is_named if row.is_named is not None else True,
         identity_state=row.identity_state or "known",
         archived_at=row.archived_at,
         deletion_state=deletion_state,
