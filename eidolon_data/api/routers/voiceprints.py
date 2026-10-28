@@ -1,17 +1,18 @@
 """Internal authenticated voice identity authority; no audio or model runtime."""
 
+from eidolon_sdk.biz.candidate_evidence import CandidateEvidence, CandidateEvidenceReceipt
+from eidolon_sdk.biz.speaker_identity import SpeakerCandidates
 from eidolon_sdk.biz.voiceprint import (
-    PersonVoiceTemplates,
     EnrollmentCompletion,
     EnrollmentCreate,
     EnrollmentEvidence,
     EnrollmentView,
     ExtractedSample,
+    PersonVoiceTemplates,
     SpeakerProfileView,
     VoiceAudioRequest,
     VoiceprintCollection,
 )
-from eidolon_sdk.biz.speaker_identity import SpeakerCandidates
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
 from eidolon_data.api.service_auth import authorize_service
@@ -41,6 +42,10 @@ def create_voiceprint_router(store, token):
     async def candidates(owner_id: str, response: Response):
         response.headers["Cache-Control"] = "no-store"
         return await call(store.voiceprints.recognition_candidates, owner_id)
+
+    @router.post(prefix + "/candidate-evidence", response_model=CandidateEvidenceReceipt)
+    async def candidate_evidence(owner_id: str, payload: CandidateEvidence):
+        return await call(store.voiceprints.record_candidate_evidence, owner_id, payload)
 
     @router.delete(prefix + "/profiles/{profile_id}", response_model=VoiceprintCollection)
     async def delete(owner_id: str, profile_id: str):

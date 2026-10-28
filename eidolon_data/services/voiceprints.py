@@ -98,35 +98,109 @@ class Voiceprints:
 
     async def recognition_candidates(self, owner):
         """One bounded, owner-scoped snapshot; no recordings or new authority."""
+        async with self._sessions() as s:
+            await self._owner(s, owner)
+            return await self._recognition_snapshot(s, owner)
+
+    async def _recognition_snapshot(self, s, owner):
         import json
 
         from eidolon_sdk.biz.person import PersonProfile
         from eidolon_sdk.biz.speaker_identity import SpeakerCandidate, SpeakerCandidates
-        async with self._sessions() as s:
-            await self._owner(s, owner)
-            rows = (await s.execute(
-                select(PersonRow, SpeakerProfileRow).join(
-                    SpeakerProfileRow, (SpeakerProfileRow.person_id == PersonRow.person_id)
-                    & (SpeakerProfileRow.owner_id == PersonRow.owner_id)
-                ).where(PersonRow.owner_id == owner, PersonRow.status == "active",
-                        PersonRow.deleted.is_(False), PersonRow.recognition_state == "active")
-                .order_by(PersonRow.person_id).limit(6)
-            )).all()
-            if len(rows) > 5:
-                raise VoiceprintConflict("recognition candidate capacity exceeded")
-            candidates = []
-            for person, profile in rows:
-                supplied = PersonProfile.model_validate(person.profile_json)
-                candidates.append(SpeakerCandidate(
-                    person_id=person.person_id, person_revision=person.revision,
-                    maturity=person.maturity, is_named=person.is_named,
-                    display_name=person.display_name,
-                    profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
-                    templates=[VoiceTemplate(profile_id=profile.profile_id,
-                        revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json))]))
-            payload = [p.model_dump(mode="json") for p in candidates]
-            digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            return SpeakerCandidates(owner_id=owner, revision=digest, persons=candidates)
+        rows = (await s.execute(
+            select(PersonRow, SpeakerProfileRow).join(
+                SpeakerProfileRow, (SpeakerProfileRow.person_id == PersonRow.person_id)
+                & (SpeakerProfileRow.owner_id == PersonRow.owner_id)
+            ).where(PersonRow.owner_id == owner, PersonRow.status == "active",
+                    PersonRow.deleted.is_(False), PersonRow.recognition_state == "active")
+            .order_by(PersonRow.person_id).limit(6)
+        )).all()
+        if len(rows) > 5:
+            raise VoiceprintConflict("recognition candidate capacity exceeded")
+        candidates = []
+        for person, profile in rows:
+            supplied = PersonProfile.model_validate(person.profile_json)
+            candidates.append(SpeakerCandidate(
+                person_id=person.person_id, person_revision=person.revision,
+                maturity=person.maturity, is_named=person.is_named,
+                display_name=person.display_name,
+                profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
+                templates=[VoiceTemplate(profile_id=profile.profile_id,
+                    revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json))]))
+        payload = [p.model_dump(mode="json") for p in candidates]
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return SpeakerCandidates(owner_id=owner, revision=digest, persons=candidates)
+
+    async def record_candidate_evidence(self, owner, request):
+        import json
+
+        from eidolon_sdk.biz.candidate_evidence import (
+            CANDIDATE_EVIDENCE_LIMIT,
+            CandidateEvidenceReceipt,
+        )
+
+        from eidolon_data.schema.voiceprints import CandidateVoiceObservationRow
+
+        value = request.observation
+        if value.owner_id != owner:
+            raise VoiceprintConflict("evidence owner mismatch")
+        digest = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+        async with self._transaction() as s:
+            person = await self._person(s, owner, value.person_id)
+            if person.deleted or person.maturity != "candidate" or person.recognition_state != "active":
+                raise VoiceprintConflict("candidate is not accepting evidence")
+            rows = (await s.scalars(select(CandidateVoiceObservationRow).where(
+                CandidateVoiceObservationRow.owner_id == owner,
+                CandidateVoiceObservationRow.person_id == person.person_id))).all()
+            count = sum(row.profile_id == value.profile_id and row.profile_revision == value.profile_revision
+                and row.observation_json["decision_version"] == value.decision_version
+                and row.observation_json["scoring_version"] == value.scoring_version for row in rows)
+            previous = await s.scalar(select(CandidateVoiceObservationRow).where(
+                CandidateVoiceObservationRow.owner_id == owner,
+                CandidateVoiceObservationRow.session_id == value.session_id,
+                CandidateVoiceObservationRow.turn_id == value.turn_id))
+            if previous is not None:
+                if previous.request_digest != digest:
+                    raise VoiceprintConflict("turn already has different evidence")
+                return CandidateEvidenceReceipt(person_id=person.person_id, accepted=False, independent_turns=count)
+            if value.issued_at > time.time() + 1:
+                raise VoiceprintConflict("expired candidate evidence")
+            if value.expires_at <= time.time():
+                raise VoiceprintConflict("expired candidate evidence")
+            current = await self._recognition_snapshot(s, owner)
+            if current.revision != request.snapshot_revision or person.revision != value.person_revision:
+                raise VoiceprintConflict("recognition snapshot changed")
+            candidate = next((p for p in current.persons if p.person_id == person.person_id), None)
+            template = next((t for t in candidate.templates if t.profile_id == value.profile_id
+                             and t.revision == value.profile_revision), None) if candidate else None
+            if template is None or (template.sample.model_id, template.sample.weights_hash,
+                    template.sample.preprocessing_version) != (value.model_id, value.weights_hash, value.preprocessing_version):
+                raise VoiceprintConflict("candidate template changed")
+            replay = await s.scalar(select(CandidateVoiceObservationRow).where(
+                CandidateVoiceObservationRow.owner_id == owner,
+                CandidateVoiceObservationRow.audio_sha256 == request.audio_sha256))
+            if replay is not None:
+                raise VoiceprintConflict("audio evidence already counted")
+            # Different turn IDs over the same captured interval are not independent.
+            session_rows = (await s.scalars(select(CandidateVoiceObservationRow).where(
+                CandidateVoiceObservationRow.owner_id == owner,
+                CandidateVoiceObservationRow.session_id == value.session_id))).all()
+            source = value.source
+            for row in session_rows:
+                prior = row.observation_json['source']
+                if (prior['input_id'] == source.input_id and prior['generation'] == source.generation
+                        and prior['start_sample'] < source.end_sample and source.start_sample < prior['end_sample']):
+                    raise VoiceprintConflict("overlapping capture already counted")
+            if len(rows) >= CANDIDATE_EVIDENCE_LIMIT:
+                raise VoiceprintConflict("candidate evidence capacity reached")
+            s.add(CandidateVoiceObservationRow(observation_id=uuid.uuid4().hex, owner_id=owner,
+                person_id=person.person_id, session_id=value.session_id, turn_id=value.turn_id,
+                audio_sha256=request.audio_sha256, profile_id=value.profile_id,
+                profile_revision=value.profile_revision, request_digest=digest,
+                observation_json=json.loads(value.model_dump_json())))
+            s.add(governance_fact(owner_id=owner, subject_type="person", subject_id=person.person_id,
+                action="person.candidate_evidence_recorded", payload={"independent_turns": count + 1}))
+            return CandidateEvidenceReceipt(person_id=person.person_id, accepted=True, independent_turns=count + 1)
 
     async def templates(self, owner, person_id):
         async with self._sessions() as s:

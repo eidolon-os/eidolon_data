@@ -2,7 +2,16 @@
 
 from typing import Any
 
-from sqlalchemy import JSON, Float, ForeignKey, ForeignKeyConstraint, Integer, LargeBinary, String, Index
+from sqlalchemy import (
+    JSON,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from eidolon_data.db.base import Base
@@ -60,3 +69,25 @@ class VoiceEnrollmentRow(Base):
     samples_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     state: Mapped[str] = mapped_column(String(16), default="collecting")
     expires_at: Mapped[float] = mapped_column(Float)
+
+
+class CandidateVoiceObservationRow(Base):
+    """Source receipts only; templates/recordings retain their existing owners."""
+
+    __tablename__ = 'candidate_voice_observations'
+    observation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(64))
+    person_id: Mapped[str] = mapped_column(String(64))
+    session_id: Mapped[str] = mapped_column(String(128))
+    turn_id: Mapped[str] = mapped_column(String(128))
+    audio_sha256: Mapped[str] = mapped_column(String(64))
+    profile_id: Mapped[str] = mapped_column(String(64))
+    profile_revision: Mapped[int] = mapped_column(Integer)
+    request_digest: Mapped[str] = mapped_column(String(64))
+    observation_json: Mapped[dict] = mapped_column(JSON)
+    __table_args__ = (
+        ForeignKeyConstraint(['owner_id', 'person_id'], ['persons.owner_id', 'persons.person_id'], ondelete='CASCADE'),
+        Index('uq_candidate_voice_turn', 'owner_id', 'session_id', 'turn_id', unique=True),
+        Index('uq_candidate_voice_audio', 'owner_id', 'audio_sha256', unique=True),
+        Index('ix_candidate_voice_person', 'owner_id', 'person_id'),
+    )

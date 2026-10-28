@@ -274,3 +274,89 @@ async def test_candidate_pool_exit_retains_identity_recording_and_realm(store):
     await store.persons.update('owner', person.person_id, PersonUpdate(
         expected_revision=retired.revision, display_name='new', status='active', profile=person.profile))
     assert not (await store.voiceprints.recognition_candidates('owner')).persons
+
+
+async def candidate_evidence_setup(store):
+    from eidolon_sdk.biz.person import PersonCreate
+    from eidolon_sdk.biz.candidate_evidence import CandidateEvidence
+    from eidolon_sdk.biz.speaker_identity import SpeakerIdentityObservation, SpeakerEvidenceSource
+    from eidolon_sdk.biz.voiceprint import SpeakerAudioQuality
+    import time
+    await store.owner_commands.create_owner(owner_id='owner')
+    await store.persons.create('owner', PersonCreate(person_id='a' * 32,
+        display_name='匿名', maturity='candidate', is_named=False))
+    profile = await enroll(store)
+    snapshot = await store.voiceprints.recognition_candidates('owner')
+    person = snapshot.persons[0]
+    now = time.time()
+    observation = SpeakerIdentityObservation(status='identified', owner_id='owner',
+        source=SpeakerEvidenceSource(request_id='t', session_id='s', input_id='mic',
+            generation=1, sample_rate=16000, start_sample=0, end_sample=32000),
+        session_id='s', turn_id='t', issued_at=now, expires_at=now + 10,
+        person_id=person.person_id, person_revision=person.person_revision,
+        profile_id=profile.profile_id, profile_revision=profile.revision,
+        model_id='test', weights_hash='a' * 64, preprocessing_version='v1',
+        scoring_version='normalized-template-cosine-v1', decision_version='trial',
+        maturity='candidate', is_named=False, confidence='controlled_trial', reason='voice_match',
+        audio_quality=SpeakerAudioQuality(audio_ms=2000, speech_ms=2000, required_speech_ms=1500))
+    return CandidateEvidence(snapshot_revision=snapshot.revision, audio_sha256='c' * 64, observation=observation)
+
+
+def another_candidate_turn(request, n, *, overlap=False):
+    from eidolon_sdk.biz.candidate_evidence import CandidateEvidence
+    payload = request.model_dump()
+    payload['audio_sha256'] = f'{n:064x}'
+    value = payload['observation']
+    value['turn_id'] = value['source']['request_id'] = f't{n}'
+    value['source']['start_sample'] = 1 if overlap else n * 32000
+    value['source']['end_sample'] = 32001 if overlap else (n + 1) * 32000
+    return CandidateEvidence.model_validate(payload)
+
+
+async def test_candidate_receipts_deduplicate_and_do_not_promote_or_grant(store):
+    import asyncio
+    request = await candidate_evidence_setup(store)
+    first, second = await asyncio.gather(
+        store.voiceprints.record_candidate_evidence('owner', request),
+        store.voiceprints.record_candidate_evidence('owner', request))
+    assert sorted([first.accepted, second.accepted]) == [False, True]
+    assert first.independent_turns == second.independent_turns == 1
+    for n in range(1, 5):
+        result = await store.voiceprints.record_candidate_evidence('owner', another_candidate_turn(request, n))
+        assert result.independent_turns == n + 1
+    with pytest.raises(VoiceprintConflict, match='capacity'):
+        await store.voiceprints.record_candidate_evidence('owner', another_candidate_turn(request, 5))
+    person = await store.persons.get('owner', 'a' * 32)
+    assert person.maturity == 'candidate' and person.revision == request.observation.person_revision
+    assert (await store.persons.memory_state('owner', person.person_id))['state'] == 'inactive'
+
+
+async def test_candidate_receipts_reject_replay_overlap_stale_scope_and_retirement(store):
+    request = await candidate_evidence_setup(store)
+    await store.voiceprints.record_candidate_evidence('owner', request)
+    for changed, reason in [
+        (another_candidate_turn(request, 1, overlap=True), 'overlapping'),
+        (another_candidate_turn(request, 1).model_copy(update={'audio_sha256': request.audio_sha256}), 'already counted'),
+        (another_candidate_turn(request, 1).model_copy(update={'snapshot_revision': 'f' * 64}), 'snapshot'),
+    ]:
+        with pytest.raises(VoiceprintConflict, match=reason):
+            await store.voiceprints.record_candidate_evidence('owner', changed)
+    with pytest.raises(VoiceprintConflict, match='owner'):
+        await store.voiceprints.record_candidate_evidence('other', request)
+    await store.persons.retire_candidate('owner', 'a' * 32, request.observation.person_revision)
+    with pytest.raises(VoiceprintConflict, match='not accepting'):
+        await store.voiceprints.record_candidate_evidence('owner', request)
+
+
+async def test_candidate_receipt_api_requires_service_authority(store):
+    import httpx
+    from fastapi import FastAPI
+    from eidolon_data.api.routers.voiceprints import create_voiceprint_router
+    request = await candidate_evidence_setup(store)
+    app = FastAPI()
+    app.include_router(create_voiceprint_router(store, 'secret'))
+    path = '/api/companion-authority/v1/owners/owner/voiceprints/candidate-evidence'
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        assert (await client.post(path, json=request.model_dump(mode='json'))).status_code == 401
+        response = await client.post(path, json=request.model_dump(mode='json'), headers={'Authorization': 'Bearer secret'})
+        assert response.status_code == 200 and response.json()['independent_turns'] == 1
