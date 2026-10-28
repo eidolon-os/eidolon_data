@@ -1,4 +1,4 @@
-"""Enforce one voice per Person without discarding existing biometric data."""
+"""Enforce one voice per Person with a fresh enrollment baseline."""
 import sqlalchemy as sa
 from alembic import op
 
@@ -8,10 +8,10 @@ branch_labels = None
 depends_on = None
 
 def upgrade():
-    duplicates = op.get_bind().execute(sa.text("SELECT count(*) FROM (SELECT owner_id, person_id "
-        "FROM speaker_profiles GROUP BY owner_id, person_id HAVING count(*) > 1) AS duplicates")).scalar()
-    if duplicates:
-        raise RuntimeError("multiple voice profiles exist; explicitly select the retained profile before upgrading; no data was deleted")
+    # Pre-single-profile evidence is intentionally retired; users re-enroll.
+    op.execute("DELETE FROM voice_enrollments")
+    op.execute("DELETE FROM speaker_recordings")
+    op.execute("DELETE FROM speaker_profiles")
     op.create_index("uq_speaker_profile_person", "speaker_profiles", ["owner_id", "person_id"], unique=True)
     op.create_table("person_face_profiles",
         sa.Column("person_id", sa.String(64), primary_key=True),

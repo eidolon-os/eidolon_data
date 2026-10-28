@@ -23,7 +23,7 @@ def test_owned_voiceprint_migration_retains_evidence_and_removes_legacy(tmp_path
             db.execute("INSERT INTO speaker_recordings VALUES (?,?)", (profile, pcm))
             db.execute("INSERT INTO voice_enrollments VALUES (?,?,?,?,?,?,?,?)",
                        (profile, 'o', profile, '{}', '{"evidence":1}', 'ready', 0, person))
-    command.upgrade(config, "head")
+    command.upgrade(config, "0011_owned_voiceprints")
     with closing(sqlite3.connect(path)) as db, db:
         db.execute("PRAGMA foreign_keys=ON")
         assert db.execute("SELECT profile_id,person_id,revision,template_json FROM speaker_profiles").fetchall() == [
@@ -42,22 +42,23 @@ def test_owned_voiceprint_migration_retains_evidence_and_removes_legacy(tmp_path
             assert db.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
 
 
-def test_single_voice_upgrade_refuses_duplicates_without_losing_evidence(tmp_path, monkeypatch):
+@pytest.mark.parametrize("start_revision,profiles", [("0012_person_memory_realms", ("a", "b")), ("0013_person_biometrics", ("a",))])
+def test_single_voice_upgrade_retires_old_evidence(tmp_path, monkeypatch, start_revision, profiles):
     path = tmp_path / "duplicate.sqlite3"
     monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
     config = Config("alembic.ini")
-    command.upgrade(config, "0012_person_memory_realms")
+    command.upgrade(config, start_revision)
     with closing(sqlite3.connect(path)) as db, db:
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("INSERT INTO owners(owner_id) VALUES ('o')")
         db.execute("INSERT INTO persons VALUES ('person','o','Alice','active',1,'{}')")
-        for profile in ('a', 'b'):
+        for profile in profiles:
             db.execute("INSERT INTO speaker_profiles(profile_id,owner_id,display_name,revision,enrollment_id,template_json,person_id) VALUES (?,?,?,?,?,?,?)",
                 (profile,'o','Alice',1,profile,'{}','person'))
             db.execute("INSERT INTO speaker_recordings VALUES (?,?)", (profile, b'original'))
-    with pytest.raises(RuntimeError, match="no data was deleted"):
-        command.upgrade(config, "head")
+    command.upgrade(config, "head")
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute("SELECT profile_id,pcm FROM speaker_recordings ORDER BY profile_id").fetchall() == [('a', b'original'), ('b', b'original')]
-        assert db.execute("SELECT count(*) FROM speaker_profiles").fetchone()[0] == 2
-        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0012_person_memory_realms"
+        for table in ('speaker_profiles', 'speaker_recordings', 'voice_enrollments'):
+            assert db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM persons").fetchone()[0] == 1
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0014_voice_enrollment_baseline"

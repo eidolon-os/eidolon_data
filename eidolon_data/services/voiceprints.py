@@ -316,7 +316,7 @@ class Voiceprints:
             current = await s.scalar(select(SpeakerProfileRow).where(
                 SpeakerProfileRow.owner_id == owner, SpeakerProfileRow.person_id == e.person_id))
             if (current is not None and current.profile_id != e.profile_id) or (
-                (p.revision if p else 0) != e.request_json.get("_target_revision", 0)
+                (p.revision if p else 0) != e.request_json["_target_revision"]
             ):
                 raise VoiceprintConflict("profile changed while recording; refresh and start again")
             if p is None:

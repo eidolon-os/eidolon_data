@@ -30,7 +30,7 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
         }
         assert tables == EXPECTED_TABLES | {"alembic_version"}
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0013_person_biometrics",
+            "0014_voice_enrollment_baseline",
         )
         for table_name, table in Base.metadata.tables.items():
             actual_columns = {
