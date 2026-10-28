@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidolon.dev/data/contracts/v1/memory/realm-catalog.schema.json",
+  "title": "Complete Memory realm catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "operation",
+    "realms"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "1"
+    },
+    "operation": {
+      "const": "memory.realm-catalog"
+    },
+    "realms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "realm_id",
+          "owner_id",
+          "engine",
+          "engine_config",
+          "scope",
+          "person_id",
+          "enabled",
+          "management_enabled"
+        ],
+        "properties": {
+          "realm_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "owner_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "engine": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "engine_config": {
+            "type": "object"
+          },
+          "scope": {
+            "enum": [
+              "owner",
+              "person"
+            ]
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "management_enabled": {
+            "type": "boolean"
+          },
+          "erasure_pending": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

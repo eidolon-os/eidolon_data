@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import base64
 import asyncio
+import base64
 import binascii
 import hashlib
 from contextlib import asynccontextmanager, suppress
@@ -198,6 +198,10 @@ class MemoryRuntimeRealm(BaseModel):
     engine: str = Field(min_length=1, max_length=64)
     engine_config: dict[str, Any]
     scope: Literal["owner", "person"]
+    person_id: str | None = None
+    enabled: bool = True
+    management_enabled: bool = True
+    erasure_pending: bool = False
 
 
 class MemoryRuntimeRosterResponse(BaseModel):
@@ -208,6 +212,10 @@ class MemoryRuntimeRosterResponse(BaseModel):
     contract_version: Literal["1"] = "1"
     operation: Literal["memory.runtime-roster"] = "memory.runtime-roster"
     realms: list[MemoryRuntimeRealm]
+
+
+class MemoryRealmCatalogResponse(MemoryRuntimeRosterResponse):
+    operation: Literal["memory.realm-catalog"] = "memory.realm-catalog"
 
 
 ROSTER_PAGE_LIMIT = 50
@@ -256,6 +264,7 @@ def create_app(
     async def lifespan(app: FastAPI):
         await store.validate_schema()
         from eidolon_data.services.voiceprint_maintenance import expire_voiceprint_enrollments
+
         expiry_task = asyncio.create_task(expire_voiceprint_enrollments(store.voiceprints))
         try:
             yield
@@ -271,8 +280,10 @@ def create_app(
         lifespan=lifespan,
     )
     from .routers.voiceprints import create_voiceprint_router
+
     app.include_router(create_voiceprint_router(store, token))
     from .routers.persons import create_person_router
+
     app.include_router(create_person_router(store, token))
 
     @app.get("/health", tags=["operations"])
@@ -302,12 +313,38 @@ def create_app(
                     MemoryRuntimeRealm(
                         realm_id=realm.realm_id,
                         owner_id=realm.owner_id,
+                        person_id=realm.person_id,
                         scope="person" if realm.person_id is not None else "owner",
                         engine=realm.engine,
                         engine_config=dict(realm.engine_config_json or {}),
                     )
                 )
         return MemoryRuntimeRosterResponse(realms=realms)
+
+    @app.get(
+        "/api/companion-authority/v1/memory-realm-catalog",
+        response_model=MemoryRealmCatalogResponse,
+    )
+    async def get_memory_realm_catalog(authorization: str | None = Header(default=None)):
+        authorize_service(authorization, roster_token)
+        entries = []
+        for owner in await store.owners.list():
+            for realm in await store.memory_realms.list_for_owner(owner.owner_id):
+                entries.append(
+                    MemoryRuntimeRealm(
+                        realm_id=realm.realm_id,
+                        owner_id=realm.owner_id,
+                        person_id=realm.person_id,
+                        scope="person" if realm.person_id is not None else "owner",
+                        enabled=owner.status == "active" and realm.status == "active",
+                        management_enabled=owner.status == "active" and realm.status != "deleting",
+                        erasure_pending=realm.status == "deleting"
+                        and (realm.policy_json or {}).get("purge", {}).get("state") == "pending",
+                        engine=realm.engine,
+                        engine_config=dict(realm.engine_config_json or {}),
+                    )
+                )
+        return MemoryRealmCatalogResponse(realms=entries)
 
     async def _owned_companion(owner_id: str, companion_id: str):
         """This Owner's Companion, or 404.
@@ -585,7 +622,9 @@ def create_app(
         """Make this Companion what it was, as a new chapter rather than an undo."""
 
         authorize_service(authorization, token)
-        raise HTTPException(status_code=410, detail="Use versioned PUT /persona with action=restore")
+        raise HTTPException(
+            status_code=410, detail="Use versioned PUT /persona with action=restore"
+        )
 
     @app.get(
         "/api/companion-authority/v1/companions/{companion_id}/runtime-snapshot",

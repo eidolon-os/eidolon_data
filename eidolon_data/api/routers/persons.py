@@ -1,12 +1,14 @@
-from eidolon_sdk.biz.person_face import PersonFaceState, PersonFaceUpdate, PersonFaceImage
-from eidolon_data.services.person_faces import PersonFaceInvalid
 """Service-authenticated OS Person authority within the existing Data API."""
 
+from typing import Literal
+
 from eidolon_sdk.biz.person import PersonCreate, PersonUpdate, PersonView
+from eidolon_sdk.biz.person_face import PersonFaceImage, PersonFaceState, PersonFaceUpdate
 from eidolon_sdk.biz.system_data.models import PersonalMemoryRealmSnapshot, PersonalMemoryState
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
 from eidolon_data.api.service_auth import authorize_service
+from eidolon_data.services.person_faces import PersonFaceInvalid
 from eidolon_data.services.persons import PersonConflict
 
 
@@ -36,6 +38,31 @@ def create_person_router(store, token):
     async def list_people(owner_id: str):
         return await call(store.persons.list, owner_id)
 
+    @router.get("/archived", response_model=list[PersonView])
+    async def archived(owner_id: str):
+        async def read(owner):
+            return await store.persons.list(owner, deleted=True)
+
+        return await call(read, owner_id)
+
+    @router.post("/{person_id}/restore", response_model=PersonView)
+    async def restore(owner_id: str, person_id: str, expected_revision: int = Query(ge=1)):
+        return await call(store.persons.restore, owner_id, person_id, expected_revision)
+
+    @router.post("/{person_id}/memory-purge/{phase}")
+    async def purge_memory(
+        owner_id: str,
+        person_id: str,
+        phase: Literal["begin", "complete"],
+        expected_revision: int = Query(ge=1),
+    ):
+        async def invoke(owner, person, revision):
+            return await store.persons.purge_memory(
+                owner, person, revision, complete=phase == "complete"
+            )
+
+        return await call(invoke, owner_id, person_id, expected_revision)
+
     @router.get("/{person_id}", response_model=PersonView)
     async def get(owner_id: str, person_id: str):
         return await call(store.persons.get, owner_id, person_id)
@@ -57,6 +84,7 @@ def create_person_router(store, token):
     async def ensure_memory_realm(owner_id: str, person_id: str):
         async def ensure(owner, person):
             return await store.persons.memory_realm(owner, person, create=True)
+
         return await call(ensure, owner_id, person_id)
 
     @router.post("/{person_id}/memory-realm/restore", response_model=PersonalMemoryRealmSnapshot)

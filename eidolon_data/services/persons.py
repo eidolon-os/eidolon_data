@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from eidolon_sdk.biz.person import PersonView
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, select, text, update
 
 from eidolon_data.audit import governance_fact
 from eidolon_data.schema.core import MemoryRealmRow, OwnerRow
@@ -36,10 +36,10 @@ class Persons:
         if owner is None or owner.status != "active":
             raise LookupError("active owner not found")
 
-    async def _person(self, session, owner_id, person_id):
+    async def _person(self, session, owner_id, person_id, *, include_deleted=False):
         await self._owner(session, owner_id)
         row = await session.get(PersonRow, person_id)
-        if row is None or row.owner_id != owner_id:
+        if row is None or row.owner_id != owner_id or (row.deleted and not include_deleted):
             raise LookupError("person not found")
         return row
 
@@ -48,6 +48,8 @@ class Persons:
             await self._owner(session, owner_id)
             existing = await session.get(PersonRow, request.person_id)
             if existing is not None:
+                if existing.deleted:
+                    raise PersonConflict("person is deleted; use explicit restore")
                 if existing.owner_id != owner_id:
                     raise PersonConflict("person id unavailable")
                 if (
@@ -74,13 +76,13 @@ class Persons:
             self._bind_memory(session, row)
             return _view(row)
 
-    async def list(self, owner_id):
+    async def list(self, owner_id, *, deleted=False):
         async with self._sessions() as session:
             await self._owner(session, owner_id)
             rows = (
                 await session.scalars(
                     select(PersonRow)
-                    .where(PersonRow.owner_id == owner_id)
+                    .where(PersonRow.owner_id == owner_id, PersonRow.deleted == deleted)
                     .order_by(PersonRow.person_id)
                 )
             ).all()
@@ -105,6 +107,7 @@ class Persons:
 
     async def delete(self, owner_id, person_id, expected_revision):
         from eidolon_data.schema.person_faces import PersonFaceRow
+
         key = None
         async with self._transaction() as session:
             row = await self._person(session, owner_id, person_id)
@@ -113,9 +116,77 @@ class Persons:
             await self._deactivate_memory(session, owner_id, person_id)
             face = await session.get(PersonFaceRow, person_id)
             key = face.storage_key if face else None
-            await session.delete(row)
+            from eidolon_data.schema.voiceprints import SpeakerProfileRow, VoiceEnrollmentRow
+
+            await session.execute(
+                delete(VoiceEnrollmentRow).where(VoiceEnrollmentRow.person_id == person_id)
+            )
+            await session.execute(
+                delete(SpeakerProfileRow).where(SpeakerProfileRow.person_id == person_id)
+            )
+            if face:
+                await session.delete(face)
+            row.deleted = True
+            row.status = "inactive"
+            row.revision += 1
         if key and self._storage:
             self._storage.delete(key)
+
+    async def restore(self, owner_id, person_id, expected_revision):
+        async with self._transaction() as session:
+            row = await self._person(session, owner_id, person_id, include_deleted=True)
+            self._revision(row, expected_revision)
+            if not row.deleted:
+                raise PersonConflict("person is not deleted")
+            realm = await session.scalar(
+                select(MemoryRealmRow).where(MemoryRealmRow.person_id == person_id)
+            )
+            if realm is not None and realm.status == "deleting":
+                raise PersonConflict("memory erasure is pending; retry erasure before restoring")
+            row.deleted = False
+            row.status = "inactive"
+            row.revision += 1
+            await self._deactivate_memory(session, owner_id, person_id)
+            self._audit(session, row, "person.restored")
+            return _view(row)
+
+    async def purge_memory(self, owner_id, person_id, expected_revision, *, complete=False):
+        """Durable purge intent blocks restore until Memory confirms erasure; retries reuse it."""
+        async with self._transaction() as session:
+            row = await self._person(session, owner_id, person_id, include_deleted=True)
+            realm = await session.scalar(
+                select(MemoryRealmRow).where(
+                    MemoryRealmRow.owner_id == owner_id, MemoryRealmRow.person_id == person_id
+                )
+            )
+            if realm is None:
+                raise LookupError("personal memory realm not found")
+            policy = dict(realm.policy_json or {})
+            intent = policy.get("purge", {})
+            if intent.get("revision") == expected_revision or (
+                not complete
+                and intent.get("state") == "pending"
+                and row.revision == expected_revision
+            ):
+                if complete and intent.get("state") == "pending":
+                    intent = {"revision": expected_revision, "state": "completed"}
+                    policy["purge"] = intent
+                    realm.policy_json = policy
+                    realm.status = "inactive"
+                    row.revision += 1
+                    self._audit(session, row, "person.memory_purged")
+                return {"realm_id": realm.realm_id, "person_id": person_id, **intent}
+            if complete:
+                raise PersonConflict("purge intent does not match")
+            self._revision(row, expected_revision)
+            if not row.deleted:
+                raise PersonConflict("delete the Person before erasing retained memory")
+            intent = {"revision": expected_revision, "state": "pending"}
+            realm.policy_json = {**policy, "purge": intent}
+            realm.status = "deleting"
+            row.revision += 1
+            self._audit(session, row, "person.memory_purge_requested")
+            return {"realm_id": realm.realm_id, "person_id": person_id, **intent}
 
     async def memory_realm(self, owner_id, person_id, *, create=False):
         """Resolve/create a catalog pointer after service authorization, never from voice."""
@@ -148,9 +219,13 @@ class Persons:
     def _bind_memory(self, session, person):
         """Create the initial personal Realm in the same transaction as its Person."""
         realm = MemoryRealmRow(
-            realm_id=f"r_{uuid4().hex}", owner_id=person.owner_id,
-            person_id=person.person_id, engine="mempalace", status="active",
-            engine_config_json={}, policy_json={"scope": "person"},
+            realm_id=f"r_{uuid4().hex}",
+            owner_id=person.owner_id,
+            person_id=person.person_id,
+            engine="mempalace",
+            status="active",
+            engine_config_json={},
+            policy_json={"scope": "person"},
         )
         session.add(realm)
         self._audit(session, person, "person.memory_bound")
@@ -159,11 +234,16 @@ class Persons:
     async def memory_state(self, owner_id, person_id):
         async with self._sessions() as session:
             person = await self._person(session, owner_id, person_id)
-            realm = await session.scalar(select(MemoryRealmRow).where(
-                MemoryRealmRow.owner_id == owner_id, MemoryRealmRow.person_id == person_id))
+            realm = await session.scalar(
+                select(MemoryRealmRow).where(
+                    MemoryRealmRow.owner_id == owner_id, MemoryRealmRow.person_id == person_id
+                )
+            )
             return {
-                "owner_id": owner_id, "person_id": person_id,
-                "person_revision": person.revision, "person_status": person.status,
+                "owner_id": owner_id,
+                "person_id": person_id,
+                "person_revision": person.revision,
+                "person_status": person.status,
                 "realm_id": realm.realm_id if realm else None,
                 "state": realm.status if realm else "unbound",
             }
@@ -173,8 +253,11 @@ class Persons:
         async with self._transaction() as session:
             person = await self._person(session, owner_id, person_id)
             self._revision(person, expected_revision)
-            realm = await session.scalar(select(MemoryRealmRow).where(
-                MemoryRealmRow.owner_id == owner_id, MemoryRealmRow.person_id == person_id))
+            realm = await session.scalar(
+                select(MemoryRealmRow).where(
+                    MemoryRealmRow.owner_id == owner_id, MemoryRealmRow.person_id == person_id
+                )
+            )
             if realm is None:
                 raise LookupError("personal memory realm is not bound")
             if realm.status == "active":
@@ -182,9 +265,12 @@ class Persons:
                 person.revision += 1
                 self._audit(session, person, "person.memory_suspended")
             return {
-                "owner_id": owner_id, "person_id": person_id,
-                "person_revision": person.revision, "person_status": person.status,
-                "realm_id": realm.realm_id, "state": realm.status,
+                "owner_id": owner_id,
+                "person_id": person_id,
+                "person_revision": person.revision,
+                "person_status": person.status,
+                "realm_id": realm.realm_id,
+                "state": realm.status,
             }
 
     async def restore_memory(self, owner_id, person_id, expected_revision):

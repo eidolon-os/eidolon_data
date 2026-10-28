@@ -30,7 +30,7 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
         }
         assert tables == EXPECTED_TABLES | {"alembic_version"}
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0014_voice_enrollment_baseline",
+            "0015_person_archive",
         )
         for table_name, table in Base.metadata.tables.items():
             actual_columns = {
@@ -263,32 +263,44 @@ def test_person_migration_preserves_unassigned_voiceprints_and_blocks_data_loss(
 
 
 def test_voiceprint_migration_keeps_recording_evidence_without_companion(tmp_path, monkeypatch):
-    path = tmp_path / 'voice-to-person.sqlite3'
-    monkeypatch.setenv('EIDOLON_DATA_DATABASE_URL', f'sqlite+aiosqlite:///{path}')
-    config = Config('alembic.ini')
-    command.upgrade(config, '0009_persons')
-    pcm = b'\x01\x00' * 24000
+    path = tmp_path / "voice-to-person.sqlite3"
+    monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "0009_persons")
+    pcm = b"\x01\x00" * 24000
     with closing(sqlite3.connect(path)) as db:
         db.execute("INSERT INTO owners(owner_id) VALUES ('o')")
         db.execute("INSERT INTO companions(companion_id,owner_id) VALUES ('c','o')")
         db.execute("INSERT INTO speaker_profiles VALUES ('p','o','甲',7,'e','{}')")
         db.execute("INSERT INTO speaker_recordings VALUES ('p',?)", (pcm,))
-        db.execute("INSERT INTO voice_enrollments VALUES ('e','o','c','p','{}','{\"evaluation\":{\"v\":1}}','ready',0)")
-        db.execute("INSERT INTO voice_enrollments VALUES ('pending','o','c','new','{}','{\"sample\":1}','collecting',0)")
+        db.execute(
+            "INSERT INTO voice_enrollments VALUES ('e','o','c','p','{}','{\"evaluation\":{\"v\":1}}','ready',0)"
+        )
+        db.execute(
+            "INSERT INTO voice_enrollments VALUES ('pending','o','c','new','{}','{\"sample\":1}','collecting',0)"
+        )
         db.execute("INSERT INTO companion_voice_policies VALUES ('c','allowlist',9,'{}')")
         db.execute("INSERT INTO companion_speaker_bindings VALUES ('c','p')")
         db.commit()
-    command.upgrade(config, '0010_person_voiceprints')
+    command.upgrade(config, "0010_person_voiceprints")
     with closing(sqlite3.connect(path)) as db:
-        db.execute('PRAGMA foreign_keys=ON')
+        db.execute("PRAGMA foreign_keys=ON")
         db.execute("DELETE FROM companions WHERE companion_id='c'")
         db.commit()
-        assert db.execute('SELECT profile_id,revision,person_id FROM speaker_profiles').fetchall() == [('p',7,None)]
-        assert db.execute('SELECT pcm FROM speaker_recordings').fetchone() == (pcm,)
-        assert db.execute("SELECT samples_json FROM voice_enrollments WHERE enrollment_id='e'").fetchone() == ('{"evaluation":{"v":1}}',)
-        assert db.execute("SELECT state,samples_json FROM voice_enrollments WHERE enrollment_id='pending'").fetchone() == ('cancelled','{}')
-        assert not db.execute("SELECT name FROM sqlite_master WHERE name IN ('companion_voice_policies','companion_speaker_bindings')").fetchall()
-        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert db.execute(
+            "SELECT profile_id,revision,person_id FROM speaker_profiles"
+        ).fetchall() == [("p", 7, None)]
+        assert db.execute("SELECT pcm FROM speaker_recordings").fetchone() == (pcm,)
+        assert db.execute(
+            "SELECT samples_json FROM voice_enrollments WHERE enrollment_id='e'"
+        ).fetchone() == ('{"evaluation":{"v":1}}',)
+        assert db.execute(
+            "SELECT state,samples_json FROM voice_enrollments WHERE enrollment_id='pending'"
+        ).fetchone() == ("cancelled", "{}")
+        assert not db.execute(
+            "SELECT name FROM sqlite_master WHERE name IN ('companion_voice_policies','companion_speaker_bindings')"
+        ).fetchall()
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_person_realm_migration_preserves_default_and_guards_downgrade(tmp_path, monkeypatch):
@@ -298,15 +310,27 @@ def test_person_realm_migration_preserves_default_and_guards_downgrade(tmp_path,
     command.upgrade(config, "0011_owned_voiceprints")
     with closing(sqlite3.connect(path)) as db, db:
         db.execute("INSERT INTO owners(owner_id) VALUES ('o')")
-        db.execute("INSERT INTO memory_realms(realm_id,owner_id,status) VALUES ('default','o','active')")
+        db.execute(
+            "INSERT INTO memory_realms(realm_id,owner_id,status) VALUES ('default','o','active')"
+        )
     command.upgrade(config, "head")
     with closing(sqlite3.connect(path)) as db, db:
-        assert db.execute("SELECT person_id FROM memory_realms WHERE realm_id='default'").fetchone() == (None,)
-        db.execute("INSERT INTO memory_realms(realm_id,owner_id,status,person_id) VALUES ('a','o','active','a')")
-        db.execute("INSERT INTO memory_realms(realm_id,owner_id,status,person_id) VALUES ('b','o','active','b')")
+        assert db.execute(
+            "SELECT person_id FROM memory_realms WHERE realm_id='default'"
+        ).fetchone() == (None,)
+        db.execute(
+            "INSERT INTO memory_realms(realm_id,owner_id,status,person_id) VALUES ('a','o','active','a')"
+        )
+        db.execute(
+            "INSERT INTO memory_realms(realm_id,owner_id,status,person_id) VALUES ('b','o','active','b')"
+        )
         with pytest.raises(sqlite3.IntegrityError):
-            db.execute("INSERT INTO memory_realms(realm_id,owner_id,status) VALUES ('second','o','active')")
+            db.execute(
+                "INSERT INTO memory_realms(realm_id,owner_id,status) VALUES ('second','o','active')"
+            )
         with pytest.raises(sqlite3.IntegrityError):
-            db.execute("INSERT INTO memory_realms(realm_id,owner_id,status,person_id) VALUES ('duplicate','o','active','a')")
+            db.execute(
+                "INSERT INTO memory_realms(realm_id,owner_id,status,person_id) VALUES ('duplicate','o','active','a')"
+            )
     with pytest.raises(RuntimeError, match="personal Realms"):
         command.downgrade(config, "0011_owned_voiceprints")

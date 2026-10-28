@@ -52,6 +52,21 @@
               "owner",
               "person"
             ]
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "management_enabled": {
+            "type": "boolean"
+          },
+          "erasure_pending": {
+            "type": "boolean"
           }
         }
       }

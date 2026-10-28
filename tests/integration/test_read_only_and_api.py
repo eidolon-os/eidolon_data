@@ -162,6 +162,10 @@ async def test_memory_runtime_roster_has_distinct_auth_and_exact_contract(tmp_pa
                     "engine": "mempalace",
                     "engine_config": {},
                     "scope": "owner",
+                    "person_id": None,
+                    "enabled": True,
+                    "management_enabled": True,
+                    "erasure_pending": False,
                 }
             ],
         }
@@ -952,10 +956,14 @@ async def test_what_happened_to_this_owners_things_is_readable_newest_first(
         # did.
         # Startup backfilled the never-written home after those lifecycle moves.
         assert actions[:3] == [
-            "smarthome.registry.changed", "companion.archived", "companion.retirement_begun"
+            "smarthome.registry.changed",
+            "companion.archived",
+            "companion.retirement_begun",
         ]
         assert body["events"][0]["payload"] == {
-            "revision": 1, "change": "sample.loaded", "target": "apartment"
+            "revision": 1,
+            "change": "sample.loaded",
+            "target": "apartment",
         }
         # Everything that made this Owner what it is, in one record: two
         # Companions arriving, the pointer moving, and the one being put away.
@@ -994,7 +1002,8 @@ async def test_what_happened_to_this_owners_things_is_readable_newest_first(
         )
         assert theirs.status_code == 200
         assert [event["action"] for event in theirs.json()["events"]] == [
-            "smarthome.registry.changed", "owner.created"
+            "smarthome.registry.changed",
+            "owner.created",
         ]
         assert all(event["subject_id"] == "owner-2" for event in theirs.json()["events"])
         nobody = await client.get(
@@ -1213,16 +1222,21 @@ async def test_runtime_snapshot_rejects_unmigrated_preferences_at_authority(tmp_
     settings = await _seed(path)
     # Simulate an older build or external SQL; current ORM writes forbid this.
     with closing(sqlite3.connect(path)) as db:
-        db.execute("UPDATE companions SET runtime_config_json = ?", (
-            json.dumps({"conversation_preferences": {"unknown": "meaningful"}}),
-        ))
+        db.execute(
+            "UPDATE companions SET runtime_config_json = ?",
+            (json.dumps({"conversation_preferences": {"unknown": "meaningful"}}),),
+        )
         db.commit()
     token = "companion-authority-token-000001"
     app = create_app(settings, service_token=token, memory_roster_token=MEMORY_ROSTER_TOKEN)
-    async with app.router.lifespan_context(app), httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test",
-        headers={"Authorization": f"Bearer {token}"},
-    ) as client:
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client,
+    ):
         response = await client.get(
             "/api/companion-authority/v1/companions/companion-1/runtime-snapshot",
             params={"owner_id": "owner-1"},

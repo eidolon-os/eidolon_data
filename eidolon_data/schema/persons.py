@@ -1,6 +1,6 @@
 """Real people within an Owner namespace, independent of Companions."""
 
-from sqlalchemy import JSON, CheckConstraint, ForeignKey, Index, Integer, String
+from sqlalchemy import JSON, Boolean, CheckConstraint, ForeignKey, Index, Integer, String, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from eidolon_data.db.base import Base
@@ -14,6 +14,9 @@ class PersonRow(Base):
     )
     display_name: Mapped[str] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(16))
+    deleted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     revision: Mapped[int] = mapped_column(Integer)
     profile_json: Mapped[dict] = mapped_column(JSON)
     __table_args__ = (
