@@ -332,7 +332,8 @@ class Voiceprints:
         # this transaction. Existing comparison/margin logic owns conflicts.
         # Never mix templates, model deployments, or decision/scoring policies.
         def eligible(observation):
-            return (observation["profile_id"] == value.profile_id
+            return ((observation.get("audio_quality") or {}).get("overlap_detected") == 0
+                and observation["profile_id"] == value.profile_id
                 and observation["profile_revision"] == value.profile_revision
                 and observation["decision_version"] == policy.decision_version
                 and observation["scoring_version"] == policy.scoring_version

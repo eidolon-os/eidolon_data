@@ -23,7 +23,7 @@ async def setup(store):
                 sample_rate=16000, start_sample=0, end_sample=32000),
             issued_at=now, expires_at=now+10, confidence='controlled_trial', reason='no_match',
             model_id='m', weights_hash='a' * 64, preprocessing_version='v', scoring_version='normalized-template-cosine-v1',
-            decision_version='trial', audio_quality=dict(audio_ms=2000, speech_ms=2000, required_speech_ms=1500)))
+            decision_version='trial', audio_quality=dict(audio_ms=2000, speech_ms=2000, required_speech_ms=1500, overlap_detected=0)))
 
 
 async def test_discovery_atomically_creates_one_candidate_template_source_and_inactive_realm(store):

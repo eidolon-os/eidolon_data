@@ -298,7 +298,7 @@ async def candidate_evidence_setup(store):
         model_id='test', weights_hash='a' * 64, preprocessing_version='v1',
         scoring_version='normalized-template-cosine-v1', decision_version='trial',
         maturity='candidate', is_named=False, confidence='controlled_trial', reason='voice_match',
-        audio_quality=SpeakerAudioQuality(audio_ms=2000, speech_ms=2000, required_speech_ms=1500))
+        audio_quality=SpeakerAudioQuality(audio_ms=2000, speech_ms=2000, required_speech_ms=1500, overlap_detected=0))
     return CandidateEvidence(snapshot_revision=snapshot.revision, audio_sha256='c' * 64, observation=observation)
 
 
@@ -521,3 +521,32 @@ async def test_recognition_snapshot_includes_all_bounded_people_and_never_trunca
             assert len({p.person_id for p in snapshot.persons}) == MAX_RECOGNITION_PERSONS
     with pytest.raises(VoiceprintConflict, match='capacity'):
         await store.voiceprints.recognition_candidates('owner')
+
+
+async def test_promotion_does_not_reclassify_legacy_missing_overlap_as_clean(store):
+    from sqlalchemy import select
+    from eidolon_data.schema.voiceprints import CandidateVoiceObservationRow
+
+    store.settings.candidate_promotion = promotion_policy()
+    request = await candidate_evidence_setup(store)
+    request.observation.cosine_similarity = .9
+    await store.voiceprints.record_candidate_evidence('owner', request)
+    # Simulate a retained receipt written before the new quality contract.
+    async with store._session_factory() as session:
+        row = await session.scalar(select(CandidateVoiceObservationRow))
+        data = dict(row.observation_json)
+        data['audio_quality'] = dict(data['audio_quality'])
+        data['audio_quality'].pop('overlap_detected')
+        row.observation_json = data
+        await session.commit()
+    for n in (1, 2):
+        result = await store.voiceprints.record_candidate_evidence(
+            'owner', another_candidate_turn(request, n))
+        assert result.maturity == 'candidate'
+    result = await store.voiceprints.record_candidate_evidence(
+        'owner', another_candidate_turn(request, 3))
+    assert result.maturity == 'established'
+    async with store._session_factory() as session:
+        rows = (await session.scalars(select(CandidateVoiceObservationRow))).all()
+        assert len(rows) == 4  # Old evidence retained, never retroactively certified.
+        assert sum('overlap_detected' not in row.observation_json['audio_quality'] for row in rows) == 1
