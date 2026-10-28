@@ -242,3 +242,35 @@ async def test_new_enrollment_replaces_single_profile_and_rejects_concurrent_sta
         await complete(v, "owner", sessions[1].enrollment_id, sample(3))
     profiles = (await v.view("owner")).profiles
     assert len(profiles) == 1 and profiles[0].revision == updated.revision
+
+
+async def test_candidate_pool_exit_retains_identity_recording_and_realm(store):
+    from eidolon_sdk.biz.person import PersonCreate, PersonUpdate
+    from eidolon_data.services.persons import PersonConflict
+
+    await store.owner_commands.create_owner(owner_id='owner')
+    person = await store.persons.create('owner', PersonCreate(
+        person_id='a' * 32, display_name='甲', maturity='candidate', is_named=False))
+    profile = await enroll(store)
+    # Enrollment may update Person revision; retirement must use fresh authority.
+    person = await store.persons.get('owner', person.person_id)
+    before = await store.voiceprints.recognition_candidates('owner')
+    recording = await store.voiceprints.recording('owner', profile.profile_id)
+    realm = await store.persons.memory_state('owner', person.person_id)
+    retired = await store.persons.retire_candidate('owner', person.person_id, person.revision)
+    assert retired.recognition_state == 'retained' and retired.status == person.status
+    assert retired.person_id == person.person_id and retired.revision == person.revision + 1
+    after = await store.voiceprints.recognition_candidates('owner')
+    assert not after.persons and after.revision != before.revision
+    assert (await store.voiceprints.view('owner')).profiles[0].profile_id == profile.profile_id
+    assert await store.voiceprints.recording('owner', profile.profile_id) == recording
+    assert (await store.persons.memory_state('owner', person.person_id))['realm_id'] == realm['realm_id']
+    assert len(await store.persons.list('owner')) == 1
+    assert await store.persons.list('owner', deleted=True) == []
+    with pytest.raises(PersonConflict):
+        await store.persons.retire_candidate('owner', person.person_id, person.revision)
+    assert await store.persons.retire_candidate('owner', person.person_id, retired.revision) == retired
+    # Ordinary naming/activation cannot silently put a retained candidate back.
+    await store.persons.update('owner', person.person_id, PersonUpdate(
+        expected_revision=retired.revision, display_name='new', status='active', profile=person.profile))
+    assert not (await store.voiceprints.recognition_candidates('owner')).persons

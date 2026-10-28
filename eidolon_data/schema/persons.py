@@ -31,6 +31,9 @@ class PersonRow(Base):
     maturity: Mapped[str] = mapped_column(
         String(16), default="established", server_default="established"
     )
+    recognition_state: Mapped[str] = mapped_column(
+        String(16), default="active", server_default="active"
+    )
     is_named: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     archived_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     revision: Mapped[int] = mapped_column(Integer)
@@ -39,6 +42,7 @@ class PersonRow(Base):
         Index("uq_persons_owner_person", "owner_id", "person_id", unique=True),
         CheckConstraint("status IN ('active', 'inactive')", name="person_status"),
         CheckConstraint("maturity IN ('candidate', 'established')", name="person_maturity"),
+        CheckConstraint("recognition_state IN ('active', 'retained')", name="person_recognition_state"),
         CheckConstraint("revision > 0", name="person_revision_positive"),
     )
 

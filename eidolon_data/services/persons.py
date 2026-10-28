@@ -124,6 +124,22 @@ class Persons:
             self._audit(session, row, "person.updated")
             return _view(row)
 
+    async def retire_candidate(self, owner_id, person_id, expected_revision):
+        """Leave automatic matching without erasing identity, evidence or Realm.
+
+        This is not user archival. No automatic path restores a retained Person.
+        """
+        async with self._transaction() as session:
+            row = await self._person(session, owner_id, person_id)
+            self._revision(row, expected_revision)
+            if row.maturity != "candidate":
+                raise PersonConflict("only candidates can leave the candidate pool")
+            if row.recognition_state != "retained":
+                row.recognition_state = "retained"
+                row.revision += 1
+                self._audit(session, row, "person.candidate_retained")
+            return _view(row)
+
     async def archive(self, owner_id, person_id, expected_revision):
         from eidolon_data.schema.person_faces import PersonFaceRow
 
@@ -384,6 +400,7 @@ def _view(row, *, deletion_state="none"):
         status=row.status,
         revision=row.revision,
         profile=row.profile_json,
+        recognition_state=row.recognition_state or "active",
         maturity=row.maturity or "established",
         is_named=row.is_named if row.is_named is not None else True,
         identity_state=row.identity_state or "known",

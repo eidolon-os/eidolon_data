@@ -108,7 +108,8 @@ class Voiceprints:
                 select(PersonRow, SpeakerProfileRow).join(
                     SpeakerProfileRow, (SpeakerProfileRow.person_id == PersonRow.person_id)
                     & (SpeakerProfileRow.owner_id == PersonRow.owner_id)
-                ).where(PersonRow.owner_id == owner, PersonRow.status == "active")
+                ).where(PersonRow.owner_id == owner, PersonRow.status == "active",
+                        PersonRow.deleted.is_(False), PersonRow.recognition_state == "active")
                 .order_by(PersonRow.person_id).limit(6)
             )).all()
             if len(rows) > 5:

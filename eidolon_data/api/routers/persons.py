@@ -76,6 +76,10 @@ def create_person_router(store, token):
         await call(store.persons.archive, owner_id, person_id, expected_revision)
         return Response(status_code=204)
 
+    @router.post("/{person_id}/recognition/retire", response_model=PersonView)
+    async def retire_candidate(owner_id: str, person_id: str, expected_revision: int = Query(ge=1)):
+        return await call(store.persons.retire_candidate, owner_id, person_id, expected_revision)
+
     @router.get("/{person_id}/memory-realm", response_model=PersonalMemoryRealmSnapshot)
     async def get_memory_realm(owner_id: str, person_id: str):
         return await call(store.persons.memory_realm, owner_id, person_id)
