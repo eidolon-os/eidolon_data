@@ -40,3 +40,24 @@ def test_owned_voiceprint_migration_retains_evidence_and_removes_legacy(tmp_path
         db.execute("DELETE FROM persons WHERE person_id='person'")
         for table in ('speaker_profiles', 'speaker_recordings', 'voice_enrollments'):
             assert db.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
+
+
+def test_single_voice_upgrade_refuses_duplicates_without_losing_evidence(tmp_path, monkeypatch):
+    path = tmp_path / "duplicate.sqlite3"
+    monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "0012_person_memory_realms")
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("INSERT INTO owners(owner_id) VALUES ('o')")
+        db.execute("INSERT INTO persons VALUES ('person','o','Alice','active',1,'{}')")
+        for profile in ('a', 'b'):
+            db.execute("INSERT INTO speaker_profiles(profile_id,owner_id,display_name,revision,enrollment_id,template_json,person_id) VALUES (?,?,?,?,?,?,?)",
+                (profile,'o','Alice',1,profile,'{}','person'))
+            db.execute("INSERT INTO speaker_recordings VALUES (?,?)", (profile, b'original'))
+    with pytest.raises(RuntimeError, match="no data was deleted"):
+        command.upgrade(config, "head")
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("SELECT profile_id,pcm FROM speaker_recordings ORDER BY profile_id").fetchall() == [('a', b'original'), ('b', b'original')]
+        assert db.execute("SELECT count(*) FROM speaker_profiles").fetchone()[0] == 2
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0012_person_memory_realms"

@@ -107,28 +107,22 @@ class Voiceprints:
                     SpeakerProfileRow, (SpeakerProfileRow.person_id == PersonRow.person_id)
                     & (SpeakerProfileRow.owner_id == PersonRow.owner_id)
                 ).where(PersonRow.owner_id == owner, PersonRow.status == "active")
-                .order_by(PersonRow.person_id, SpeakerProfileRow.profile_id).limit(26)
+                .order_by(PersonRow.person_id).limit(6)
             )).all()
-            grouped = {}
-            for person, profile in rows:
-                if person.person_id not in grouped:
-                    # Description is not needed for conversational recognition.
-                    supplied = PersonProfile.model_validate(person.profile_json)
-                    grouped[person.person_id] = SpeakerCandidate(
-                        person_id=person.person_id, person_revision=person.revision,
-                        display_name=person.display_name,
-                        profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
-                        templates=[VoiceTemplate(profile_id=profile.profile_id,
-                            revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json))])
-                else:
-                    grouped[person.person_id].templates.append(VoiceTemplate(
-                        profile_id=profile.profile_id, revision=profile.revision,
-                        sample=ExtractedSample.model_validate(profile.template_json)))
-            if len(grouped) > 5 or len(rows) > 25 or any(len(p.templates) > 5 for p in grouped.values()):
+            if len(rows) > 5:
                 raise VoiceprintConflict("recognition candidate capacity exceeded")
-            payload = [p.model_dump(mode="json") for p in grouped.values()]
+            candidates = []
+            for person, profile in rows:
+                supplied = PersonProfile.model_validate(person.profile_json)
+                candidates.append(SpeakerCandidate(
+                    person_id=person.person_id, person_revision=person.revision,
+                    display_name=person.display_name,
+                    profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
+                    templates=[VoiceTemplate(profile_id=profile.profile_id,
+                        revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json))]))
+            payload = [p.model_dump(mode="json") for p in candidates]
             digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            return SpeakerCandidates(owner_id=owner, revision=digest, persons=list(grouped.values()))
+            return SpeakerCandidates(owner_id=owner, revision=digest, persons=candidates)
 
     async def templates(self, owner, person_id):
         async with self._sessions() as s:
@@ -211,16 +205,16 @@ class Voiceprints:
                 if original != payload:
                     raise VoiceprintConflict("operation id reused with different request")
                 return _enrollment(e)
-            if request.profile_id:
-                original = await self._profile_owned(s, owner, request.profile_id)
-                if original.person_id != request.person_id:
-                    raise VoiceprintConflict("profile belongs to another person")
-                payload["_target_revision"] = original.revision
+            original = await s.scalar(select(SpeakerProfileRow).where(
+                SpeakerProfileRow.owner_id == owner, SpeakerProfileRow.person_id == request.person_id))
+            if request.profile_id and (original is None or original.profile_id != request.profile_id):
+                raise VoiceprintConflict("profile is not this person's current voice")
+            payload["_target_revision"] = original.revision if original else 0
             e = VoiceEnrollmentRow(
                 enrollment_id=eid,
                 owner_id=owner,
                 person_id=request.person_id,
-                profile_id=request.profile_id or "sp_" + uuid.uuid4().hex,
+                profile_id=original.profile_id if original else "sp_" + uuid.uuid4().hex,
                 request_json=payload,
                 samples_json={},
                 state="collecting",
@@ -319,8 +313,10 @@ class Voiceprints:
                 _compatible(sample, evaluation.template)
                 _compatible(sample, evaluation.trial)
             p = await s.get(SpeakerProfileRow, e.profile_id)
-            if e.request_json.get("profile_id") and (
-                p is None or p.revision != e.request_json.get("_target_revision")
+            current = await s.scalar(select(SpeakerProfileRow).where(
+                SpeakerProfileRow.owner_id == owner, SpeakerProfileRow.person_id == e.person_id))
+            if (current is not None and current.profile_id != e.profile_id) or (
+                (p.revision if p else 0) != e.request_json.get("_target_revision", 0)
             ):
                 raise VoiceprintConflict("profile changed while recording; refresh and start again")
             if p is None:

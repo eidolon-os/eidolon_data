@@ -23,6 +23,7 @@ dependencies = [
     "pydantic-settings>=2.2",
     "PyYAML>=6.0",
     "sqlalchemy[asyncio]>=2.0",
+    "pillow>=11",
 ]
 
 [project.scripts]

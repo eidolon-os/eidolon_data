@@ -221,3 +221,21 @@ async def test_recognition_snapshot_changes_on_lifecycle_and_excludes_other_owne
     await store.persons.update('owner','a'*32,PersonUpdate(expected_revision=changed.revision,
         display_name='new name',status='inactive',profile=PersonProfile()))
     assert (await store.voiceprints.recognition_candidates('owner')).persons==[]
+
+
+async def test_new_enrollment_replaces_single_profile_and_rejects_concurrent_stale_completion(store):
+    await setup(store)
+    original = await enroll(store)
+    v = store.voiceprints
+    sessions = []
+    for op in ("replacement-a", "replacement-b"):
+        e = await v.create_enrollment("owner", EnrollmentCreate(person_id="a" * 32, operation_id=op, display_name="甲"))
+        assert e.profile_id == original.profile_id
+        for i in range(3): await v.add_sample("owner", e.enrollment_id, str(i), sample(i))
+        sessions.append(e)
+    updated = await complete(v, "owner", sessions[0].enrollment_id, sample(3))
+    assert updated.profile_id == original.profile_id and updated.revision == original.revision + 1
+    with pytest.raises(VoiceprintConflict):
+        await complete(v, "owner", sessions[1].enrollment_id, sample(3))
+    profiles = (await v.view("owner")).profiles
+    assert len(profiles) == 1 and profiles[0].revision == updated.revision

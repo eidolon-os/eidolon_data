@@ -8,6 +8,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from eidolon_data.audit import governance_fact
+from eidolon_data.schema.person_faces import PersonFaceRow
 from eidolon_data.schema import (
     CompanionFaceAssetRow,
     CompanionRow,
@@ -75,11 +76,13 @@ class OwnerDeletionService:
                     .where(OwnerFaceProfileRevisionRow.owner_id == owner_id)
                 )
             )
+            person_face_keys = tuple(await session.scalars(select(PersonFaceRow.storage_key).where(
+                PersonFaceRow.owner_id == owner_id, PersonFaceRow.storage_key.is_not(None))))
             object_keys = (
                 tuple(
                     key for cond_key, idle_key in face_rows for key in (cond_key, idle_key) if key
                 )
-                + owner_face_keys
+                + owner_face_keys + person_face_keys
             )
             deleted_rows = {
                 "owners": 1,

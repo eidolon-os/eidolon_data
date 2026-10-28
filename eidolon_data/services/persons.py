@@ -16,8 +16,9 @@ class PersonConflict(ValueError):
 
 
 class Persons:
-    def __init__(self, sessions):
+    def __init__(self, sessions, storage=None):
         self._sessions = sessions
+        self._storage = storage
 
     @asynccontextmanager
     async def _transaction(self):
@@ -103,12 +104,18 @@ class Persons:
             return _view(row)
 
     async def delete(self, owner_id, person_id, expected_revision):
+        from eidolon_data.schema.person_faces import PersonFaceRow
+        key = None
         async with self._transaction() as session:
             row = await self._person(session, owner_id, person_id)
             self._revision(row, expected_revision)
             self._audit(session, row, "person.deleted")
             await self._deactivate_memory(session, owner_id, person_id)
+            face = await session.get(PersonFaceRow, person_id)
+            key = face.storage_key if face else None
             await session.delete(row)
+        if key and self._storage:
+            self._storage.delete(key)
 
     async def memory_realm(self, owner_id, person_id, *, create=False):
         """Resolve/create a catalog pointer after service authorization, never from voice."""

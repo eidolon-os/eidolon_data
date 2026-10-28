@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from sqlalchemy import JSON, Float, ForeignKey, ForeignKeyConstraint, Integer, LargeBinary, String
+from sqlalchemy import JSON, Float, ForeignKey, ForeignKeyConstraint, Integer, LargeBinary, String, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from eidolon_data.db.base import Base
@@ -11,6 +11,7 @@ from eidolon_data.db.base import Base
 class SpeakerProfileRow(Base):
     __tablename__ = "speaker_profiles"
     __table_args__ = (
+        Index("uq_speaker_profile_person", "owner_id", "person_id", unique=True),
         ForeignKeyConstraint(
             ["owner_id", "person_id"],
             ["persons.owner_id", "persons.person_id"],
