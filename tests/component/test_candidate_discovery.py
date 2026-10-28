@@ -106,3 +106,35 @@ async def test_discovery_policy_change_invalidates_snapshot(store):
     with pytest.raises(VoiceprintConflict, match='snapshot'):
         await store.voiceprints.discover_candidate('owner', request)
     assert await store.persons.list('owner') == []
+
+
+async def test_discovered_candidate_can_accumulate_verified_turns_and_promote_without_rebinding(store):
+    from eidolon_sdk.biz.candidate_evidence import CandidateEvidence, CandidatePromotionPolicy
+    request = await setup(store)
+    person = await store.voiceprints.discover_candidate('owner', request)
+    realm = await store.persons.memory_state('owner', person.person_id)
+    store.settings.candidate_promotion = CandidatePromotionPolicy(version='promotion', decision_version='trial',
+        model_id='m', weights_hash='a' * 64, preprocessing_version='v', min_similarity=.8)
+    for n in range(1, 4):
+        snapshot = await store.voiceprints.recognition_candidates('owner')
+        candidate = snapshot.persons[0]
+        template = candidate.templates[0]
+        value = request.observation.model_copy(deep=True)
+        value.status = 'identified'
+        value.person_id = person.person_id
+        value.person_revision = candidate.person_revision
+        value.profile_id = template.profile_id
+        value.profile_revision = template.revision
+        value.maturity = 'candidate'
+        value.cosine_similarity = .9
+        value.turn_id = value.source.request_id = f'verified-{n}'
+        value.source.start_sample = n * 32000
+        value.source.end_sample = (n + 1) * 32000
+        evidence = CandidateEvidence(snapshot_revision=snapshot.revision, audio_sha256=f'{n:064x}', observation=value)
+        result = await store.voiceprints.record_candidate_evidence('owner', evidence)
+        assert result.maturity == ('established' if n == 3 else 'candidate')
+    promoted = await store.persons.get('owner', person.person_id)
+    assert promoted.person_id == person.person_id and promoted.revision == person.revision + 1
+    after = await store.persons.memory_state('owner', person.person_id)
+    assert after['realm_id'] == realm['realm_id'] and after['state'] == 'inactive'
+    assert (await store.voiceprints.view('owner')).profiles[0].origin == 'observation'

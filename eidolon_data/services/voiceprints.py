@@ -157,7 +157,8 @@ class Voiceprints:
         payload = {"persons": [p.model_dump(mode="json") for p in candidates],
             "discovery_policy": self._discovery_policy.model_dump(mode="json") if self._discovery_policy else None}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        return SpeakerCandidates(owner_id=owner, revision=digest, persons=candidates)
+        return SpeakerCandidates(owner_id=owner, revision=digest, persons=candidates,
+            discovery_policy=self._discovery_policy)
 
     async def discover_candidate(self, owner, request):
         import json
