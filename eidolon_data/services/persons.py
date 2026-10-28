@@ -72,21 +72,25 @@ class Persons:
                 raise PersonConflict("person id has retained memory; explicit recovery required")
             if request.maturity == "candidate":
                 await self._candidate_capacity(session, owner_id)
-            row = PersonRow(
-                person_id=request.person_id,
-                owner_id=owner_id,
-                display_name=request.display_name,
-                maturity=request.maturity,
-                candidate_activity_at=time.time() if request.maturity == "candidate" else None,
-                is_named=request.is_named,
-                status="active",
-                revision=1,
-                profile_json=request.profile.model_dump(),
-            )
-            session.add(row)
-            self._audit(session, row, "person.created")
-            self._bind_memory(session, row)
-            return _view(row)
+            return _view(self._insert_person(session, owner_id, request))
+
+    def _insert_person(self, session, owner_id, request):
+        """Caller owns the transaction and has checked identity/capacity."""
+        row = PersonRow(
+            person_id=request.person_id,
+            owner_id=owner_id,
+            display_name=request.display_name,
+            maturity=request.maturity,
+            candidate_activity_at=time.time() if request.maturity == "candidate" else None,
+            is_named=request.is_named,
+            status="active",
+            revision=1,
+            profile_json=request.profile.model_dump(),
+        )
+        session.add(row)
+        self._audit(session, row, "person.created")
+        self._bind_memory(session, row)
+        return row
 
     async def _candidate_capacity(self, session, owner_id):
         from eidolon_sdk.biz.speaker_identity import MAX_CANDIDATE_PERSONS

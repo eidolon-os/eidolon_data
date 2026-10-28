@@ -1,6 +1,11 @@
 """Internal authenticated voice identity authority; no audio or model runtime."""
 
-from eidolon_sdk.biz.candidate_evidence import CandidateEvidence, CandidateEvidenceReceipt
+from eidolon_sdk.biz.candidate_evidence import (
+    CandidateDiscovery,
+    CandidateEvidence,
+    CandidateEvidenceReceipt,
+)
+from eidolon_sdk.biz.person import PersonView
 from eidolon_sdk.biz.speaker_identity import SpeakerCandidates
 from eidolon_sdk.biz.voiceprint import (
     EnrollmentCompletion,
@@ -42,6 +47,10 @@ def create_voiceprint_router(store, token):
     async def candidates(owner_id: str, response: Response):
         response.headers["Cache-Control"] = "no-store"
         return await call(store.voiceprints.recognition_candidates, owner_id)
+
+    @router.post(prefix + "/candidate-discovery", response_model=PersonView)
+    async def candidate_discovery(owner_id: str, payload: CandidateDiscovery):
+        return await call(store.voiceprints.discover_candidate, owner_id, payload)
 
     @router.post(prefix + "/candidate-evidence", response_model=CandidateEvidenceReceipt)
     async def candidate_evidence(owner_id: str, payload: CandidateEvidence):

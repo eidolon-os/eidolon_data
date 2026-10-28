@@ -44,8 +44,9 @@ class VoiceprintConflict(ValueError):
 
 
 class Voiceprints:
-    def __init__(self, sessions, *, promotion_policy=None, candidate_pool_ttl_s=604800):
+    def __init__(self, sessions, *, discovery_policy=None, promotion_policy=None, candidate_pool_ttl_s=604800):
         self._sessions = sessions
+        self._discovery_policy = discovery_policy
         self._promotion_policy = promotion_policy
         self._candidate_pool_ttl_s = candidate_pool_ttl_s
 
@@ -153,9 +154,95 @@ class Voiceprints:
                 profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
                 templates=[VoiceTemplate(profile_id=profile.profile_id,
                     revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json))]))
-        payload = [p.model_dump(mode="json") for p in candidates]
+        payload = {"persons": [p.model_dump(mode="json") for p in candidates],
+            "discovery_policy": self._discovery_policy.model_dump(mode="json") if self._discovery_policy else None}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         return SpeakerCandidates(owner_id=owner, revision=digest, persons=candidates)
+
+    async def discover_candidate(self, owner, request):
+        import json
+
+        from eidolon_sdk.biz.person import PersonCreate
+        from eidolon_sdk.biz.speaker_identity import MAX_RECOGNITION_PERSONS
+
+        from eidolon_data.schema.core import MemoryRealmRow
+        from eidolon_data.schema.persons import PersonDeletionRow
+        from eidolon_data.schema.voiceprints import CandidateVoiceObservationRow
+        from eidolon_data.services.persons import PersonConflict, Persons, _view
+
+        value, policy = request.observation, self._discovery_policy
+        if policy is None or request.policy_version != policy.version:
+            raise VoiceprintConflict("candidate discovery policy unavailable")
+        recognition = policy.recognition
+        if (value.owner_id != owner or value.decision_version != recognition.version
+                or value.scoring_version != "normalized-template-cosine-v1"
+                or (value.model_id, value.weights_hash, value.preprocessing_version) != (
+                    recognition.model_id, recognition.weights_hash, recognition.preprocessing_version)
+                or request.sample.speech_ms < recognition.min_unknown_speech_ms):
+            raise VoiceprintConflict("discovery policy or owner mismatch")
+        digest = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+        async with self._transaction() as session:
+            await self._owner(session, owner)
+            prior = await session.scalar(select(CandidateVoiceObservationRow).where(
+                CandidateVoiceObservationRow.owner_id == owner,
+                CandidateVoiceObservationRow.session_id == value.session_id,
+                CandidateVoiceObservationRow.turn_id == value.turn_id))
+            if prior is not None:
+                if prior.request_digest != digest:
+                    raise VoiceprintConflict("discovery source already used")
+                person = await self._person(session, owner, prior.person_id)
+                profile = await session.get(SpeakerProfileRow, prior.profile_id)
+                if person.deleted or person.recognition_state != "active" or profile is None:
+                    raise VoiceprintConflict("discovered candidate was revoked")
+                return _view(person)
+            if value.issued_at > time.time() + 1 or value.expires_at <= time.time():
+                raise VoiceprintConflict("expired discovery evidence")
+            snapshot = await self._recognition_snapshot(session, owner)
+            if snapshot.revision != request.snapshot_revision:
+                raise VoiceprintConflict("recognition snapshot changed")
+            if len(snapshot.persons) >= MAX_RECOGNITION_PERSONS:
+                raise VoiceprintConflict("recognition candidate capacity reached")
+            if snapshot.persons and (value.cosine_similarity is None
+                    or value.cosine_similarity > policy.max_existing_similarity):
+                raise VoiceprintConflict("insufficient exclusion of existing identities")
+            replay = await session.scalar(select(CandidateVoiceObservationRow).where(
+                CandidateVoiceObservationRow.owner_id == owner,
+                CandidateVoiceObservationRow.audio_sha256 == request.audio_sha256))
+            if replay is not None:
+                raise VoiceprintConflict("discovery audio already used")
+            rows = (await session.scalars(select(CandidateVoiceObservationRow).where(
+                CandidateVoiceObservationRow.owner_id == owner,
+                CandidateVoiceObservationRow.session_id == value.session_id))).all()
+            source = value.source
+            for row in rows:
+                prior_source = row.observation_json['source']
+                if (prior_source['input_id'] == source.input_id and prior_source['generation'] == source.generation
+                        and prior_source['start_sample'] < source.end_sample and source.start_sample < prior_source['end_sample']):
+                    raise VoiceprintConflict("discovery capture overlaps accepted evidence")
+            person_id = hashlib.sha256(json.dumps([owner, value.session_id, value.turn_id]).encode()).hexdigest()[:32]
+            if (await session.get(PersonRow, person_id) is not None
+                    or await session.get(PersonDeletionRow, person_id) is not None):
+                raise VoiceprintConflict("discovery identity already used or deleted")
+            if await session.scalar(select(MemoryRealmRow.realm_id).where(MemoryRealmRow.person_id == person_id)) is not None:
+                raise VoiceprintConflict("discovery identity has retained memory")
+            people = Persons(self._sessions, candidate_pool_ttl_s=self._candidate_pool_ttl_s)
+            try:
+                await people._candidate_capacity(session, owner)
+            except PersonConflict as exc:
+                raise VoiceprintConflict(str(exc)) from exc
+            person = people._insert_person(session, owner, PersonCreate(person_id=person_id,
+                display_name=f"未命名用户 {person_id[:6]}", maturity="candidate", is_named=False))
+            await session.flush()
+            observation_id, profile_id = uuid.uuid4().hex, "sp_" + uuid.uuid4().hex
+            session.add(CandidateVoiceObservationRow(observation_id=observation_id, owner_id=owner,
+                person_id=person_id, session_id=value.session_id, turn_id=value.turn_id,
+                audio_sha256=request.audio_sha256, profile_id=profile_id, profile_revision=1,
+                request_digest=digest, observation_json=value.model_dump(mode="json")))
+            await session.flush()
+            session.add(SpeakerProfileRow(profile_id=profile_id, owner_id=owner, person_id=person_id,
+                display_name=person.display_name, revision=1, enrollment_id=None, origin="observation",
+                source_observation_id=observation_id, template_json=request.sample.model_dump(mode="json")))
+            return _view(person)
 
     async def record_candidate_evidence(self, owner, request):
         import json

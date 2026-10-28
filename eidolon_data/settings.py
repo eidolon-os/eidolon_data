@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from eidolon_sdk.biz.candidate_evidence import CandidatePromotionPolicy
+from eidolon_sdk.biz.candidate_evidence import CandidateDiscoveryPolicy, CandidatePromotionPolicy
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from yaml import safe_load
@@ -36,6 +36,7 @@ class DataSettings(BaseSettings):
     sqlite_path: str = Field(default_factory=lambda: str(default_sqlite_path()))
     object_store_path: str = Field(default_factory=lambda: str(default_object_store_path()))
     echo_sql: bool = False
+    candidate_discovery: CandidateDiscoveryPolicy | None = None
     candidate_promotion: CandidatePromotionPolicy | None = None
     candidate_pool_ttl_s: int = Field(default=604800, ge=60, le=2592000)
     # Sovereign/control-plane data favors durability. Rebuildable projections
