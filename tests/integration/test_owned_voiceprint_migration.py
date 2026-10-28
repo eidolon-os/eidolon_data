@@ -78,5 +78,5 @@ def test_single_voice_upgrade_retires_old_evidence(tmp_path, monkeypatch, start_
         assert db.execute("SELECT deleted FROM persons").fetchone()[0] == 0
         assert (
             db.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            == "0015_person_archive"
+            == "0016_retained_person_archives"
         )
