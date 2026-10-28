@@ -60,7 +60,13 @@ async def test_candidate_catalog_exposes_only_explicit_provisional_ingest(tmp_pa
         allowed = await entry()
         assert allowed["provisional_ingest_enabled"] and allowed["management_enabled"]
         assert not allowed["enabled"]
-        await store.persons.retire_candidate("o", "a" * 32, 2)
+        assert not allowed["provisional_recall_enabled"]
+        await store.persons.provisional_memory_policy("o", "a" * 32, 2,
+            ProvisionalMemoryPolicy(session_recall_allowed=True))
+        read_only = await entry()
+        assert read_only["provisional_recall_enabled"] and not read_only["provisional_ingest_enabled"]
+        await store.persons.retire_candidate("o", "a" * 32, 3)
         retained = await entry()
         assert not retained["provisional_ingest_enabled"] and retained["realm_id"] == allowed["realm_id"]
+        assert not retained["provisional_recall_enabled"]
     await store.close()

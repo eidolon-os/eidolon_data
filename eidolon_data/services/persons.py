@@ -274,7 +274,7 @@ class Persons:
                 receipt.state = "completed"
             return _deletion_view(receipt)
 
-    async def provisional_runtime_realms(self, owner_id):
+    async def provisional_runtime_realms(self, owner_id, *, session_recall=False):
         """Bounded roster projection; retained identities cannot keep ingest enabled."""
         async with self._sessions() as session:
             rows = await session.scalars(select(MemoryRealmRow.realm_id).join(
@@ -284,7 +284,9 @@ class Persons:
                 PersonRow.recognition_state == "active",
                 ((PersonRow.maturity == "established") |
                  (PersonRow.candidate_activity_at > time.time() - self._candidate_pool_ttl_s)),
-                MemoryRealmRow.policy_json["provisional_memory"]["save_allowed"].as_boolean().is_(True),
+                MemoryRealmRow.policy_json["provisional_memory"][
+                    "session_recall_allowed" if session_recall else "save_allowed"
+                ].as_boolean().is_(True),
             ))
             return set(rows)
 

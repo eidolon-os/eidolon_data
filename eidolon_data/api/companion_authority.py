@@ -202,6 +202,7 @@ class MemoryRuntimeRealm(BaseModel):
     enabled: bool = True
     management_enabled: bool = True
     provisional_ingest_enabled: bool = False
+    provisional_recall_enabled: bool = False
     erasure_pending: bool = False
 
 
@@ -332,6 +333,8 @@ def create_app(
         for owner in await store.owners.list():
             provisional_realms = (await store.persons.provisional_runtime_realms(owner.owner_id)
                                   if owner.status == "active" else set())
+            provisional_read_realms = (await store.persons.provisional_runtime_realms(
+                owner.owner_id, session_recall=True) if owner.status == "active" else set())
             for realm in await store.memory_realms.list_for_owner(owner.owner_id):
                 entries.append(
                     MemoryRuntimeRealm(
@@ -342,6 +345,7 @@ def create_app(
                         enabled=owner.status == "active" and realm.status == "active",
                         management_enabled=owner.status == "active" and realm.status != "deleting",
                         provisional_ingest_enabled=realm.realm_id in provisional_realms,
+                        provisional_recall_enabled=realm.realm_id in provisional_read_realms,
                         erasure_pending=realm.status == "deleting"
                         and (realm.policy_json or {}).get("purge", {}).get("state") == "pending",
                         engine=realm.engine,
