@@ -126,7 +126,11 @@ class Voiceprints:
         import json
 
         from eidolon_sdk.biz.person import PersonProfile
-        from eidolon_sdk.biz.speaker_identity import SpeakerCandidate, SpeakerCandidates
+        from eidolon_sdk.biz.speaker_identity import (
+            MAX_RECOGNITION_PERSONS,
+            SpeakerCandidate,
+            SpeakerCandidates,
+        )
         rows = (await s.execute(
             select(PersonRow, SpeakerProfileRow).join(
                 SpeakerProfileRow, (SpeakerProfileRow.person_id == PersonRow.person_id)
@@ -135,9 +139,9 @@ class Voiceprints:
                     PersonRow.deleted.is_(False), PersonRow.recognition_state == "active",
                     or_(PersonRow.maturity != "candidate",
                         PersonRow.candidate_activity_at > time.time() - self._candidate_pool_ttl_s))
-            .order_by(PersonRow.person_id).limit(6)
+            .order_by(PersonRow.person_id).limit(MAX_RECOGNITION_PERSONS + 1)
         )).all()
-        if len(rows) > 5:
+        if len(rows) > MAX_RECOGNITION_PERSONS:
             raise VoiceprintConflict("recognition candidate capacity exceeded")
         candidates = []
         for person, profile in rows:

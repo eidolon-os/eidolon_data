@@ -501,3 +501,23 @@ async def test_observation_profile_has_real_provenance_and_source_removal_revoke
     with pytest.raises(LookupError):
         await store.voiceprints.recording('owner', request.observation.profile_id)
     assert (await store.persons.get('owner', request.observation.person_id)).person_id == request.observation.person_id
+
+
+async def test_recognition_snapshot_includes_all_bounded_people_and_never_truncates(store):
+    from eidolon_sdk.biz.person import PersonCreate
+    from eidolon_sdk.biz.speaker_identity import MAX_RECOGNITION_PERSONS
+    from eidolon_data.schema.voiceprints import SpeakerProfileRow
+    await store.owner_commands.create_owner(owner_id='owner')
+    for n in range(MAX_RECOGNITION_PERSONS + 1):
+        person_id = f'{n:032x}'
+        await store.persons.create('owner', PersonCreate(person_id=person_id, display_name=f'Person {n}'))
+        async with store._session_factory() as session:
+            session.add(SpeakerProfileRow(profile_id=f'v{n}', owner_id='owner', person_id=person_id,
+                display_name=f'Person {n}', revision=1, enrollment_id=f'e{n}', template_json=sample().model_dump()))
+            await session.commit()
+        if n == MAX_RECOGNITION_PERSONS - 1:
+            snapshot = await store.voiceprints.recognition_candidates('owner')
+            assert len(snapshot.persons) == MAX_RECOGNITION_PERSONS
+            assert len({p.person_id for p in snapshot.persons}) == MAX_RECOGNITION_PERSONS
+    with pytest.raises(VoiceprintConflict, match='capacity'):
+        await store.voiceprints.recognition_candidates('owner')

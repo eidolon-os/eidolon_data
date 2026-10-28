@@ -151,4 +151,5 @@ class DataStore:
     @property
     def persons(self):
         from eidolon_data.services.persons import Persons
-        return Persons(self._session_factory, self.object_storage)
+        return Persons(self._session_factory, self.object_storage,
+            candidate_pool_ttl_s=self.settings.candidate_pool_ttl_s)

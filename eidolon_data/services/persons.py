@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from eidolon_sdk.biz.person import PersonView
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, select, text, update
 
 from eidolon_data.audit import governance_fact
 from eidolon_data.schema.core import MemoryRealmRow, OwnerRow
@@ -18,9 +18,10 @@ class PersonConflict(ValueError):
 
 
 class Persons:
-    def __init__(self, sessions, storage=None):
+    def __init__(self, sessions, storage=None, *, candidate_pool_ttl_s=604800):
         self._sessions = sessions
         self._storage = storage
+        self._candidate_pool_ttl_s = candidate_pool_ttl_s
 
     @asynccontextmanager
     async def _transaction(self):
@@ -69,6 +70,8 @@ class Persons:
             )
             if retained is not None:
                 raise PersonConflict("person id has retained memory; explicit recovery required")
+            if request.maturity == "candidate":
+                await self._candidate_capacity(session, owner_id)
             row = PersonRow(
                 person_id=request.person_id,
                 owner_id=owner_id,
@@ -84,6 +87,16 @@ class Persons:
             self._audit(session, row, "person.created")
             self._bind_memory(session, row)
             return _view(row)
+
+    async def _candidate_capacity(self, session, owner_id):
+        from eidolon_sdk.biz.speaker_identity import MAX_CANDIDATE_PERSONS
+        count = await session.scalar(select(func.count()).select_from(PersonRow).where(
+            PersonRow.owner_id == owner_id, PersonRow.maturity == "candidate",
+            PersonRow.status == "active", PersonRow.deleted.is_(False),
+            PersonRow.recognition_state == "active",
+            PersonRow.candidate_activity_at > time.time() - self._candidate_pool_ttl_s))
+        if count >= MAX_CANDIDATE_PERSONS:
+            raise PersonConflict("candidate pool capacity reached")
 
     async def list(self, owner_id, *, deleted=False):
         async with self._sessions() as session:
@@ -115,6 +128,10 @@ class Persons:
         async with self._transaction() as session:
             row = await self._person(session, owner_id, person_id)
             self._revision(row, request.expected_revision)
+            if (row.maturity == "candidate" and row.status != "active" and request.status == "active"
+                    and row.recognition_state == "active"
+                    and row.candidate_activity_at > time.time() - self._candidate_pool_ttl_s):
+                await self._candidate_capacity(session, owner_id)
             if request.is_named is not None:
                 row.is_named = request.is_named
             row.display_name = request.display_name

@@ -85,3 +85,51 @@ async def test_legacy_update_preserves_anonymous_established_person(store):
         expected_revision=person.revision, display_name="显示名称", status="active", profile=PersonProfile()))
     assert changed.maturity == "established" and not changed.is_named
     assert (await store.persons.memory_realm("one", PID))["person_id"] == PID
+
+
+async def test_candidate_capacity_is_transactional_and_retained_people_do_not_use_slots(store):
+    import asyncio
+    from eidolon_sdk.biz.speaker_identity import MAX_CANDIDATE_PERSONS
+    await store.owner_commands.create_owner(owner_id='one')
+    for n in range(MAX_CANDIDATE_PERSONS - 1):
+        await store.persons.create('one', PersonCreate(person_id=f'{n:032x}', display_name='匿名', maturity='candidate', is_named=False))
+    requests = [PersonCreate(person_id=f'{n:032x}', display_name='匿名', maturity='candidate', is_named=False)
+                for n in (100, 101)]
+    results = await asyncio.gather(*(store.persons.create('one', r) for r in requests), return_exceptions=True)
+    assert sum(isinstance(r, PersonConflict) for r in results) == 1
+    assert len(await store.persons.list('one')) == MAX_CANDIDATE_PERSONS
+    # An exact retry still succeeds at capacity; no new identity or Realm.
+    index = next(i for i, result in enumerate(results) if not isinstance(result, Exception))
+    assert await store.persons.create('one', requests[index]) == results[index]
+    await store.persons.retire_candidate('one', f'{0:032x}', 1)
+    await store.persons.create('one', requests[1 - index])
+    assert len(await store.persons.list('one')) == MAX_CANDIDATE_PERSONS + 1
+    assert (await store.persons.get('one', f'{0:032x}')).recognition_state == 'retained'
+
+
+async def test_expired_candidates_do_not_block_new_capacity(store, monkeypatch):
+    import time
+    from eidolon_sdk.biz.speaker_identity import MAX_CANDIDATE_PERSONS
+    clock = [time.time()]
+    monkeypatch.setattr('eidolon_data.services.persons.time.time', lambda: clock[0])
+    store.settings.candidate_pool_ttl_s = 60
+    await store.owner_commands.create_owner(owner_id='one')
+    for n in range(MAX_CANDIDATE_PERSONS):
+        await store.persons.create('one', PersonCreate(person_id=f'{n:032x}', display_name='匿名', maturity='candidate'))
+    clock[0] += 61
+    person = await store.persons.create('one', PersonCreate(person_id='f' * 32, display_name='新候选', maturity='candidate'))
+    assert person.recognition_state == 'active'
+
+
+async def test_reactivation_cannot_bypass_candidate_capacity(store):
+    from eidolon_sdk.biz.speaker_identity import MAX_CANDIDATE_PERSONS
+    await store.owner_commands.create_owner(owner_id='one')
+    first = await store.persons.create('one', PersonCreate(person_id='f' * 32, display_name='匿名', maturity='candidate'))
+    paused = await store.persons.update('one', first.person_id, PersonUpdate(
+        expected_revision=first.revision, display_name=first.display_name, profile=first.profile, status='inactive'))
+    for n in range(MAX_CANDIDATE_PERSONS):
+        await store.persons.create('one', PersonCreate(person_id=f'{n:032x}', display_name='匿名', maturity='candidate'))
+    with pytest.raises(PersonConflict, match='capacity'):
+        await store.persons.update('one', first.person_id, PersonUpdate(
+            expected_revision=paused.revision, display_name=first.display_name, profile=first.profile, status='active'))
+    assert (await store.persons.get('one', first.person_id)).status == 'inactive'
