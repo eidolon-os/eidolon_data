@@ -17,6 +17,8 @@ class PersonRow(Base):
     deleted: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    identity_state: Mapped[str] = mapped_column(String(16), default="known", server_default="known")
+    archived_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     revision: Mapped[int] = mapped_column(Integer)
     profile_json: Mapped[dict] = mapped_column(JSON)
     __table_args__ = (
@@ -24,3 +26,14 @@ class PersonRow(Base):
         CheckConstraint("status IN ('active', 'inactive')", name="person_status"),
         CheckConstraint("revision > 0", name="person_revision_positive"),
     )
+
+
+class PersonDeletionRow(Base):
+    """Minimal idempotency receipt; no name, biography or biometric data."""
+
+    __tablename__ = "person_deletions"
+    person_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("owners.owner_id", ondelete="CASCADE"))
+    revision: Mapped[int] = mapped_column(Integer)
+    realm_id: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(16))

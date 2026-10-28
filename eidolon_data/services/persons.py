@@ -1,6 +1,7 @@
 """Single Data authority for OS people; no inference or permission grants."""
 
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from eidolon_sdk.biz.person import PersonView
@@ -8,7 +9,7 @@ from sqlalchemy import delete, select, text, update
 
 from eidolon_data.audit import governance_fact
 from eidolon_data.schema.core import MemoryRealmRow, OwnerRow
-from eidolon_data.schema.persons import PersonRow
+from eidolon_data.schema.persons import PersonDeletionRow, PersonRow
 
 
 class PersonConflict(ValueError):
@@ -46,6 +47,8 @@ class Persons:
     async def create(self, owner_id, request):
         async with self._transaction() as session:
             await self._owner(session, owner_id)
+            if await session.get(PersonDeletionRow, request.person_id) is not None:
+                raise PersonConflict("person identity has been permanently deleted")
             existing = await session.get(PersonRow, request.person_id)
             if existing is not None:
                 if existing.deleted:
@@ -86,7 +89,17 @@ class Persons:
                     .order_by(PersonRow.person_id)
                 )
             ).all()
-            return [_view(row) for row in rows]
+            pending = set(
+                await session.scalars(
+                    select(PersonDeletionRow.person_id).where(
+                        PersonDeletionRow.owner_id == owner_id, PersonDeletionRow.state == "pending"
+                    )
+                )
+            )
+            return [
+                _view(row, deletion_state="pending" if row.person_id in pending else "none")
+                for row in rows
+            ]
 
     async def get(self, owner_id, person_id):
         async with self._sessions() as session:
@@ -105,14 +118,14 @@ class Persons:
             self._audit(session, row, "person.updated")
             return _view(row)
 
-    async def delete(self, owner_id, person_id, expected_revision):
+    async def archive(self, owner_id, person_id, expected_revision):
         from eidolon_data.schema.person_faces import PersonFaceRow
 
         key = None
         async with self._transaction() as session:
             row = await self._person(session, owner_id, person_id)
             self._revision(row, expected_revision)
-            self._audit(session, row, "person.deleted")
+            self._audit(session, row, "person.archived")
             await self._deactivate_memory(session, owner_id, person_id)
             face = await session.get(PersonFaceRow, person_id)
             key = face.storage_key if face else None
@@ -126,23 +139,29 @@ class Persons:
             )
             if face:
                 await session.delete(face)
+            row.archived_at = datetime.now(UTC).isoformat()
             row.deleted = True
             row.status = "inactive"
             row.revision += 1
-        if key and self._storage:
-            self._storage.delete(key)
+            if key and self._storage:
+                self._storage.delete(key)
 
     async def restore(self, owner_id, person_id, expected_revision):
         async with self._transaction() as session:
             row = await self._person(session, owner_id, person_id, include_deleted=True)
             self._revision(row, expected_revision)
+            if row.identity_state == "missing":
+                raise PersonConflict(
+                    "identity information is missing; this retained memory cannot be restored as a Person"
+                )
             if not row.deleted:
-                raise PersonConflict("person is not deleted")
+                raise PersonConflict("person is not archived")
             realm = await session.scalar(
                 select(MemoryRealmRow).where(MemoryRealmRow.person_id == person_id)
             )
             if realm is not None and realm.status == "deleting":
                 raise PersonConflict("memory erasure is pending; retry erasure before restoring")
+            row.archived_at = None
             row.deleted = False
             row.status = "inactive"
             row.revision += 1
@@ -150,43 +169,60 @@ class Persons:
             self._audit(session, row, "person.restored")
             return _view(row)
 
-    async def purge_memory(self, owner_id, person_id, expected_revision, *, complete=False):
-        """Durable purge intent blocks restore until Memory confirms erasure; retries reuse it."""
+    async def permanent_delete(self, owner_id, person_id, expected_revision, *, complete=False):
+        """Memory erasure precedes atomic removal; retries use a minimal durable receipt."""
         async with self._transaction() as session:
-            row = await self._person(session, owner_id, person_id, include_deleted=True)
-            realm = await session.scalar(
-                select(MemoryRealmRow).where(
-                    MemoryRealmRow.owner_id == owner_id, MemoryRealmRow.person_id == person_id
+            await self._owner(session, owner_id)
+            receipt = await session.get(PersonDeletionRow, person_id)
+            if receipt is not None:
+                if receipt.owner_id != owner_id:
+                    raise LookupError("person not found")
+                row = await session.get(PersonRow, person_id)
+                allowed = {receipt.revision}
+                if row is not None and not complete:
+                    allowed.add(row.revision)
+                if expected_revision not in allowed:
+                    raise PersonConflict("deletion revision does not match")
+                if receipt.state == "completed":
+                    return _deletion_view(receipt)
+            else:
+                if complete:
+                    raise PersonConflict("deletion has not been requested")
+                row = await self._person(session, owner_id, person_id, include_deleted=True)
+                self._revision(row, expected_revision)
+                if not row.deleted:
+                    raise PersonConflict("archive the Person before permanent deletion")
+                realm = await session.scalar(
+                    select(MemoryRealmRow).where(
+                        MemoryRealmRow.owner_id == owner_id, MemoryRealmRow.person_id == person_id
+                    )
                 )
-            )
-            if realm is None:
-                raise LookupError("personal memory realm not found")
-            policy = dict(realm.policy_json or {})
-            intent = policy.get("purge", {})
-            if intent.get("revision") == expected_revision or (
-                not complete
-                and intent.get("state") == "pending"
-                and row.revision == expected_revision
-            ):
-                if complete and intent.get("state") == "pending":
-                    intent = {"revision": expected_revision, "state": "completed"}
-                    policy["purge"] = intent
-                    realm.policy_json = policy
-                    realm.status = "inactive"
-                    row.revision += 1
-                    self._audit(session, row, "person.memory_purged")
-                return {"realm_id": realm.realm_id, "person_id": person_id, **intent}
+                if realm is None:
+                    raise LookupError("personal memory realm not found")
+                receipt = PersonDeletionRow(
+                    person_id=person_id,
+                    owner_id=owner_id,
+                    realm_id=realm.realm_id,
+                    revision=expected_revision,
+                    state="pending",
+                )
+                session.add(receipt)
+                realm.status = "deleting"
+                realm.policy_json = {**(realm.policy_json or {}), "purge": {"state": "pending"}}
+                row.revision += 1
+                self._audit(session, row, "person.permanent_deletion_requested")
             if complete:
-                raise PersonConflict("purge intent does not match")
-            self._revision(row, expected_revision)
-            if not row.deleted:
-                raise PersonConflict("delete the Person before erasing retained memory")
-            intent = {"revision": expected_revision, "state": "pending"}
-            realm.policy_json = {**policy, "purge": intent}
-            realm.status = "deleting"
-            row.revision += 1
-            self._audit(session, row, "person.memory_purge_requested")
-            return {"realm_id": realm.realm_id, "person_id": person_id, **intent}
+                self._audit(session, row, "person.permanently_deleted")
+                await session.execute(
+                    delete(MemoryRealmRow).where(
+                        MemoryRealmRow.realm_id == receipt.realm_id,
+                        MemoryRealmRow.owner_id == owner_id,
+                        MemoryRealmRow.person_id == person_id,
+                    )
+                )
+                await session.delete(row)
+                receipt.state = "completed"
+            return _deletion_view(receipt)
 
     async def memory_realm(self, owner_id, person_id, *, create=False):
         """Resolve/create a catalog pointer after service authorization, never from voice."""
@@ -330,7 +366,7 @@ class Persons:
         )
 
 
-def _view(row):
+def _view(row, *, deletion_state="none"):
     return PersonView(
         person_id=row.person_id,
         owner_id=row.owner_id,
@@ -338,4 +374,16 @@ def _view(row):
         status=row.status,
         revision=row.revision,
         profile=row.profile_json,
+        identity_state=row.identity_state or "known",
+        archived_at=row.archived_at,
+        deletion_state=deletion_state,
     )
+
+
+def _deletion_view(row):
+    return {
+        "person_id": row.person_id,
+        "realm_id": row.realm_id,
+        "revision": row.revision,
+        "state": row.state,
+    }

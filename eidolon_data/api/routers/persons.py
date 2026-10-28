@@ -49,15 +49,15 @@ def create_person_router(store, token):
     async def restore(owner_id: str, person_id: str, expected_revision: int = Query(ge=1)):
         return await call(store.persons.restore, owner_id, person_id, expected_revision)
 
-    @router.post("/{person_id}/memory-purge/{phase}")
-    async def purge_memory(
+    @router.post("/{person_id}/permanent-delete/{phase}")
+    async def permanent_delete(
         owner_id: str,
         person_id: str,
         phase: Literal["begin", "complete"],
         expected_revision: int = Query(ge=1),
     ):
         async def invoke(owner, person, revision):
-            return await store.persons.purge_memory(
+            return await store.persons.permanent_delete(
                 owner, person, revision, complete=phase == "complete"
             )
 
@@ -71,9 +71,9 @@ def create_person_router(store, token):
     async def update(owner_id: str, person_id: str, payload: PersonUpdate):
         return await call(store.persons.update, owner_id, person_id, payload)
 
-    @router.delete("/{person_id}", status_code=204)
+    @router.post("/{person_id}/archive", status_code=204)
     async def delete(owner_id: str, person_id: str, expected_revision: int = Query(ge=1)):
-        await call(store.persons.delete, owner_id, person_id, expected_revision)
+        await call(store.persons.archive, owner_id, person_id, expected_revision)
         return Response(status_code=204)
 
     @router.get("/{person_id}/memory-realm", response_model=PersonalMemoryRealmSnapshot)

@@ -17,7 +17,7 @@ async def test_private_realms_default_on_idempotent_and_owner_scoped(store):
     assert a == await store.persons.memory_realm("one", "a" * 32, create=True)
     with pytest.raises(LookupError):
         await store.persons.memory_realm("two", "a" * 32, create=True)
-    await store.persons.delete("one", "a" * 32, 1)
+    await store.persons.archive("one", "a" * 32, 1)
     assert b == await store.persons.memory_realm("one", "b" * 32)
     with pytest.raises(PersonConflict):
         await store.persons.create(
@@ -56,24 +56,36 @@ async def test_restore_requires_active_person_current_revision_and_existing_real
     await store.persons.create("one", PersonCreate(person_id=person_id, display_name="a"))
     assert (await store.persons.restore_memory("one", person_id, 1))["person_revision"] == 1
     bound = await store.persons.memory_realm("one", person_id, create=True)
-    await store.persons.update("one", person_id, PersonUpdate(
-        profile={}, expected_revision=1, display_name="a", status="inactive"))
+    await store.persons.update(
+        "one",
+        person_id,
+        PersonUpdate(profile={}, expected_revision=1, display_name="a", status="inactive"),
+    )
     with pytest.raises(PersonConflict):
         await store.persons.restore_memory("one", person_id, 2)
-    await store.persons.update("one", person_id, PersonUpdate(
-        profile={}, expected_revision=2, display_name="a", status="active"))
+    await store.persons.update(
+        "one",
+        person_id,
+        PersonUpdate(profile={}, expected_revision=2, display_name="a", status="active"),
+    )
     with pytest.raises(PersonConflict):
         await store.persons.restore_memory("one", person_id, 2)
     with pytest.raises(LookupError):
         await store.persons.restore_memory("two", person_id, 3)
     with pytest.raises(PersonConflict):
         await store.persons.memory_realm("one", person_id)
-    assert await store.persons.restore_memory("one", person_id, 3) == {**bound, "person_revision": 4}
+    assert await store.persons.restore_memory("one", person_id, 3) == {
+        **bound,
+        "person_revision": 4,
+    }
     assert (await store.persons.get("one", person_id)).revision == 4
-    assert await store.persons.restore_memory("one", person_id, 4) == {**bound, "person_revision": 4}
+    assert await store.persons.restore_memory("one", person_id, 4) == {
+        **bound,
+        "person_revision": 4,
+    }
     assert (await store.persons.get("one", person_id)).revision == 4
     assert await store.persons.memory_realm("one", person_id) == {**bound, "person_revision": 4}
-    await store.persons.delete("one", person_id, 4)
+    await store.persons.archive("one", person_id, 4)
     with pytest.raises(LookupError):
         await store.persons.restore_memory("one", person_id, 4)
     async with store.persons._sessions() as session:

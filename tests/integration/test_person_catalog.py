@@ -15,7 +15,7 @@ async def test_catalog_keeps_paused_deleted_and_purging_spaces_out_of_runtime(tm
     for char in ("a", "b", "c"):
         await store.persons.create("o", PersonCreate(person_id=char * 32, display_name=char))
     await store.persons.suspend_memory("o", "b" * 32, 1)
-    await store.persons.delete("o", "c" * 32, 1)
+    await store.persons.archive("o", "c" * 32, 1)
     token = "catalog-test-credential-123456"
     app = create_app(
         settings, service_token="other-credential-123456789012", memory_roster_token=token
@@ -33,7 +33,7 @@ async def test_catalog_keeps_paused_deleted_and_purging_spaces_out_of_runtime(tm
         assert sum(x["enabled"] for x in catalog) == 1
         runtime = (await client.get(base + "memory-runtime-roster")).json()["realms"]
         assert [x["person_id"] for x in runtime] == ["a" * 32]
-        await store.persons.purge_memory("o", "c" * 32, 2)
+        await store.persons.permanent_delete("o", "c" * 32, 2)
         catalog = (await client.get(base + "memory-realm-catalog")).json()["realms"]
         erased = next(x for x in catalog if x["person_id"] == "c" * 32)
         assert not erased["enabled"] and not erased["management_enabled"]

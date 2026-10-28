@@ -10,9 +10,10 @@ async def test_archive_restore_preserves_realm_but_never_old_authorization(store
     await store.owner_commands.create_owner(owner_id="one")
     original = await store.persons.create("one", PersonCreate(person_id=PID, display_name="A"))
     realm = await store.persons.memory_realm("one", PID)
-    await store.persons.delete("one", PID, original.revision)
+    await store.persons.archive("one", PID, original.revision)
     archived = (await store.persons.list("one", deleted=True))[0]
     assert archived.revision > original.revision
+    assert archived.archived_at is not None and archived.identity_state == "known"
     assert await store.persons.list("one") == []
     with pytest.raises(LookupError):
         await store.persons.memory_realm("one", PID)
@@ -45,22 +46,24 @@ async def test_purge_is_owner_scoped_retryable_and_blocks_restore(store):
         await store.owner_commands.create_owner(owner_id=owner)
     await store.persons.create("one", PersonCreate(person_id=PID, display_name="A"))
     with pytest.raises(PersonConflict):
-        await store.persons.purge_memory("one", PID, 1)
-    await store.persons.delete("one", PID, 1)
+        await store.persons.permanent_delete("one", PID, 1)
+    await store.persons.archive("one", PID, 1)
     archived = (await store.persons.list("one", deleted=True))[0]
-    intent = await store.persons.purge_memory("one", PID, archived.revision)
+    intent = await store.persons.permanent_delete("one", PID, archived.revision)
     current = (await store.persons.list("one", deleted=True))[0]
-    assert await store.persons.purge_memory("one", PID, current.revision) == intent
+    assert current.deletion_state == "pending"
+    assert await store.persons.permanent_delete("one", PID, current.revision) == intent
     with pytest.raises(PersonConflict):
         await store.persons.restore("one", PID, current.revision)
     with pytest.raises(LookupError):
-        await store.persons.purge_memory("other", PID, current.revision)
+        await store.persons.permanent_delete("other", PID, current.revision)
     with pytest.raises(PersonConflict):
-        await store.persons.purge_memory("one", PID, 999, complete=True)
-    completed = await store.persons.purge_memory("one", PID, intent["revision"], complete=True)
+        await store.persons.permanent_delete("one", PID, 999, complete=True)
+    completed = await store.persons.permanent_delete("one", PID, intent["revision"], complete=True)
     assert completed["state"] == "completed"
-    assert await store.persons.purge_memory("one", PID, intent["revision"]) == completed
-    restored = await store.persons.restore(
-        "one", PID, (await store.persons.list("one", deleted=True))[0].revision
-    )
-    assert restored.status == "inactive"
+    assert await store.persons.permanent_delete("one", PID, intent["revision"]) == completed
+    assert await store.persons.list("one", deleted=True) == []
+    with pytest.raises(LookupError):
+        await store.persons.restore("one", PID, current.revision)
+    with pytest.raises(PersonConflict):
+        await store.persons.create("one", PersonCreate(person_id=PID, display_name="new"))

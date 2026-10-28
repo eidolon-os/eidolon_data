@@ -2,10 +2,12 @@ import asyncio
 import sqlite3
 from contextlib import closing
 
+import pytest
 from alembic import command
 from alembic.config import Config
 
 from eidolon_data import DataSettings, DataStore
+from eidolon_data.services.persons import PersonConflict
 
 
 async def test_retained_private_realm_gets_only_an_inactive_archive(tmp_path, monkeypatch):
@@ -33,7 +35,10 @@ async def test_retained_private_realm_gets_only_an_inactive_archive(tmp_path, mo
         archived = await store.persons.list("owner", deleted=True)
         assert len(archived) == 1 and archived[0].person_id == person
         assert archived[0].status == "inactive"
-        intent = await store.persons.purge_memory("owner", person, archived[0].revision)
+        assert archived[0].identity_state == "missing"
+        with pytest.raises(PersonConflict, match="identity information is missing"):
+            await store.persons.restore("owner", person, archived[0].revision)
+        intent = await store.persons.permanent_delete("owner", person, archived[0].revision)
         assert intent["realm_id"] == "private" and intent["state"] == "pending"
         with closing(sqlite3.connect(path)) as db:
             assert (
@@ -43,5 +48,10 @@ async def test_retained_private_realm_gets_only_an_inactive_archive(tmp_path, mo
                 == "active"
             )
             assert db.execute("SELECT count(*) FROM speaker_profiles").fetchone()[0] == 0
+        await store.persons.permanent_delete("owner", person, intent["revision"], complete=True)
+        with closing(sqlite3.connect(path)) as db:
+            assert db.execute("SELECT count(*) FROM persons").fetchone()[0] == 0
+            assert db.execute("SELECT realm_id FROM memory_realms").fetchall() == [("default",)]
+            assert db.execute("SELECT state FROM person_deletions").fetchone()[0] == "completed"
     finally:
         await store.close()

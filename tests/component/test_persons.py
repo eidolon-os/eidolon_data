@@ -30,10 +30,10 @@ async def test_lifecycle_scope_retry_and_revision(store):
     with pytest.raises(PersonConflict):
         await store.persons.update("one", PID, update)
     with pytest.raises(PersonConflict):
-        await store.persons.delete("one", PID, 1)
+        await store.persons.archive("one", PID, 1)
     with pytest.raises(LookupError):
-        await store.persons.delete("two", PID, 2)
-    await store.persons.delete("one", PID, 2)
+        await store.persons.archive("two", PID, 2)
+    await store.persons.archive("one", PID, 2)
     assert await store.persons.list("one") == []
 
 
