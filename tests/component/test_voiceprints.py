@@ -210,13 +210,16 @@ async def test_recognition_snapshot_changes_on_lifecycle_and_excludes_other_owne
     snapshot=await store.voiceprints.recognition_candidates('owner')
     assert len(snapshot.persons)==1
     assert snapshot.persons[0].person_id=='a'*32
+    assert snapshot.persons[0].maturity == 'established'
+    assert snapshot.persons[0].is_named is True
     assert snapshot.persons[0].templates[0].profile_id==profile.profile_id
     assert 'pcm_base64' not in snapshot.model_dump_json()
     await store.owner_commands.create_owner(owner_id='second-owner')
     assert (await store.voiceprints.recognition_candidates('second-owner')).persons==[]
     changed=await store.persons.update('owner','a'*32,PersonUpdate(expected_revision=1,
-        display_name='new name',status='active',profile=PersonProfile(preferred_name='new')))
+        display_name='new name',is_named=False,status='active',profile=PersonProfile(preferred_name='new')))
     after=await store.voiceprints.recognition_candidates('owner')
+    assert after.persons[0].is_named is False
     assert after.revision!=snapshot.revision and after.persons[0].person_revision==changed.revision
     await store.persons.update('owner','a'*32,PersonUpdate(expected_revision=changed.revision,
         display_name='new name',status='inactive',profile=PersonProfile()))

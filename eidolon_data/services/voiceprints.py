@@ -20,8 +20,10 @@ from eidolon_sdk.biz.voiceprint import (
     EnrollmentEvidence,
     EnrollmentView,
     ExtractedSample,
+    PersonVoiceTemplates,
     SpeakerProfileView,
     VoiceAudioRequest,
+    VoiceprintCollection,
     VoiceTemplate,
     enrollment_evidence_digest,
 )
@@ -30,7 +32,6 @@ from sqlalchemy import select, text, update
 from eidolon_data.audit import governance_fact
 from eidolon_data.schema import OwnerRow
 from eidolon_data.schema.persons import PersonRow
-from eidolon_sdk.biz.voiceprint import VoiceprintCollection, PersonVoiceTemplates
 from eidolon_data.schema.voiceprints import (
     SpeakerProfileRow,
     SpeakerRecordingRow,
@@ -98,6 +99,7 @@ class Voiceprints:
     async def recognition_candidates(self, owner):
         """One bounded, owner-scoped snapshot; no recordings or new authority."""
         import json
+
         from eidolon_sdk.biz.person import PersonProfile
         from eidolon_sdk.biz.speaker_identity import SpeakerCandidate, SpeakerCandidates
         async with self._sessions() as s:
@@ -116,6 +118,7 @@ class Voiceprints:
                 supplied = PersonProfile.model_validate(person.profile_json)
                 candidates.append(SpeakerCandidate(
                     person_id=person.person_id, person_revision=person.revision,
+                    maturity=person.maturity, is_named=person.is_named,
                     display_name=person.display_name,
                     profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
                     templates=[VoiceTemplate(profile_id=profile.profile_id,
