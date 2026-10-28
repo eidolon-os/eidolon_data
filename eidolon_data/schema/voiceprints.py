@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    CheckConstraint,
     Float,
     ForeignKey,
     ForeignKeyConstraint,
@@ -20,6 +21,7 @@ from eidolon_data.db.base import Base
 class SpeakerProfileRow(Base):
     __tablename__ = "speaker_profiles"
     __table_args__ = (
+        CheckConstraint("(origin='enrollment' AND enrollment_id IS NOT NULL AND source_observation_id IS NULL) OR (origin='observation' AND enrollment_id IS NULL AND source_observation_id IS NOT NULL)", name="speaker_profile_origin"),
         Index("uq_speaker_profile_person", "owner_id", "person_id", unique=True),
         ForeignKeyConstraint(
             ["owner_id", "person_id"],
@@ -35,7 +37,10 @@ class SpeakerProfileRow(Base):
     person_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     display_name: Mapped[str] = mapped_column(String(80))
     revision: Mapped[int] = mapped_column(Integer)
-    enrollment_id: Mapped[str] = mapped_column(String(64))
+    enrollment_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    origin: Mapped[str] = mapped_column(String(16), default="enrollment", server_default="enrollment")
+    source_observation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("candidate_voice_observations.observation_id", ondelete="CASCADE"), nullable=True)
     template_json: Mapped[dict[str, Any]] = mapped_column(JSON)
 
 

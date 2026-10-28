@@ -474,3 +474,30 @@ async def test_candidate_without_receipts_expires_but_established_person_does_no
     await store.voiceprints.recognition_candidates('owner')
     assert (await store.persons.get('owner', 'a' * 32)).recognition_state == 'retained'
     assert (await store.persons.get('owner', 'b' * 32)).recognition_state == 'active'
+
+
+async def test_observation_profile_has_real_provenance_and_source_removal_revokes_template(store):
+    from sqlalchemy import select
+    from eidolon_data.schema.voiceprints import CandidateVoiceObservationRow, SpeakerProfileRow
+    request = await candidate_evidence_setup(store)
+    await store.voiceprints.record_candidate_evidence('owner', request)
+    async with store._session_factory() as session:
+        receipt = await session.scalar(select(CandidateVoiceObservationRow))
+        profile = await session.get(SpeakerProfileRow, request.observation.profile_id)
+        profile.origin = 'observation'
+        profile.enrollment_id = None
+        profile.source_observation_id = receipt.observation_id
+        await session.commit()
+    profile_view = (await store.voiceprints.view('owner')).profiles[0]
+    assert profile_view.origin == 'observation' and profile_view.enrollment_id is None
+    assert profile_view.source_observation_id == receipt.observation_id
+    assert len((await store.voiceprints.recognition_candidates('owner')).persons) == 1
+    async with store._session_factory() as session:
+        source = await session.get(CandidateVoiceObservationRow, receipt.observation_id)
+        await session.delete(source)
+        await session.commit()
+    assert not (await store.voiceprints.recognition_candidates('owner')).persons
+    assert not (await store.voiceprints.view('owner')).profiles
+    with pytest.raises(LookupError):
+        await store.voiceprints.recording('owner', request.observation.profile_id)
+    assert (await store.persons.get('owner', request.observation.person_id)).person_id == request.observation.person_id

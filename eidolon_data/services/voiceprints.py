@@ -468,6 +468,8 @@ class Voiceprints:
             p.template_json = evaluation.template.model_dump(mode="json")
             p.revision += 1
             p.enrollment_id = eid
+            p.origin = "enrollment"
+            p.source_observation_id = None
             await s.flush()
             previous = await s.get(SpeakerRecordingRow, p.profile_id)
             if previous is None:
@@ -517,6 +519,8 @@ def _profile(p, recording_available=False, *, validated=False):
         display_name=p.display_name,
         revision=p.revision,
         enrollment_id=p.enrollment_id,
+        origin=p.origin,
+        source_observation_id=p.source_observation_id,
         recording_available=recording_available,
         validation_state="validated" if validated else "unvalidated",
     )
