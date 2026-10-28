@@ -39,3 +39,28 @@ async def test_catalog_keeps_paused_deleted_and_purging_spaces_out_of_runtime(tm
         assert not erased["enabled"] and not erased["management_enabled"]
         assert erased["erasure_pending"]
     await store.close()
+
+
+async def test_candidate_catalog_exposes_only_explicit_provisional_ingest(tmp_path):
+    from eidolon_sdk.biz.system_data.models import ProvisionalMemoryPolicy
+    settings = DataSettings(sqlite_path=str(tmp_path / "data.sqlite3"), object_store_path=str(tmp_path / "objects"))
+    store = DataStore.open(settings)
+    await store.init_schema()
+    await store.owner_commands.create_owner(owner_id="o")
+    await store.persons.create("o", PersonCreate(person_id="a" * 32, display_name="candidate", maturity="candidate"))
+    token = "catalog-test-credential-123456"
+    app = create_app(settings, service_token=token, memory_roster_token=token)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://data", headers={"Authorization": "Bearer " + token}) as client:
+        async def entry():
+            result = await client.get("/api/companion-authority/v1/memory-realm-catalog")
+            assert result.status_code == 200
+            return result.json()["realms"][0]
+        assert not (await entry())["provisional_ingest_enabled"]
+        await store.persons.provisional_memory_policy("o", "a" * 32, 1, ProvisionalMemoryPolicy(save_allowed=True))
+        allowed = await entry()
+        assert allowed["provisional_ingest_enabled"] and allowed["management_enabled"]
+        assert not allowed["enabled"]
+        await store.persons.retire_candidate("o", "a" * 32, 2)
+        retained = await entry()
+        assert not retained["provisional_ingest_enabled"] and retained["realm_id"] == allowed["realm_id"]
+    await store.close()
