@@ -95,32 +95,40 @@ class Voiceprints:
                 profiles=[_profile(p, p.profile_id in recorded) for p in rows]
             )
 
-    async def assign(self, owner, profile_id, request):
-        async with self._transaction() as s:
-            await self._person(s, owner, request.person_id)
-            profile = await self._profile_owned(s, owner, profile_id)
-            if profile.revision != request.expected_revision:
-                raise VoiceprintConflict("profile revision changed")
-            if profile.person_id is not None and profile.person_id != request.person_id:
-                raise VoiceprintConflict(
-                    "already assigned; do not silently transfer biometric identity"
-                )
-            if profile.person_id is None:
-                profile.person_id = request.person_id
-                profile.revision += 1
-                enrollments = (
-                    await s.scalars(
-                        select(VoiceEnrollmentRow).where(
-                            VoiceEnrollmentRow.profile_id == profile_id
-                        )
-                    )
-                ).all()
-                for enrollment in enrollments:
-                    enrollment.person_id = request.person_id
-                self._audit(
-                    s, owner, profile_id, "voice_speaker.assigned", {"person_id": request.person_id}
-                )
-            return _profile(profile, await s.get(SpeakerRecordingRow, profile_id) is not None)
+    async def recognition_candidates(self, owner):
+        """One bounded, owner-scoped snapshot; no recordings or new authority."""
+        import json
+        from eidolon_sdk.biz.person import PersonProfile
+        from eidolon_sdk.biz.speaker_identity import SpeakerCandidate, SpeakerCandidates
+        async with self._sessions() as s:
+            await self._owner(s, owner)
+            rows = (await s.execute(
+                select(PersonRow, SpeakerProfileRow).join(
+                    SpeakerProfileRow, (SpeakerProfileRow.person_id == PersonRow.person_id)
+                    & (SpeakerProfileRow.owner_id == PersonRow.owner_id)
+                ).where(PersonRow.owner_id == owner, PersonRow.status == "active")
+                .order_by(PersonRow.person_id, SpeakerProfileRow.profile_id).limit(26)
+            )).all()
+            grouped = {}
+            for person, profile in rows:
+                if person.person_id not in grouped:
+                    # Description is not needed for conversational recognition.
+                    supplied = PersonProfile.model_validate(person.profile_json)
+                    grouped[person.person_id] = SpeakerCandidate(
+                        person_id=person.person_id, person_revision=person.revision,
+                        display_name=person.display_name,
+                        profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
+                        templates=[VoiceTemplate(profile_id=profile.profile_id,
+                            revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json))])
+                else:
+                    grouped[person.person_id].templates.append(VoiceTemplate(
+                        profile_id=profile.profile_id, revision=profile.revision,
+                        sample=ExtractedSample.model_validate(profile.template_json)))
+            if len(grouped) > 5 or len(rows) > 25 or any(len(p.templates) > 5 for p in grouped.values()):
+                raise VoiceprintConflict("recognition candidate capacity exceeded")
+            payload = [p.model_dump(mode="json") for p in grouped.values()]
+            digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            return SpeakerCandidates(owner_id=owner, revision=digest, persons=list(grouped.values()))
 
     async def templates(self, owner, person_id):
         async with self._sessions() as s:

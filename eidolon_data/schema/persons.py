@@ -1,6 +1,6 @@
 """Real people within an Owner namespace, independent of Companions."""
 
-from sqlalchemy import JSON, CheckConstraint, ForeignKey, Integer, String
+from sqlalchemy import JSON, CheckConstraint, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from eidolon_data.db.base import Base
@@ -17,6 +17,7 @@ class PersonRow(Base):
     revision: Mapped[int] = mapped_column(Integer)
     profile_json: Mapped[dict] = mapped_column(JSON)
     __table_args__ = (
+        Index("uq_persons_owner_person", "owner_id", "person_id", unique=True),
         CheckConstraint("status IN ('active', 'inactive')", name="person_status"),
         CheckConstraint("revision > 0", name="person_revision_positive"),
     )

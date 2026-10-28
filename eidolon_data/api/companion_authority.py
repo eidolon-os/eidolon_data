@@ -803,7 +803,11 @@ async def _runtime_snapshot(
     realm = await store.memory_realms.get(companion.default_memory_realm_id)
     if realm is None:
         raise HTTPException(status_code=409, detail="default memory realm is missing")
-    if realm.owner_id != companion.owner_id or realm.status != "active":
+    if (
+        realm.owner_id != companion.owner_id
+        or realm.status != "active"
+        or realm.person_id is not None
+    ):
         raise HTTPException(status_code=412, detail="default memory realm is not active in scope")
 
     selected_genome_id = (genome_id or companion.current_genome_id or "").strip()

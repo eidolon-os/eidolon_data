@@ -109,6 +109,47 @@ async def test_real_authority_process_serves_authenticated_concurrent_reads(tmp_
             with pytest.raises(SystemDataNotFound):
                 await runtime.get_companion_runtime("missing")
 
+            # Exercise the real Person API, SDK decoder and supervisor roster
+            # together. Creating private Realms must not change the default.
+            people = "/api/companion-authority/v1/owners/owner-e2e/persons"
+            personal = {}
+            for person in ("a" * 32, "b" * 32):
+                created = await client.post(
+                    people, headers=headers,
+                    json={"person_id": person, "display_name": person[0]},
+                )
+                assert created.status_code == 200, created.text
+                with pytest.raises(SystemDataNotFound):
+                    await runtime.get_person_memory_realm(owner_id="owner-e2e", person_id=person)
+                provisioned = await asyncio.gather(*(
+                    client.put(f"{people}/{person}/memory-realm", headers=headers)
+                    for _ in range(5)
+                ))
+                assert {r.status_code for r in provisioned} == {200}
+                assert len({r.json()["realm_id"] for r in provisioned}) == 1
+                personal[person] = await runtime.get_person_memory_realm(owner_id="owner-e2e", person_id=person)
+                with pytest.raises(SystemDataNotFound):
+                    await runtime.get_person_memory_realm(owner_id="another-owner", person_id=person)
+            a, b = personal.values()
+            assert len({a.realm_id, b.realm_id, "realm-e2e"}) == 3
+            assert (await runtime.get_owner_default_runtime("owner-e2e")) == snapshots[0]
+            roster_path = "/api/companion-authority/v1/memory-runtime-roster"
+            roster_headers = {"Authorization": "Bearer e2e-memory-runtime-roster-token-0001"}
+            roster = await client.get(roster_path, headers=roster_headers)
+            assert roster.status_code == 200
+            assert {r["realm_id"] for r in roster.json()["realms"]} == {
+                "realm-e2e", a.realm_id, b.realm_id,
+            }
+            removed = await client.delete(
+                f"{people}/{a.person_id}", headers=headers, params={"expected_revision": 1}
+            )
+            assert removed.status_code == 204
+            with pytest.raises(SystemDataNotFound):
+                await runtime.get_person_memory_realm(owner_id="owner-e2e", person_id=a.person_id)
+            roster = await client.get(roster_path, headers=roster_headers)
+            assert {r["realm_id"] for r in roster.json()["realms"]} == {"realm-e2e", b.realm_id}
+            assert (await runtime.get_person_memory_realm(owner_id="owner-e2e", person_id=b.person_id)) == b
+
             unauthorized = SystemDataRuntimeClient(
                 client,
                 "http://data.local",

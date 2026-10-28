@@ -1,7 +1,6 @@
 """Internal authenticated voice identity authority; no audio or model runtime."""
 
 from eidolon_sdk.biz.voiceprint import (
-    VoiceprintAssignment,
     PersonVoiceTemplates,
     EnrollmentCompletion,
     EnrollmentCreate,
@@ -12,6 +11,7 @@ from eidolon_sdk.biz.voiceprint import (
     VoiceAudioRequest,
     VoiceprintCollection,
 )
+from eidolon_sdk.biz.speaker_identity import SpeakerCandidates
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
 from eidolon_data.api.service_auth import authorize_service
@@ -36,6 +36,11 @@ def create_voiceprint_router(store, token):
     @router.get(prefix, response_model=VoiceprintCollection)
     async def view(owner_id: str):
         return await call(store.voiceprints.view, owner_id)
+
+    @router.get(prefix + "/recognition-candidates", response_model=SpeakerCandidates)
+    async def candidates(owner_id: str, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return await call(store.voiceprints.recognition_candidates, owner_id)
 
     @router.delete(prefix + "/profiles/{profile_id}", response_model=VoiceprintCollection)
     async def delete(owner_id: str, profile_id: str):
@@ -83,10 +88,6 @@ def create_voiceprint_router(store, token):
             enrollment_id,
             payload,
         )
-
-    @router.put(prefix + "/profiles/{profile_id}/person", response_model=SpeakerProfileView)
-    async def assign(owner_id: str, profile_id: str, payload: VoiceprintAssignment):
-        return await call(store.voiceprints.assign, owner_id, profile_id, payload)
 
     @router.get(prefix + "/persons/{person_id}/templates", response_model=PersonVoiceTemplates)
     async def templates(owner_id: str, person_id: str, response: Response):

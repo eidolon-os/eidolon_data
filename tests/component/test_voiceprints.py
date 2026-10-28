@@ -175,7 +175,7 @@ async def test_reference_recording_is_atomic_owner_scoped_and_deleted_with_profi
         assert await s.get(SpeakerRecordingRow, p.profile_id) is None
 
 
-async def test_legacy_profile_has_no_fabricated_recording(store):
+async def test_owned_profile_has_no_fabricated_recording(store):
     await setup(store)
     from eidolon_data.schema.voiceprints import SpeakerProfileRow
 
@@ -184,6 +184,7 @@ async def test_legacy_profile_has_no_fabricated_recording(store):
             SpeakerProfileRow(
                 profile_id="legacy",
                 owner_id="owner",
+                person_id="a" * 32,
                 display_name="旧档案",
                 revision=1,
                 enrollment_id="old",
@@ -200,3 +201,23 @@ async def setup(store):
     from eidolon_sdk.biz.person import PersonCreate
     await store.owner_commands.create_owner(owner_id="owner")
     await store.persons.create("owner", PersonCreate(person_id="a" * 32, display_name="甲"))
+
+
+async def test_recognition_snapshot_changes_on_lifecycle_and_excludes_other_owner(store):
+    from eidolon_sdk.biz.person import PersonUpdate, PersonProfile
+    await setup(store)
+    profile=await enroll(store)
+    snapshot=await store.voiceprints.recognition_candidates('owner')
+    assert len(snapshot.persons)==1
+    assert snapshot.persons[0].person_id=='a'*32
+    assert snapshot.persons[0].templates[0].profile_id==profile.profile_id
+    assert 'pcm_base64' not in snapshot.model_dump_json()
+    await store.owner_commands.create_owner(owner_id='second-owner')
+    assert (await store.voiceprints.recognition_candidates('second-owner')).persons==[]
+    changed=await store.persons.update('owner','a'*32,PersonUpdate(expected_revision=1,
+        display_name='new name',status='active',profile=PersonProfile(preferred_name='new')))
+    after=await store.voiceprints.recognition_candidates('owner')
+    assert after.revision!=snapshot.revision and after.persons[0].person_revision==changed.revision
+    await store.persons.update('owner','a'*32,PersonUpdate(expected_revision=changed.revision,
+        display_name='new name',status='inactive',profile=PersonProfile()))
+    assert (await store.voiceprints.recognition_candidates('owner')).persons==[]

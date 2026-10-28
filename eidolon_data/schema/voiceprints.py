@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from sqlalchemy import JSON, Float, ForeignKey, Integer, LargeBinary, String
+from sqlalchemy import JSON, Float, ForeignKey, ForeignKeyConstraint, Integer, LargeBinary, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from eidolon_data.db.base import Base
@@ -10,13 +10,19 @@ from eidolon_data.db.base import Base
 
 class SpeakerProfileRow(Base):
     __tablename__ = "speaker_profiles"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_id", "person_id"],
+            ["persons.owner_id", "persons.person_id"],
+            name="fk_speaker_profiles_owner_person",
+            ondelete="CASCADE",
+        ),
+    )
     profile_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_id: Mapped[str] = mapped_column(
         ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
     )
-    person_id: Mapped[str | None] = mapped_column(
-        ForeignKey("persons.person_id", ondelete="CASCADE"), nullable=True, index=True
-    )
+    person_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     display_name: Mapped[str] = mapped_column(String(80))
     revision: Mapped[int] = mapped_column(Integer)
     enrollment_id: Mapped[str] = mapped_column(String(64))
@@ -35,13 +41,19 @@ class SpeakerRecordingRow(Base):
 
 class VoiceEnrollmentRow(Base):
     __tablename__ = "voice_enrollments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_id", "person_id"],
+            ["persons.owner_id", "persons.person_id"],
+            name="fk_voice_enrollments_owner_person",
+            ondelete="CASCADE",
+        ),
+    )
     enrollment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_id: Mapped[str] = mapped_column(
         ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
     )
-    person_id: Mapped[str | None] = mapped_column(
-        ForeignKey("persons.person_id", ondelete="CASCADE"), nullable=True, index=True
-    )
+    person_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     profile_id: Mapped[str] = mapped_column(String(64))
     request_json: Mapped[dict[str, Any]] = mapped_column(JSON)
     samples_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

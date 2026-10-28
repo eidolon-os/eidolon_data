@@ -1266,6 +1266,7 @@ async def _ensure_memory_realm_in_session(
         select(MemoryRealmRow)
         .where(
             MemoryRealmRow.owner_id == companion.owner_id,
+            MemoryRealmRow.person_id.is_(None),
             MemoryRealmRow.status == "active",
         )
         .order_by(MemoryRealmRow.created_at)
@@ -1337,6 +1338,7 @@ async def _active_realm_for_owner(session, owner_id: str):
             await session.execute(
                 select(MemoryRealmRow).where(
                     MemoryRealmRow.owner_id == owner_id,
+                    MemoryRealmRow.person_id.is_(None),
                     #: The column is ``status`` here, not ``lifecycle_state``: this
                     #: table names it that way and renaming it is not this change's
                     #: business.
