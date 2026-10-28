@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from eidolon_sdk.biz.person import PersonView
-from eidolon_sdk.biz.system_data.models import ProvisionalMemoryPolicy
+from eidolon_sdk.biz.system_data.models import PersonMemoryDefaults, ProvisionalMemoryPolicy
 from sqlalchemy import delete, func, select, text
 
 from eidolon_data.audit import governance_fact
@@ -73,9 +73,9 @@ class Persons:
                 raise PersonConflict("person id has retained memory; explicit recovery required")
             if request.maturity == "candidate":
                 await self._candidate_capacity(session, owner_id)
-            return _view(self._insert_person(session, owner_id, request))
+            return _view(await self._insert_person(session, owner_id, request))
 
-    def _insert_person(self, session, owner_id, request):
+    async def _insert_person(self, session, owner_id, request):
         """Caller owns the transaction and has checked identity/capacity."""
         row = PersonRow(
             person_id=request.person_id,
@@ -90,7 +90,13 @@ class Persons:
         )
         session.add(row)
         self._audit(session, row, "person.created")
-        self._bind_memory(session, row)
+        owner = await session.get(OwnerRow, owner_id)
+        defaults = PersonMemoryDefaults.model_validate(
+            (owner.settings_json or {}).get("person_memory_defaults", {}))
+        realm = self._bind_memory(session, row)
+        if row.maturity == "candidate":
+            realm.policy_json = {**realm.policy_json, "provisional_memory": defaults.candidate.model_dump(),
+                                 "defaults_owner_revision": owner.revision}
         return row
 
     async def _candidate_capacity(self, session, owner_id):
@@ -274,6 +280,47 @@ class Persons:
                 receipt.state = "completed"
             return _deletion_view(receipt)
 
+    async def memory_defaults(self, owner_id, expected_revision=None, policy=None):
+        """CAS Owner defaults; never rewrite existing Person permissions."""
+        manager = self._transaction() if policy is not None else self._sessions()
+        async with manager as session:
+            await self._owner(session, owner_id)
+            owner = await session.get(OwnerRow, owner_id)
+            current = PersonMemoryDefaults.model_validate(
+                (owner.settings_json or {}).get("person_memory_defaults", {}))
+            if policy is not None:
+                if expected_revision != owner.revision:
+                    raise PersonConflict("owner revision changed")
+                policy = PersonMemoryDefaults.model_validate(policy)
+                if current != policy:
+                    owner.settings_json = {**(owner.settings_json or {}),
+                                           "person_memory_defaults": policy.model_dump()}
+                    owner.revision += 1
+                    owner.updated_at = datetime.now(UTC)
+                    session.add(governance_fact(owner_id=owner_id, subject_type="owner",
+                        subject_id=owner_id, action="owner.person_memory_defaults_updated",
+                        payload={"revision": owner.revision, "policy": policy.model_dump()}))
+                current = policy
+            return {"owner_id": owner_id, "owner_revision": owner.revision,
+                    "policy": current.model_dump()}
+
+    @staticmethod
+    async def prepare_promoted_memory(session, person):
+        """Apply current explicit Owner policy inside the promotion transaction."""
+        owner = await session.get(OwnerRow, person.owner_id)
+        defaults = PersonMemoryDefaults.model_validate(
+            (owner.settings_json or {}).get("person_memory_defaults", {}))
+        if not defaults.prepare_on_promotion:
+            return
+        realm = await session.scalar(select(MemoryRealmRow).where(
+            MemoryRealmRow.owner_id == person.owner_id, MemoryRealmRow.person_id == person.person_id))
+        if (realm is None or realm.status != "inactive"
+                or "defaults_owner_revision" not in (realm.policy_json or {})
+                or (realm.policy_json or {}).get("automatic_preparation_blocked", False)):
+            return
+        realm.status = "active"
+        Persons._audit(session, person, "person.memory_prepared_on_promotion")
+
     async def provisional_runtime_realms(self, owner_id, *, session_recall=False):
         """Bounded roster projection; retained identities cannot keep ingest enabled."""
         async with self._sessions() as session:
@@ -413,9 +460,11 @@ class Persons:
             if realm is None:
                 raise LookupError("personal memory realm is not bound")
             provisional = (realm.policy_json or {}).get("provisional_memory", {})
-            if realm.status == "active" or any(provisional.values()):
+            if (realm.status == "active" or any(provisional.values())
+                    or not (realm.policy_json or {}).get("automatic_preparation_blocked", False)):
                 realm.policy_json = {**(realm.policy_json or {}),
-                                     "provisional_memory": ProvisionalMemoryPolicy().model_dump()}
+                                     "provisional_memory": ProvisionalMemoryPolicy().model_dump(),
+                                 "automatic_preparation_blocked": True}
                 realm.status = "inactive"
                 person.revision += 1
                 self._audit(session, person, "person.memory_suspended")
@@ -464,7 +513,8 @@ class Persons:
         if realm is not None:
             realm.status = "inactive"
             realm.policy_json = {**(realm.policy_json or {}),
-                                 "provisional_memory": ProvisionalMemoryPolicy().model_dump()}
+                                 "provisional_memory": ProvisionalMemoryPolicy().model_dump(),
+                                 "automatic_preparation_blocked": True}
 
     @staticmethod
     def _revision(row, revision):

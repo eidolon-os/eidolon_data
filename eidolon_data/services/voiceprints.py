@@ -231,7 +231,7 @@ class Voiceprints:
                 await people._candidate_capacity(session, owner)
             except PersonConflict as exc:
                 raise VoiceprintConflict(str(exc)) from exc
-            person = people._insert_person(session, owner, PersonCreate(person_id=person_id,
+            person = await people._insert_person(session, owner, PersonCreate(person_id=person_id,
                 display_name=f"未命名用户 {person_id[:6]}", maturity="candidate", is_named=False))
             await session.flush()
             observation_id, profile_id = uuid.uuid4().hex, "sp_" + uuid.uuid4().hex
@@ -318,11 +318,13 @@ class Voiceprints:
             s.add(governance_fact(owner_id=owner, subject_type="person", subject_id=person.person_id,
                 action="person.candidate_evidence_recorded", payload={"independent_turns": count + 1}))
             person.candidate_activity_at = max(person.candidate_activity_at or 0, value.issued_at)
-            self._promote_candidate(s, person, rows, value)
+            await self._promote_candidate(s, person, rows, value)
             return CandidateEvidenceReceipt(person_id=person.person_id, person_revision=person.revision,
                 maturity=person.maturity, accepted=True, independent_turns=count + 1)
 
-    def _promote_candidate(self, session, person, rows, value):
+    async def _promote_candidate(self, session, person, rows, value):
+        from eidolon_data.services.persons import Persons
+
         policy = self._promotion_policy
         if policy is None:
             return
@@ -350,8 +352,9 @@ class Voiceprints:
             return
         person.maturity = "established"
         person.revision += 1
-        # Realm status and all provisional facts remain untouched. Promotion is
-        # evidence maturity, not an automatic read grant or fact confirmation.
+        # Only explicit Owner policy can prepare the existing Realm. Provisional
+        # facts remain unchanged; a manual suspension always takes precedence.
+        await Persons.prepare_promoted_memory(session, person)
         session.add(governance_fact(owner_id=person.owner_id, subject_type="person", subject_id=person.person_id,
             action="person.candidate_promoted", payload={"revision": person.revision,
                 "policy_version": policy.version, "independent_turns": len(observations)}))

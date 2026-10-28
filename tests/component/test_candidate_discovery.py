@@ -3,6 +3,7 @@ import time
 
 import pytest
 from eidolon_sdk.biz.candidate_evidence import CandidateDiscovery, CandidateDiscoveryPolicy
+
 from eidolon_data.services.voiceprints import VoiceprintConflict
 
 
@@ -60,10 +61,14 @@ async def test_stale_parallel_discovery_cannot_create_a_second_person(store):
 async def test_invalid_discovery_leaves_no_partial_person_or_realm(store, change):
     request = await setup(store)
     owner = 'owner'
-    if change == 'disabled': store.settings.candidate_discovery = None
-    if change == 'owner': owner = 'other'
-    if change == 'expired': request.observation.expires_at = time.time() - 1
-    if change == 'policy': request.policy_version = 'other'
+    if change == 'disabled':
+        store.settings.candidate_discovery = None
+    if change == 'owner':
+        owner = 'other'
+    if change == 'expired':
+        request.observation.expires_at = time.time() - 1
+    if change == 'policy':
+        request.policy_version = 'other'
     with pytest.raises(VoiceprintConflict):
         await store.voiceprints.discover_candidate(owner, request)
     assert await store.persons.list('owner') == []
@@ -73,6 +78,7 @@ async def test_invalid_discovery_leaves_no_partial_person_or_realm(store, change
 async def test_discovery_http_requires_service_auth(store):
     import httpx
     from fastapi import FastAPI
+
     from eidolon_data.api.routers.voiceprints import create_voiceprint_router
     request = await setup(store)
     app = FastAPI()
@@ -108,14 +114,34 @@ async def test_discovery_policy_change_invalidates_snapshot(store):
     assert await store.persons.list('owner') == []
 
 
-async def test_discovered_candidate_can_accumulate_verified_turns_and_promote_without_rebinding(store):
+@pytest.mark.parametrize("automatic,suspended", [(False, False), (True, False), (True, True), ("revoked", False), (True, "legacy")])
+async def test_discovered_candidate_can_accumulate_verified_turns_and_promote_without_rebinding(store, automatic, suspended):
     from eidolon_sdk.biz.candidate_evidence import CandidateEvidence, CandidatePromotionPolicy
     request = await setup(store)
+    from eidolon_sdk.biz.system_data.models import PersonMemoryDefaults
+    defaults = await store.persons.memory_defaults('owner')
+    await store.persons.memory_defaults('owner', defaults['owner_revision'],
+                                       PersonMemoryDefaults(prepare_on_promotion=bool(automatic), candidate={"save_allowed": True}))
     person = await store.voiceprints.discover_candidate('owner', request)
+    if suspended is True:
+        await store.persons.suspend_memory('owner', person.person_id, person.revision)
+        person = await store.persons.get('owner', person.person_id)
+    if suspended == "legacy":
+        from sqlalchemy import select
+
+        from eidolon_data.schema.core import MemoryRealmRow
+        async with store.persons._transaction() as session:
+            row = await session.scalar(select(MemoryRealmRow).where(MemoryRealmRow.person_id == person.person_id))
+            row.policy_json = {"scope": "person", "provisional_memory": {"save_allowed": False}}
+    provisional = await store.persons.provisional_memory_policy('owner', person.person_id)
+    assert provisional['policy']['save_allowed'] == (not suspended)
     realm = await store.persons.memory_state('owner', person.person_id)
     store.settings.candidate_promotion = CandidatePromotionPolicy(version='promotion', decision_version='trial',
         model_id='m', weights_hash='a' * 64, preprocessing_version='v', min_similarity=.8)
     for n in range(1, 4):
+        if n == 3 and automatic == "revoked":
+            defaults = await store.persons.memory_defaults('owner')
+            await store.persons.memory_defaults('owner', defaults['owner_revision'], PersonMemoryDefaults())
         snapshot = await store.voiceprints.recognition_candidates('owner')
         candidate = snapshot.persons[0]
         template = candidate.templates[0]
@@ -136,5 +162,6 @@ async def test_discovered_candidate_can_accumulate_verified_turns_and_promote_wi
     promoted = await store.persons.get('owner', person.person_id)
     assert promoted.person_id == person.person_id and promoted.revision == person.revision + 1
     after = await store.persons.memory_state('owner', person.person_id)
-    assert after['realm_id'] == realm['realm_id'] and after['state'] == 'inactive'
+    assert after['realm_id'] == realm['realm_id']
+    assert after['state'] == ('active' if automatic is True and not suspended else 'inactive')
     assert (await store.voiceprints.view('owner')).profiles[0].origin == 'observation'

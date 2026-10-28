@@ -7,6 +7,8 @@ from eidolon_sdk.biz.person_face import PersonFaceImage, PersonFaceState, Person
 from eidolon_sdk.biz.system_data.models import (
     PersonalMemoryRealmSnapshot,
     PersonalMemoryState,
+    PersonMemoryDefaults,
+    PersonMemoryDefaultsState,
     ProvisionalMemoryAccessSnapshot,
     ProvisionalMemoryPolicy,
     ProvisionalMemoryPolicyState,
@@ -68,6 +70,15 @@ def create_person_router(store, token):
             )
 
         return await call(invoke, owner_id, person_id, expected_revision)
+
+    @router.get("/memory-policy", response_model=PersonMemoryDefaultsState)
+    async def memory_defaults(owner_id: str):
+        return await call(store.persons.memory_defaults, owner_id)
+
+    @router.put("/memory-policy", response_model=PersonMemoryDefaultsState)
+    async def set_memory_defaults(owner_id: str, payload: PersonMemoryDefaults,
+                                  expected_revision: int = Query(ge=1)):
+        return await call(store.persons.memory_defaults, owner_id, expected_revision, payload)
 
     @router.get("/{person_id}", response_model=PersonView)
     async def get(owner_id: str, person_id: str):
