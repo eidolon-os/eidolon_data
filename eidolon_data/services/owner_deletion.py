@@ -8,7 +8,6 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from eidolon_data.audit import governance_fact
-from eidolon_data.schema.person_faces import PersonFaceRow
 from eidolon_data.schema import (
     CompanionFaceAssetRow,
     CompanionRow,
@@ -19,6 +18,8 @@ from eidolon_data.schema import (
     OwnerRow,
     PersonaGenomeRow,
 )
+from eidolon_data.schema.person_faces import PersonFaceRow
+from eidolon_data.services.speech_voices import retire_owner_voices
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,11 @@ class OwnerDeletionService:
                 ),
                 "owner_face_references": len(owner_face_keys),
             }
+            # Provider voices outlive the Owner as tombstones until Admin has
+            # deleted them at the provider; the rows themselves cascade below.
+            voice_count, voice_keys = await retire_owner_voices(session, owner_id)
+            object_keys += voice_keys
+            deleted_rows["owner_voices"] = voice_count
             # Companion pointers target rows that also cascade from Owner.
             if companion_ids:
                 companions = await session.scalars(

@@ -92,3 +92,25 @@ def test_new_raw_writes_cannot_reintroduce_retired_or_unknown_preferences():
             row.runtime_config_json = {"conversation_preferences": preferences}
         with pytest.raises(ValidationError):
             CompanionRow(runtime_config_json={"conversation_preferences": preferences})
+
+
+def test_head_retires_the_companion_voice_snapshot_and_keeps_everything_else(tmp_path, monkeypatch):
+    voice = {"profile_id": "warm-female", "bindings": [{"voice_id": "longwan_v3"}]}
+    old = {"conversation_preferences": {"response_length": "brief", "voice_profile_id": "warm-female"},
+           "companion_voice": voice, "preference_revision": 1, "other_namespace": {"x": 1}}
+    path = _database(tmp_path, monkeypatch, [old, {}])
+    command.upgrade(Config("alembic.ini"), "head")
+    assert _configs(path) == [
+        {"conversation_preferences": {"response_length": "brief"}, "preference_revision": 1,
+         "other_namespace": {"x": 1}},
+        {},
+    ]
+
+
+def test_new_raw_writes_cannot_reintroduce_companion_voice_or_store_a_bad_speech_voice():
+    with pytest.raises(ValueError):
+        CompanionRow(runtime_config_json={"companion_voice": {"profile_id": "x"}})
+    with pytest.raises(ValidationError):
+        CompanionRow(runtime_config_json={"speech_voice": {"revision": 1, "selection": {"source": "x"}}})
+    row = CompanionRow(runtime_config_json={"speech_voice": {"revision": 0, "selection": None}})
+    assert row.runtime_config_json["speech_voice"]["revision"] == 0

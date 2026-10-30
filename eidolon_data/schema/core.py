@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from eidolon_sdk.biz.persona import ConversationPreferences
+from eidolon_sdk.biz.speech_voice import SpeechVoiceRecord
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
@@ -114,6 +115,11 @@ class CompanionRow(Base):
         # Include raw workspace initialization in the public write contract.
         # Other runtime namespaces are independent and must be preserved.
         ConversationPreferences.model_validate(value.get("conversation_preferences", {}))
+        if "speech_voice" in value:
+            SpeechVoiceRecord.model_validate(value["speech_voice"])
+        if "companion_voice" in value:
+            # Retired by 0026: nothing reads it, and speech_voice is the one choice.
+            raise ValueError("companion_voice is retired; use speech_voice")
         return value
 
     metadata_json: Mapped[JsonDict] = mapped_column(default=dict)

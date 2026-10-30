@@ -154,6 +154,11 @@ class DataStore:
         return PersonFaces(self.persons, self.object_storage)
 
     @property
+    def speech_voices(self):
+        from eidolon_data.services.speech_voices import SpeechVoices
+        return SpeechVoices(self._session_factory, self.object_storage)
+
+    @property
     def persons(self):
         from eidolon_data.services.persons import Persons
         return Persons(self._session_factory, self.object_storage,
