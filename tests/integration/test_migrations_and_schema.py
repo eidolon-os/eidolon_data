@@ -30,7 +30,7 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
         }
         assert tables == EXPECTED_TABLES | {"alembic_version"}
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0022_speaker_profile_origin",
+            "0025_team_snapshots",
         )
         for table_name, table in Base.metadata.tables.items():
             actual_columns = {
@@ -45,7 +45,7 @@ def test_retired_admission_is_not_restored_by_downgrade(tmp_path, monkeypatch):
     monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
     config = Config("alembic.ini")
     command.upgrade(config, "head")
-    with pytest.raises(RuntimeError, match="observation profile provenance"):
+    with pytest.raises(RuntimeError, match="Saved teams must not be discarded"):
         command.downgrade(config, "0009_persons")
 
 
@@ -332,5 +332,5 @@ def test_person_realm_migration_preserves_default_and_guards_downgrade(tmp_path,
             db.execute(
                 "INSERT INTO memory_realms(realm_id,owner_id,status,person_id) VALUES ('duplicate','o','active','a')"
             )
-    with pytest.raises(RuntimeError, match="observation profile provenance"):
+    with pytest.raises(RuntimeError, match="Saved teams must not be discarded"):
         command.downgrade(config, "0011_owned_voiceprints")

@@ -130,6 +130,11 @@ class DataStore:
         return CompanionDeletionService(self._session_factory)
 
     @property
+    def teams(self):
+        from eidolon_data.services.teams import TeamAssets
+        return TeamAssets(self._session_factory)
+
+    @property
     def smarthome_registry(self) -> SmartHomeRegistryService:
         return SmartHomeRegistryService(self._session_factory)
 

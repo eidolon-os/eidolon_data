@@ -50,3 +50,4 @@ __all__ = [
 
 from eidolon_data.schema.person_faces import PersonFaceRow  # noqa: F401
 from eidolon_data.schema.persons import PersonDeletionRow, PersonRow  # noqa: F401
+from eidolon_data.schema.teams import TeamRevisionRow, TeamRow, TeamStartRow  # noqa: F401
