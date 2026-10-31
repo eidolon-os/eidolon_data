@@ -30,7 +30,7 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
         }
         assert tables == EXPECTED_TABLES | {"alembic_version"}
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0028_registration_template_speech",
+            "0029_channel_calibration_samples",
         )
         for table_name, table in Base.metadata.tables.items():
             actual_columns = {
@@ -334,3 +334,32 @@ def test_person_realm_migration_preserves_default_and_guards_downgrade(tmp_path,
             )
     with pytest.raises(RuntimeError, match="Saved teams must not be discarded"):
         command.downgrade(config, "0011_owned_voiceprints")
+
+
+def test_channel_calibration_migration_holds_only_public_replay_and_downgrades(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "channel-calibration.sqlite3"
+    monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "0028_registration_template_speech")
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("INSERT INTO owners(owner_id) VALUES ('o')")
+    command.upgrade(config, "head")
+    insert = (
+        "INSERT INTO channel_calibration_samples(sample_id,owner_id,channel,source,batch_id,"
+        "captured_at,sample_json,created_at) VALUES (?,'o','mobile',?,'replay-1',1.0,'{}',"
+        "'2026-11-01 00:00:00')"
+    )
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute(insert, ("cc_1", "public_replay"))
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(insert, ("cc_2", "household"))
+        db.execute("DELETE FROM owners WHERE owner_id='o'")
+        assert db.execute("SELECT count(*) FROM channel_calibration_samples").fetchone() == (0,)
+    command.downgrade(config, "0028_registration_template_speech")
+    with closing(sqlite3.connect(path)) as db:
+        assert not db.execute(
+            "SELECT name FROM sqlite_master WHERE name='channel_calibration_samples'"
+        ).fetchall()
