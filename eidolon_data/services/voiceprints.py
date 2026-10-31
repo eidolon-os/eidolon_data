@@ -18,11 +18,13 @@ from eidolon_sdk.biz.voiceprint import (
     EnrollmentCompletion,
     EnrollmentCreate,
     EnrollmentEvidence,
+    EnrollmentSample,
     EnrollmentView,
     ExtractedSample,
     PersonVoiceTemplates,
     SpeakerProfileView,
     VoiceAudioRequest,
+    TemplateCalibration,
     VoiceprintCollection,
     VoiceTemplate,
     enrollment_evidence_digest,
@@ -133,9 +135,11 @@ class Voiceprints:
             SpeakerCandidates,
         )
         rows = (await s.execute(
-            select(PersonRow, SpeakerProfileRow).join(
+            select(PersonRow, SpeakerProfileRow, VoiceEnrollmentRow).join(
                 SpeakerProfileRow, (SpeakerProfileRow.person_id == PersonRow.person_id)
                 & (SpeakerProfileRow.owner_id == PersonRow.owner_id)
+            ).outerjoin(
+                VoiceEnrollmentRow, VoiceEnrollmentRow.enrollment_id == SpeakerProfileRow.enrollment_id
             ).where(PersonRow.owner_id == owner, PersonRow.status == "active",
                     PersonRow.deleted.is_(False), PersonRow.recognition_state == "active",
                     or_(PersonRow.maturity != "candidate",
@@ -145,7 +149,7 @@ class Voiceprints:
         if len(rows) > MAX_RECOGNITION_PERSONS:
             raise VoiceprintConflict("recognition candidate capacity exceeded")
         candidates = []
-        for person, profile in rows:
+        for person, profile, enrollment in rows:
             supplied = PersonProfile.model_validate(person.profile_json)
             candidates.append(SpeakerCandidate(
                 person_id=person.person_id, person_revision=person.revision,
@@ -153,7 +157,8 @@ class Voiceprints:
                 display_name=person.display_name,
                 profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
                 templates=[VoiceTemplate(profile_id=profile.profile_id,
-                    revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json))]))
+                    revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json),
+                    calibration=_calibration(profile, enrollment))]))
         payload = {"persons": [p.model_dump(mode="json") for p in candidates],
             "discovery_policy": self._discovery_policy.model_dump(mode="json") if self._discovery_policy else None}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -490,7 +495,7 @@ class Voiceprints:
         if e.state != "collecting" or e.expires_at < time.time():
             raise VoiceprintConflict("enrollment is not collecting or has expired")
 
-    async def add_sample(self, owner, eid, sample_id, sample: ExtractedSample):
+    async def add_sample(self, owner, eid, sample_id, sample: EnrollmentSample):
         async with self._transaction() as s:
             e = await self._enrollment_owned(s, owner, eid)
             self._collecting(e)
@@ -503,7 +508,7 @@ class Voiceprints:
                 if len(samples) >= 3:
                     raise VoiceprintConflict("three registration samples already received")
                 for other in samples.values():
-                    _compatible(ExtractedSample.model_validate(other), sample)
+                    _compatible(EnrollmentSample.model_validate(other), sample)
                 samples[sample_id] = value
                 e.samples_json = samples
             return _enrollment(e)
@@ -538,7 +543,7 @@ class Voiceprints:
             self._collecting(e)
             await self._person(s, owner, e.person_id)
             samples_by_id = {
-                key: ExtractedSample.model_validate(x) for key, x in e.samples_json.items()
+                key: EnrollmentSample.model_validate(x) for key, x in e.samples_json.items()
             }
             samples = list(samples_by_id.values())
             if len(samples) != 3:
@@ -630,6 +635,15 @@ def _enrollment(e):
         accepted_samples=3 if e.state == "ready" else len(e.samples_json),
         expires_at=e.expires_at,
     )
+
+
+def _calibration(profile, enrollment):
+    """The same-person windows of the registration that made this exact template."""
+    if (profile.origin != "enrollment" or enrollment is None or enrollment.state != "ready"
+            or enrollment.profile_id != profile.profile_id):
+        return None
+    stored = (enrollment.samples_json.get("evaluation") or {}).get("calibration")
+    return TemplateCalibration.model_validate(stored) if stored else None
 
 
 def _compatible(a, b):

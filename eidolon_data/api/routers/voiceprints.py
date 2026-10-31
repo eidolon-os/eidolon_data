@@ -12,7 +12,7 @@ from eidolon_sdk.biz.voiceprint import (
     EnrollmentCreate,
     EnrollmentEvidence,
     EnrollmentView,
-    ExtractedSample,
+    EnrollmentSample,
     PersonVoiceTemplates,
     SpeakerProfileView,
     VoiceAudioRequest,
@@ -88,7 +88,7 @@ def create_voiceprint_router(store, token):
         owner_id: str,
         enrollment_id: str,
         sample_id: str,
-        payload: ExtractedSample,
+        payload: EnrollmentSample,
     ):
         return await call(store.voiceprints.add_sample, owner_id, enrollment_id, sample_id, payload)
 

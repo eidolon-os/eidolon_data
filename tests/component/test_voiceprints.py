@@ -19,7 +19,7 @@ def sample(n=0):
     )
 
 
-async def complete(v, owner, eid, trial, *, recording=None):
+async def complete(v, owner, eid, trial, *, recording=None, calibration=None):
     import base64
     import hashlib
 
@@ -43,6 +43,7 @@ async def complete(v, owner, eid, trial, *, recording=None):
             trial=trial,
             registration_min_similarity=1,
             trial_min_similarity=1,
+            calibration=calibration,
         ),
         recording=recording,
     )
@@ -550,3 +551,42 @@ async def test_promotion_does_not_reclassify_legacy_missing_overlap_as_clean(sto
         rows = (await session.scalars(select(CandidateVoiceObservationRow))).all()
         assert len(rows) == 4  # Old evidence retained, never retroactively certified.
         assert sum('overlap_detected' not in row.observation_json['audio_quality'] for row in rows) == 1
+
+
+def windows(similarity):
+    from eidolon_sdk.biz.voiceprint import CalibrationCrop, GenuineScore, TemplateCalibration
+    return TemplateCalibration(
+        crops=[CalibrationCrop(speech_ms=900, vector=[1.0, 0.0])],
+        genuine=[GenuineScore(speech_ms=900, similarity=similarity)])
+
+
+async def test_recognition_carries_the_windows_of_the_registration_that_made_the_template(store):
+    from eidolon_sdk.biz.voiceprint import CalibrationCrop, EnrollmentSample
+    await setup(store)
+    v = store.voiceprints
+
+    async def register(op, similarity):
+        e = await v.create_enrollment(
+            "owner", EnrollmentCreate(person_id="a" * 32, operation_id=op, display_name="甲"))
+        window = CalibrationCrop(speech_ms=900, vector=[1.0, 0.0])
+        for i in range(3):
+            await v.add_sample("owner", e.enrollment_id, str(i),
+                               EnrollmentSample(**sample(i).model_dump(), crops=[window]))
+        assert (await v.evidence("owner", e.enrollment_id)).samples["0"].crops == [window]
+        return await complete(v, "owner", e.enrollment_id, sample(3), calibration=windows(similarity))
+
+    first = await register("first", 0.71)
+    template = (await v.recognition_candidates("owner")).persons[0].templates[0]
+    assert template.calibration == windows(0.71)
+    second = await register("second", 0.82)
+    assert second.revision == first.revision + 1
+    template = (await v.recognition_candidates("owner")).persons[0].templates[0]
+    # Only the registration behind this exact template revision counts.
+    assert template.revision == second.revision and template.calibration == windows(0.82)
+
+
+async def test_a_registration_without_windows_has_no_calibration(store):
+    await setup(store)
+    await enroll(store)
+    template = (await store.voiceprints.recognition_candidates("owner")).persons[0].templates[0]
+    assert template.calibration is None
