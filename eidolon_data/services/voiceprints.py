@@ -14,7 +14,9 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
+from eidolon_sdk.biz.speaker_identity import SpeakerIdentityObservation, channel_class
 from eidolon_sdk.biz.voiceprint import (
+    REGISTRATION_CHANNEL,
     EnrollmentCompletion,
     EnrollmentCreate,
     EnrollmentEvidence,
@@ -23,18 +25,20 @@ from eidolon_sdk.biz.voiceprint import (
     ExtractedSample,
     PersonVoiceTemplates,
     SpeakerProfileView,
-    VoiceAudioRequest,
     TemplateCalibration,
+    VoiceAudioRequest,
     VoiceprintCollection,
     VoiceTemplate,
     enrollment_evidence_digest,
 )
+from pydantic import ValidationError
 from sqlalchemy import or_, select, text, update
 
 from eidolon_data.audit import governance_fact
 from eidolon_data.schema import OwnerRow
 from eidolon_data.schema.persons import PersonRow
 from eidolon_data.schema.voiceprints import (
+    CandidateVoiceObservationRow,
     SpeakerProfileRow,
     SpeakerRecordingRow,
     VoiceEnrollmentRow,
@@ -135,11 +139,14 @@ class Voiceprints:
             SpeakerCandidates,
         )
         rows = (await s.execute(
-            select(PersonRow, SpeakerProfileRow, VoiceEnrollmentRow).join(
+            select(PersonRow, SpeakerProfileRow, VoiceEnrollmentRow, CandidateVoiceObservationRow).join(
                 SpeakerProfileRow, (SpeakerProfileRow.person_id == PersonRow.person_id)
                 & (SpeakerProfileRow.owner_id == PersonRow.owner_id)
             ).outerjoin(
                 VoiceEnrollmentRow, VoiceEnrollmentRow.enrollment_id == SpeakerProfileRow.enrollment_id
+            ).outerjoin(
+                CandidateVoiceObservationRow,
+                CandidateVoiceObservationRow.observation_id == SpeakerProfileRow.source_observation_id,
             ).where(PersonRow.owner_id == owner, PersonRow.status == "active",
                     PersonRow.deleted.is_(False), PersonRow.recognition_state == "active",
                     or_(PersonRow.maturity != "candidate",
@@ -149,7 +156,7 @@ class Voiceprints:
         if len(rows) > MAX_RECOGNITION_PERSONS:
             raise VoiceprintConflict("recognition candidate capacity exceeded")
         candidates = []
-        for person, profile, enrollment in rows:
+        for person, profile, enrollment, source in rows:
             supplied = PersonProfile.model_validate(person.profile_json)
             candidates.append(SpeakerCandidate(
                 person_id=person.person_id, person_revision=person.revision,
@@ -158,7 +165,7 @@ class Voiceprints:
                 profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
                 templates=[VoiceTemplate(profile_id=profile.profile_id,
                     revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json),
-                    calibration=_calibration(profile, enrollment))]))
+                    calibration=_calibration(profile, enrollment), channel=_channel(profile, source))]))
         payload = {"persons": [p.model_dump(mode="json") for p in candidates],
             "discovery_policy": self._discovery_policy.model_dump(mode="json") if self._discovery_policy else None}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -168,23 +175,22 @@ class Voiceprints:
     async def discover_candidate(self, owner, request):
         import json
 
+        from eidolon_sdk.biz.candidate_evidence import CANDIDATE_MIN_SPEECH_MS
         from eidolon_sdk.biz.person import PersonCreate
         from eidolon_sdk.biz.speaker_identity import MAX_RECOGNITION_PERSONS
 
         from eidolon_data.schema.core import MemoryRealmRow
         from eidolon_data.schema.persons import PersonDeletionRow
-        from eidolon_data.schema.voiceprints import CandidateVoiceObservationRow
         from eidolon_data.services.persons import PersonConflict, Persons, _view
 
         value, policy = request.observation, self._discovery_policy
         if policy is None or request.policy_version != policy.version:
             raise VoiceprintConflict("candidate discovery policy unavailable")
-        recognition = policy.recognition
-        if (value.owner_id != owner or value.decision_version != recognition.version
-                or value.scoring_version != "normalized-template-cosine-v1"
-                or (value.model_id, value.weights_hash, value.preprocessing_version) != (
-                    recognition.model_id, recognition.weights_hash, recognition.preprocessing_version)
-                or request.sample.speech_ms < recognition.min_unknown_speech_ms):
+        # The signed discovery decision is the only exclusion of existing
+        # identities; it counts only under the identity policy named here.
+        if (value.owner_id != owner or value.status != "compared" or not value.decisions.discovery
+                or value.policy_version != policy.identity_policy_version
+                or request.sample.speech_ms < CANDIDATE_MIN_SPEECH_MS):
             raise VoiceprintConflict("discovery policy or owner mismatch")
         digest = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
         async with self._transaction() as session:
@@ -208,9 +214,6 @@ class Voiceprints:
                 raise VoiceprintConflict("recognition snapshot changed")
             if len(snapshot.persons) >= MAX_RECOGNITION_PERSONS:
                 raise VoiceprintConflict("recognition candidate capacity reached")
-            if snapshot.persons and (value.cosine_similarity is None
-                    or value.cosine_similarity > policy.max_existing_similarity):
-                raise VoiceprintConflict("insufficient exclusion of existing identities")
             replay = await session.scalar(select(CandidateVoiceObservationRow).where(
                 CandidateVoiceObservationRow.owner_id == owner,
                 CandidateVoiceObservationRow.audio_sha256 == request.audio_sha256))
@@ -258,22 +261,23 @@ class Voiceprints:
             CandidateEvidenceReceipt,
         )
 
-        from eidolon_data.schema.voiceprints import CandidateVoiceObservationRow
-
         value = request.observation
+        # The candidate meeting the candidate_evidence threshold, as signed.
+        chosen = value.decided("candidate_evidence")
         if value.owner_id != owner:
             raise VoiceprintConflict("evidence owner mismatch")
+        if chosen is None:
+            raise VoiceprintConflict("evidence names no candidate")
         digest = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
         async with self._transaction() as s:
-            person = await self._person(s, owner, value.person_id)
+            person = await self._person(s, owner, chosen.person_id)
             if person.deleted or person.recognition_state != "active":
                 raise VoiceprintConflict("candidate is not accepting evidence")
             rows = (await s.scalars(select(CandidateVoiceObservationRow).where(
                 CandidateVoiceObservationRow.owner_id == owner,
                 CandidateVoiceObservationRow.person_id == person.person_id))).all()
-            count = sum(row.profile_id == value.profile_id and row.profile_revision == value.profile_revision
-                and row.observation_json["decision_version"] == value.decision_version
-                and row.observation_json["scoring_version"] == value.scoring_version for row in rows)
+            count = sum(row.profile_id == chosen.profile_id and row.profile_revision == chosen.profile_revision
+                and row.observation_json.get("policy_version") == value.policy_version for row in rows)
             previous = await s.scalar(select(CandidateVoiceObservationRow).where(
                 CandidateVoiceObservationRow.owner_id == owner,
                 CandidateVoiceObservationRow.session_id == value.session_id,
@@ -290,11 +294,11 @@ class Voiceprints:
             if value.expires_at <= time.time():
                 raise VoiceprintConflict("expired candidate evidence")
             current = await self._recognition_snapshot(s, owner)
-            if current.revision != request.snapshot_revision or person.revision != value.person_revision:
+            if current.revision != request.snapshot_revision or person.revision != chosen.person_revision:
                 raise VoiceprintConflict("recognition snapshot changed")
             candidate = next((p for p in current.persons if p.person_id == person.person_id), None)
-            template = next((t for t in candidate.templates if t.profile_id == value.profile_id
-                             and t.revision == value.profile_revision), None) if candidate else None
+            template = next((t for t in candidate.templates if t.profile_id == chosen.profile_id
+                             and t.revision == chosen.profile_revision), None) if candidate else None
             if template is None or (template.sample.model_id, template.sample.weights_hash,
                     template.sample.preprocessing_version) != (value.model_id, value.weights_hash, value.preprocessing_version):
                 raise VoiceprintConflict("candidate template changed")
@@ -317,8 +321,8 @@ class Voiceprints:
                 raise VoiceprintConflict("candidate evidence capacity reached")
             s.add(CandidateVoiceObservationRow(observation_id=uuid.uuid4().hex, owner_id=owner,
                 person_id=person.person_id, session_id=value.session_id, turn_id=value.turn_id,
-                audio_sha256=request.audio_sha256, profile_id=value.profile_id,
-                profile_revision=value.profile_revision, request_digest=digest,
+                audio_sha256=request.audio_sha256, profile_id=chosen.profile_id,
+                profile_revision=chosen.profile_revision, request_digest=digest,
                 observation_json=json.loads(value.model_dump_json())))
             s.add(governance_fact(owner_id=owner, subject_type="person", subject_id=person.person_id,
                 action="person.candidate_evidence_recorded", payload={"independent_turns": count + 1}))
@@ -333,28 +337,30 @@ class Voiceprints:
         policy = self._promotion_policy
         if policy is None:
             return
-        # The latest match was checked against a current, complete snapshot in
-        # this transaction. Existing comparison/margin logic owns conflicts.
-        # Never mix templates, model deployments, or decision/scoring policies.
-        def eligible(observation):
-            return ((observation.get("audio_quality") or {}).get("overlap_detected") == 0
-                and observation["profile_id"] == value.profile_id
-                and observation["profile_revision"] == value.profile_revision
-                and observation["decision_version"] == policy.decision_version
-                and observation["scoring_version"] == policy.scoring_version
-                and observation["model_id"] == policy.model_id
-                and observation["weights_hash"] == policy.weights_hash
-                and observation["preprocessing_version"] == policy.preprocessing_version
-                and observation.get("cosine_similarity") is not None
-                and observation["cosine_similarity"] >= policy.min_similarity
-                and time.time() - policy.max_evidence_age_s <= observation["issued_at"] <= time.time() + 1)
+        chosen = value.decided("candidate_evidence")
+        now = time.time()
 
-        latest = value.model_dump(mode="json")
-        if not eligible(latest):
+        # The latest match was checked against a current, complete snapshot in
+        # this transaction; the signed per-use decision owns conflicts. Never
+        # mix templates, model deployments, or identity policies.
+        def counted(observation):
+            mine = next((e for e in observation.evidence if e.person_id == person.person_id), None)
+            quality = observation.audio_quality
+            return (observation.status == "compared" and mine is not None
+                and quality is not None and quality.overlap_detected == 0 and quality.speech_ms is not None
+                and (mine.profile_id, mine.profile_revision) == (chosen.profile_id, chosen.profile_revision)
+                and observation.policy_version == policy.identity_policy_version
+                and (observation.model_id, observation.weights_hash, observation.preprocessing_version) == (
+                    policy.model_id, policy.weights_hash, policy.preprocessing_version)
+                and mine.posterior >= policy.min_posterior
+                and now - policy.max_evidence_age_s <= observation.issued_at <= now + 1)
+
+        if not counted(value):
             return
-        observations = [row.observation_json for row in rows if eligible(row.observation_json)] + [latest]
+        stored = (_stored_observation(row.observation_json) for row in rows)
+        observations = [item for item in stored if item is not None and counted(item)] + [value]
         if (len(observations) < policy.min_turns
-                or sum(item["audio_quality"]["speech_ms"] for item in observations) < policy.min_total_speech_ms):
+                or sum(item.audio_quality.speech_ms for item in observations) < policy.min_total_speech_ms):
             return
         person.maturity = "established"
         person.revision += 1
@@ -369,8 +375,13 @@ class Voiceprints:
         async with self._sessions() as s:
             person = await self._person(s, owner, person_id)
             rows = (
-                await s.scalars(
-                    select(SpeakerProfileRow)
+                await s.execute(
+                    select(SpeakerProfileRow, CandidateVoiceObservationRow)
+                    .outerjoin(
+                        CandidateVoiceObservationRow,
+                        CandidateVoiceObservationRow.observation_id
+                        == SpeakerProfileRow.source_observation_id,
+                    )
                     .where(
                         SpeakerProfileRow.owner_id == owner,
                         SpeakerProfileRow.person_id == person_id,
@@ -387,8 +398,9 @@ class Voiceprints:
                         profile_id=p.profile_id,
                         revision=p.revision,
                         sample=ExtractedSample.model_validate(p.template_json),
+                        channel=_channel(p, source),
                     )
-                    for p in rows
+                    for p, source in rows
                 ],
             )
 
@@ -644,6 +656,27 @@ def _calibration(profile, enrollment):
         return None
     stored = (enrollment.samples_json.get("evaluation") or {}).get("calibration")
     return TemplateCalibration.model_validate(stored) if stored else None
+
+
+def _channel(profile, source):
+    """The capture channel this template was built from.
+
+    Registration captures only through the phone app; an observation template
+    keeps the channel of the probe that created it. A receipt that never
+    recorded one has no known channel.
+    """
+    if profile.origin != "observation":
+        return REGISTRATION_CHANNEL
+    recorded = ((source.observation_json or {}).get("source") or {}) if source is not None else {}
+    return recorded.get("channel") or channel_class(None)
+
+
+def _stored_observation(data):
+    """A retained receipt in the current observation shape; any other shape never counts."""
+    try:
+        return SpeakerIdentityObservation.model_validate(data)
+    except ValidationError:
+        return None
 
 
 def _compatible(a, b):

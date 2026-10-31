@@ -6,11 +6,14 @@ data:
   object_store_path: "$EIDOLON_STATE_ROOT/objects"
   echo_sql: false
   # Automatic maturity promotion is opt-in. Supply a versioned, model-bound
-  # CandidatePromotionPolicy only after the trial thresholds are evaluated.
+  # CandidatePromotionPolicy (identity policy version, model triple, minimum
+  # posterior) only after the identity policy has been evaluated.
   # Promotion never enables a candidate's retained Memory Realm.
   candidate_promotion: null
   # Candidate pool retention v1: seven days from creation/accepted evidence.
   # Expiry excludes matching and retains identity, evidence and memory data.
   candidate_pool_ttl_s: 604800
-  # Requires an evaluated model-bound policy AND explicit overlap evidence.
+  # Opt-in. A CandidateDiscoveryPolicy names the identity policy whose signed
+  # discovery decision may create a candidate; explicit overlap evidence is
+  # still required.
   candidate_discovery: null

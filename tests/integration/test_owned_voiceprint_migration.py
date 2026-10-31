@@ -80,3 +80,45 @@ def test_single_voice_upgrade_retires_old_evidence(tmp_path, monkeypatch, start_
             db.execute("SELECT version_num FROM alembic_version").fetchone()[0]
             == "0017_person_lifecycle"
         )
+
+
+def _insert(db, table, values):
+    """Insert a row, giving every required column without a default a placeholder."""
+    row = dict(values)
+    for _, name, kind, notnull, default, primary in db.execute(f"PRAGMA table_info({table})"):
+        if name not in row and notnull and default is None:
+            row[name] = 0 if any(k in kind.upper() for k in ("INT", "BOOL", "FLOAT", "REAL")) else "x"
+    db.execute(f"INSERT INTO {table}({','.join(row)}) VALUES ({','.join('?' * len(row))})", list(row.values()))
+
+
+def test_registration_templates_carry_their_whole_registration_speech(tmp_path, monkeypatch):
+    import json
+    path = tmp_path / "speech.sqlite3"
+    monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "0027_owner_voices")
+
+    def sample(ms):
+        return {"model_id": "m", "weights_hash": "a" * 64, "preprocessing_version": "v",
+                "vector": [1.0, 0.0], "speech_ms": ms, "quality": {}}
+
+    with closing(sqlite3.connect(path)) as db, db:
+        _insert(db, "owners", {"owner_id": "o"})
+        for person, profile, registration in (("p", "registered", (6320, 5490, 6080)),
+                                              ("q", "long", (12000, 12000, 12000))):
+            _insert(db, "persons", {"person_id": person, "owner_id": "o", "display_name": person,
+                                    "status": "active", "revision": 1, "profile_json": "{}"})
+            _insert(db, "speaker_profiles", {
+                "profile_id": profile, "owner_id": "o", "person_id": person, "display_name": person,
+                "revision": 1, "enrollment_id": profile, "origin": "enrollment",
+                "template_json": json.dumps(sample(registration[0]))})
+            _insert(db, "voice_enrollments", {
+                "enrollment_id": profile, "owner_id": "o", "profile_id": profile, "person_id": person,
+                "state": "ready", "expires_at": 0, "request_json": "{}",
+                "samples_json": json.dumps({"registration": {str(i): sample(ms) for i, ms in
+                                                             enumerate(registration)}})})
+    command.upgrade(config, "0028_registration_template_speech")
+    with closing(sqlite3.connect(path)) as db:
+        speech = {p: json.loads(t)["speech_ms"] for p, t in db.execute(
+            "SELECT profile_id, template_json FROM speaker_profiles")}
+    assert speech == {"registered": 6320 + 5490 + 6080, "long": 30000}

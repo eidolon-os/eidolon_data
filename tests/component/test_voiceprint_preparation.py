@@ -38,8 +38,6 @@ async def pending(store):
             recording_sha256=hashlib.sha256(pcm).hexdigest(),
             template=sample,
             trial=sample,
-            registration_min_similarity=1,
-            trial_min_similarity=1,
         ),
         recording=VoiceAudioRequest(pcm_base64=base64.b64encode(pcm).decode()),
     )

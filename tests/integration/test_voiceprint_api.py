@@ -49,8 +49,6 @@ async def test_http_enrollment_secrecy_and_live_revocation(store):
                     ).hexdigest(),
                     "template": sample,
                     "trial": sample,
-                    "registration_min_similarity": 1,
-                    "trial_min_similarity": 1,
                 },
                 "recording": recording,
             },

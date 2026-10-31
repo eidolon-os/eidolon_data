@@ -41,8 +41,6 @@ async def complete(v, owner, eid, trial, *, recording=None, calibration=None):
             recording_sha256=hashlib.sha256(base64.b64decode(recording.pcm_base64)).hexdigest(),
             template=next(iter(samples.values()), trial),
             trial=trial,
-            registration_min_similarity=1,
-            trial_min_similarity=1,
             calibration=calibration,
         ),
         recording=recording,
@@ -277,12 +275,21 @@ async def test_candidate_pool_exit_retains_identity_recording_and_realm(store):
     assert not (await store.voiceprints.recognition_candidates('owner')).persons
 
 
+IDENTITY_POLICY = 'identity-trial'
+
+
 async def candidate_evidence_setup(store):
-    from eidolon_sdk.biz.person import PersonCreate
-    from eidolon_sdk.biz.candidate_evidence import CandidateEvidence
-    from eidolon_sdk.biz.speaker_identity import SpeakerIdentityObservation, SpeakerEvidenceSource
-    from eidolon_sdk.biz.voiceprint import SpeakerAudioQuality
     import time
+
+    from eidolon_sdk.biz.candidate_evidence import CandidateEvidence
+    from eidolon_sdk.biz.person import PersonCreate
+    from eidolon_sdk.biz.speaker_identity import (
+        IdentityDecisions,
+        PersonEvidence,
+        SpeakerEvidenceSource,
+        SpeakerIdentityObservation,
+    )
+    from eidolon_sdk.biz.voiceprint import SpeakerAudioQuality
     await store.owner_commands.create_owner(owner_id='owner')
     await store.persons.create('owner', PersonCreate(person_id='a' * 32,
         display_name='匿名', maturity='candidate', is_named=False))
@@ -290,20 +297,26 @@ async def candidate_evidence_setup(store):
     snapshot = await store.voiceprints.recognition_candidates('owner')
     person = snapshot.persons[0]
     now = time.time()
-    observation = SpeakerIdentityObservation(status='identified', owner_id='owner',
+    observation = SpeakerIdentityObservation(status='compared', owner_id='owner',
         source=SpeakerEvidenceSource(request_id='t', session_id='s', input_id='mic',
-            generation=1, sample_rate=16000, start_sample=0, end_sample=32000),
+            generation=1, sample_rate=16000, start_sample=0, end_sample=32000, channel='esp-box-3'),
         session_id='s', turn_id='t', issued_at=now, expires_at=now + 10,
-        person_id=person.person_id, person_revision=person.person_revision,
-        profile_id=profile.profile_id, profile_revision=profile.revision,
         model_id='test', weights_hash='a' * 64, preprocessing_version='v1',
-        scoring_version='normalized-template-cosine-v1', decision_version='trial',
-        maturity='candidate', is_named=False, confidence='controlled_trial', reason='voice_match',
+        backend_version='identity-backend-v1', policy_version=IDENTITY_POLICY, reason='compared',
+        evidence=[PersonEvidence(person_id=person.person_id, person_revision=person.person_revision,
+            maturity='candidate', is_named=False, profile_id=profile.profile_id,
+            profile_revision=profile.revision, llr=6.0, posterior=0.98)],
+        posterior_unknown=0.02,
+        decisions=IdentityDecisions(candidate_evidence=person.person_id),
         audio_quality=SpeakerAudioQuality(audio_ms=2000, speech_ms=2000, required_speech_ms=1500, overlap_detected=0))
     return CandidateEvidence(snapshot_revision=snapshot.revision, audio_sha256='c' * 64, observation=observation)
 
 
-def another_candidate_turn(request, n, *, overlap=False):
+def chosen(request):
+    return request.observation.decided('candidate_evidence')
+
+
+def another_candidate_turn(request, n, *, overlap=False, **decided):
     from eidolon_sdk.biz.candidate_evidence import CandidateEvidence
     payload = request.model_dump()
     payload['audio_sha256'] = f'{n:064x}'
@@ -311,6 +324,7 @@ def another_candidate_turn(request, n, *, overlap=False):
     value['turn_id'] = value['source']['request_id'] = f't{n}'
     value['source']['start_sample'] = 1 if overlap else n * 32000
     value['source']['end_sample'] = 32001 if overlap else (n + 1) * 32000
+    value['evidence'][0].update(decided)
     return CandidateEvidence.model_validate(payload)
 
 
@@ -328,7 +342,7 @@ async def test_candidate_receipts_deduplicate_and_do_not_promote_or_grant(store)
     with pytest.raises(VoiceprintConflict, match='capacity'):
         await store.voiceprints.record_candidate_evidence('owner', another_candidate_turn(request, 5))
     person = await store.persons.get('owner', 'a' * 32)
-    assert person.maturity == 'candidate' and person.revision == request.observation.person_revision
+    assert person.maturity == 'candidate' and person.revision == chosen(request).person_revision
     assert (await store.persons.memory_state('owner', person.person_id))['state'] == 'inactive'
 
 
@@ -339,12 +353,15 @@ async def test_candidate_receipts_reject_replay_overlap_stale_scope_and_retireme
         (another_candidate_turn(request, 1, overlap=True), 'overlapping'),
         (another_candidate_turn(request, 1).model_copy(update={'audio_sha256': request.audio_sha256}), 'already counted'),
         (another_candidate_turn(request, 1).model_copy(update={'snapshot_revision': 'f' * 64}), 'snapshot'),
+        # The decided candidate must be the current Person and template revision.
+        (another_candidate_turn(request, 1, person_revision=chosen(request).person_revision + 1), 'snapshot'),
+        (another_candidate_turn(request, 1, profile_revision=chosen(request).profile_revision + 1), 'template'),
     ]:
         with pytest.raises(VoiceprintConflict, match=reason):
             await store.voiceprints.record_candidate_evidence('owner', changed)
     with pytest.raises(VoiceprintConflict, match='owner'):
         await store.voiceprints.record_candidate_evidence('other', request)
-    await store.persons.retire_candidate('owner', 'a' * 32, request.observation.person_revision)
+    await store.persons.retire_candidate('owner', 'a' * 32, chosen(request).person_revision)
     with pytest.raises(VoiceprintConflict, match='not accepting'):
         await store.voiceprints.record_candidate_evidence('owner', request)
 
@@ -365,22 +382,21 @@ async def test_candidate_receipt_api_requires_service_authority(store):
 
 def promotion_policy(**changes):
     from eidolon_sdk.biz.candidate_evidence import CandidatePromotionPolicy
-    return CandidatePromotionPolicy(**(dict(version='promotion-trial-v1', decision_version='trial',
-        model_id='test', weights_hash='a' * 64, preprocessing_version='v1', min_similarity=0.8) | changes))
+    return CandidatePromotionPolicy(**(dict(version='promotion-trial-v1', identity_policy_version=IDENTITY_POLICY,
+        model_id='test', weights_hash='a' * 64, preprocessing_version='v1', min_posterior=0.95) | changes))
 
 
 async def test_configured_promotion_is_atomic_stable_and_does_not_grant_memory(store):
     store.settings.candidate_promotion = promotion_policy()
     request = await candidate_evidence_setup(store)
-    request.observation.cosine_similarity = 0.9
     original = await store.persons.memory_state('owner', 'a' * 32)
     for n in range(3):
         current = request if n == 0 else another_candidate_turn(request, n)
         result = await store.voiceprints.record_candidate_evidence('owner', current)
         assert result.maturity == ('candidate' if n < 2 else 'established')
     person = await store.persons.get('owner', 'a' * 32)
-    assert person.person_id == request.observation.person_id and person.is_named is False
-    assert person.revision == request.observation.person_revision + 1
+    assert person.person_id == chosen(request).person_id and person.is_named is False
+    assert person.revision == chosen(request).person_revision + 1
     assert result.person_revision == person.revision
     replay = await store.voiceprints.record_candidate_evidence('owner', current)
     assert not replay.accepted and replay.maturity == 'established'
@@ -393,25 +409,23 @@ async def test_configured_promotion_is_atomic_stable_and_does_not_grant_memory(s
     assert (await store.voiceprints.recognition_candidates('owner')).revision != request.snapshot_revision
 
 
-@pytest.mark.parametrize('policy_change,similarity', [
-    ({'decision_version': 'other'}, 0.9), ({'model_id': 'other'}, 0.9),
-    ({}, 0.7), ({'min_total_speech_ms': 9000}, 0.9),
+@pytest.mark.parametrize('policy_change', [
+    {'identity_policy_version': 'other'}, {'model_id': 'other'},
+    {'min_posterior': 0.99}, {'min_total_speech_ms': 9000},
 ])
-async def test_promotion_requires_matching_policy_and_sufficient_evidence(store, policy_change, similarity):
+async def test_promotion_requires_matching_policy_and_sufficient_evidence(store, policy_change):
     store.settings.candidate_promotion = promotion_policy(**policy_change)
     request = await candidate_evidence_setup(store)
-    request.observation.cosine_similarity = similarity
     for n in range(3):
         await store.voiceprints.record_candidate_evidence('owner', request if n == 0 else another_candidate_turn(request, n))
     assert (await store.persons.get('owner', 'a' * 32)).maturity == 'candidate'
 
 
-async def test_promotion_does_not_mix_decision_versions(store):
+async def test_promotion_does_not_mix_identity_policies(store):
     store.settings.candidate_promotion = promotion_policy()
     request = await candidate_evidence_setup(store)
-    request.observation.cosine_similarity = 0.9
     older = request.model_copy(deep=True)
-    older.observation.decision_version = 'older-trial'
+    older.observation.policy_version = 'older-identity'
     await store.voiceprints.record_candidate_evidence('owner', older)
     for n in (1, 2):
         result = await store.voiceprints.record_candidate_evidence('owner', another_candidate_turn(request, n))
@@ -428,7 +442,7 @@ async def test_candidate_expiry_retains_evidence_and_duplicate_does_not_extend_p
     request = await candidate_evidence_setup(store)
     await store.voiceprints.record_candidate_evidence('owner', request)
     profiles = await store.voiceprints.view('owner')
-    recording = await store.voiceprints.recording('owner', request.observation.profile_id)
+    recording = await store.voiceprints.recording('owner', chosen(request).profile_id)
     realm = await store.persons.memory_state('owner', 'a' * 32)
     clock[0] += 50
     assert not (await store.voiceprints.record_candidate_evidence('owner', request)).accepted
@@ -436,9 +450,9 @@ async def test_candidate_expiry_retains_evidence_and_duplicate_does_not_extend_p
     assert not (await store.voiceprints.recognition_candidates('owner')).persons
     person = await store.persons.get('owner', 'a' * 32)
     assert person.recognition_state == 'retained' and person.status == 'active'
-    assert person.revision == request.observation.person_revision + 1
+    assert person.revision == chosen(request).person_revision + 1
     assert await store.voiceprints.view('owner') == profiles
-    assert await store.voiceprints.recording('owner', request.observation.profile_id) == recording
+    assert await store.voiceprints.recording('owner', chosen(request).profile_id) == recording
     assert (await store.persons.memory_state('owner', 'a' * 32))['realm_id'] == realm['realm_id']
     assert not (await store.voiceprints.recognition_candidates('owner')).persons
     assert (await store.persons.get('owner', 'a' * 32)).revision == person.revision
@@ -484,7 +498,7 @@ async def test_observation_profile_has_real_provenance_and_source_removal_revoke
     await store.voiceprints.record_candidate_evidence('owner', request)
     async with store._session_factory() as session:
         receipt = await session.scalar(select(CandidateVoiceObservationRow))
-        profile = await session.get(SpeakerProfileRow, request.observation.profile_id)
+        profile = await session.get(SpeakerProfileRow, chosen(request).profile_id)
         profile.origin = 'observation'
         profile.enrollment_id = None
         profile.source_observation_id = receipt.observation_id
@@ -492,7 +506,18 @@ async def test_observation_profile_has_real_provenance_and_source_removal_revoke
     profile_view = (await store.voiceprints.view('owner')).profiles[0]
     assert profile_view.origin == 'observation' and profile_view.enrollment_id is None
     assert profile_view.source_observation_id == receipt.observation_id
-    assert len((await store.voiceprints.recognition_candidates('owner')).persons) == 1
+    persons = (await store.voiceprints.recognition_candidates('owner')).persons
+    # An observation template is from the channel of the probe that created it.
+    assert len(persons) == 1 and persons[0].templates[0].channel == 'esp-box-3'
+    async with store._session_factory() as session:
+        source = await session.get(CandidateVoiceObservationRow, receipt.observation_id)
+        data = dict(source.observation_json)
+        data['source'] = {k: v for k, v in data['source'].items() if k != 'channel'}
+        source.observation_json = data
+        await session.commit()
+    # A receipt that never recorded its channel is not passed off as the phone's.
+    persons = (await store.voiceprints.recognition_candidates('owner')).persons
+    assert persons[0].templates[0].channel == 'unknown'
     async with store._session_factory() as session:
         source = await session.get(CandidateVoiceObservationRow, receipt.observation_id)
         await session.delete(source)
@@ -500,8 +525,9 @@ async def test_observation_profile_has_real_provenance_and_source_removal_revoke
     assert not (await store.voiceprints.recognition_candidates('owner')).persons
     assert not (await store.voiceprints.view('owner')).profiles
     with pytest.raises(LookupError):
-        await store.voiceprints.recording('owner', request.observation.profile_id)
-    assert (await store.persons.get('owner', request.observation.person_id)).person_id == request.observation.person_id
+        await store.voiceprints.recording('owner', chosen(request).profile_id)
+    person_id = chosen(request).person_id
+    assert (await store.persons.get('owner', person_id)).person_id == person_id
 
 
 async def test_recognition_snapshot_includes_all_bounded_people_and_never_truncates(store):
@@ -530,7 +556,6 @@ async def test_promotion_does_not_reclassify_legacy_missing_overlap_as_clean(sto
 
     store.settings.candidate_promotion = promotion_policy()
     request = await candidate_evidence_setup(store)
-    request.observation.cosine_similarity = .9
     await store.voiceprints.record_candidate_evidence('owner', request)
     # Simulate a retained receipt written before the new quality contract.
     async with store._session_factory() as session:
@@ -551,6 +576,32 @@ async def test_promotion_does_not_reclassify_legacy_missing_overlap_as_clean(sto
         rows = (await session.scalars(select(CandidateVoiceObservationRow))).all()
         assert len(rows) == 4  # Old evidence retained, never retroactively certified.
         assert sum('overlap_detected' not in row.observation_json['audio_quality'] for row in rows) == 1
+
+
+async def test_promotion_never_counts_a_receipt_in_an_older_observation_shape(store):
+    from sqlalchemy import select
+
+    from eidolon_data.schema.voiceprints import CandidateVoiceObservationRow
+
+    store.settings.candidate_promotion = promotion_policy()
+    request = await candidate_evidence_setup(store)
+    await store.voiceprints.record_candidate_evidence('owner', request)
+    # A retained v1 receipt: a hard verdict and a raw cosine, no calibrated evidence.
+    async with store._session_factory() as session:
+        row = await session.scalar(select(CandidateVoiceObservationRow))
+        data = {k: v for k, v in row.observation_json.items() if k not in (
+            'evidence', 'posterior_unknown', 'decisions', 'backend_version', 'policy_version')}
+        data.update(schema_version=1, status='identified', person_id='a' * 32, person_revision=1,
+            profile_id=row.profile_id, profile_revision=row.profile_revision, maturity='candidate',
+            is_named=False, confidence='controlled_trial', cosine_similarity=0.99,
+            scoring_version='normalized-template-cosine-v1', decision_version=IDENTITY_POLICY)
+        row.observation_json = data
+        await session.commit()
+    for n in (1, 2):
+        result = await store.voiceprints.record_candidate_evidence('owner', another_candidate_turn(request, n))
+        assert result.maturity == 'candidate' and result.independent_turns == n
+    result = await store.voiceprints.record_candidate_evidence('owner', another_candidate_turn(request, 3))
+    assert result.maturity == 'established' and result.independent_turns == 3
 
 
 def windows(similarity):
