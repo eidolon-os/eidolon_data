@@ -26,7 +26,6 @@ from eidolon_data.schema.smarthome import (
     SmartHomeSceneRow,
 )
 from eidolon_data.schema.voiceprints import (  # noqa: F401
-    ChannelCalibrationSampleRow,
     SpeakerProfileRow,
     VoiceEnrollmentRow,
 )

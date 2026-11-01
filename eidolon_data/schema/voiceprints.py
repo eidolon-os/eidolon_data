@@ -1,12 +1,10 @@
 """Data owns Person voiceprint evidence, never inference or conversation admission."""
 
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     CheckConstraint,
-    DateTime,
     Float,
     ForeignKey,
     ForeignKeyConstraint,
@@ -17,7 +15,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from eidolon_data.db.base import Base, utc_now
+from eidolon_data.db.base import Base
 
 
 class SpeakerProfileRow(Base):
@@ -98,28 +96,3 @@ class CandidateVoiceObservationRow(Base):
         Index('uq_candidate_voice_audio', 'owner_id', 'audio_sha256', unique=True),
         Index('ix_candidate_voice_person', 'owner_id', 'person_id'),
     )
-
-
-class ChannelCalibrationSampleRow(Base):
-    """A public speaker's replayed voice heard through one household channel (design §8.2, 1c-a).
-
-    In-domain impostor evidence for this Owner's channel: the embedding and its
-    registration-style windows. Never a household member's voice, never audio,
-    and never tied to a Person; it leaves with its batch or its Owner.
-    """
-
-    __tablename__ = "channel_calibration_samples"
-    __table_args__ = (
-        CheckConstraint("source = 'public_replay'", name="channel_calibration_source"),
-        Index("ix_channel_calibration_owner_channel_batch", "owner_id", "channel", "batch_id"),
-    )
-    sample_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    owner_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("owners.owner_id", ondelete="CASCADE")
-    )
-    channel: Mapped[str] = mapped_column(String(96))
-    source: Mapped[str] = mapped_column(String(32))
-    batch_id: Mapped[str] = mapped_column(String(64))
-    captured_at: Mapped[float] = mapped_column(Float)
-    sample_json: Mapped[dict[str, Any]] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

@@ -17,9 +17,6 @@ from contextlib import asynccontextmanager
 from eidolon_sdk.biz.speaker_identity import SpeakerIdentityObservation, channel_class
 from eidolon_sdk.biz.voiceprint import (
     REGISTRATION_CHANNEL,
-    ChannelCalibrationBatch,
-    ChannelCalibrationCollection,
-    ChannelCalibrationSample,
     EnrollmentCompletion,
     EnrollmentCreate,
     EnrollmentEvidence,
@@ -35,14 +32,13 @@ from eidolon_sdk.biz.voiceprint import (
     enrollment_evidence_digest,
 )
 from pydantic import ValidationError
-from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy import or_, select, text, update
 
 from eidolon_data.audit import governance_fact
 from eidolon_data.schema import OwnerRow
 from eidolon_data.schema.persons import PersonRow
 from eidolon_data.schema.voiceprints import (
     CandidateVoiceObservationRow,
-    ChannelCalibrationSampleRow,
     SpeakerProfileRow,
     SpeakerRecordingRow,
     VoiceEnrollmentRow,
@@ -51,11 +47,6 @@ from eidolon_data.schema.voiceprints import (
 
 class VoiceprintConflict(ValueError):
     pass
-
-
-# Replaying the whole public corpus once yields about 450 samples; this leaves
-# room for several channels and repeat runs while keeping every read bounded.
-MAX_CHANNEL_CALIBRATION_SAMPLES = 5000
 
 
 class Voiceprints:
@@ -620,68 +611,6 @@ class Voiceprints:
                 s, owner, p.profile_id, "voice_speaker.enrolled", {"profile_id": p.profile_id}
             )
             return _profile(p, True)
-
-    async def add_calibration_sample(self, owner, channel, batch_id, captured_at,
-                                     sample: EnrollmentSample) -> ChannelCalibrationSample:
-        """Keep one public speaker's replayed sample as impostor evidence for this channel.
-
-        Samples of different models may coexist; whoever scores them chooses.
-        """
-        value = ChannelCalibrationSample(sample_id="cc_" + uuid.uuid4().hex, channel=channel,
-            batch_id=batch_id, captured_at=captured_at, sample=sample)
-        row = ChannelCalibrationSampleRow
-        async with self._transaction() as s:
-            await self._owner(s, owner)
-            other = await s.scalar(select(row.channel).where(
-                row.owner_id == owner, row.batch_id == value.batch_id,
-                row.channel != value.channel).limit(1))
-            if other is not None:
-                raise VoiceprintConflict("calibration batch belongs to another channel")
-            count = await s.scalar(select(func.count()).select_from(row).where(row.owner_id == owner))
-            if count >= MAX_CHANNEL_CALIBRATION_SAMPLES:
-                raise VoiceprintConflict("channel calibration capacity reached; delete a batch first")
-            s.add(row(sample_id=value.sample_id, owner_id=owner, channel=value.channel,
-                source=value.source, batch_id=value.batch_id, captured_at=value.captured_at,
-                sample_json=value.sample.model_dump(mode="json")))
-        return value
-
-    async def calibration_samples(self, owner, channel=None) -> list[ChannelCalibrationSample]:
-        row = ChannelCalibrationSampleRow
-        query = select(row).where(row.owner_id == owner)
-        if channel is not None:
-            query = query.where(row.channel == channel)
-        async with self._sessions() as s:
-            await self._owner(s, owner)
-            rows = (await s.scalars(query.order_by(row.captured_at, row.sample_id))).all()
-        return [ChannelCalibrationSample(sample_id=r.sample_id, channel=r.channel, source=r.source,
-                    batch_id=r.batch_id, captured_at=r.captured_at,
-                    sample=EnrollmentSample.model_validate(r.sample_json)) for r in rows]
-
-    async def calibration_batches(self, owner) -> ChannelCalibrationCollection:
-        async with self._sessions() as s:
-            await self._owner(s, owner)
-            return await self._calibration_batches(s, owner)
-
-    async def delete_calibration_batch(self, owner, batch_id) -> ChannelCalibrationCollection:
-        """Retryable: a batch that is already gone leaves the others as they are."""
-        row = ChannelCalibrationSampleRow
-        async with self._transaction() as s:
-            await self._owner(s, owner)
-            await s.execute(delete(row).where(row.owner_id == owner, row.batch_id == batch_id))
-            return await self._calibration_batches(s, owner)
-
-    @staticmethod
-    async def _calibration_batches(s, owner):
-        row = ChannelCalibrationSampleRow
-        first = func.min(row.captured_at)
-        rows = (await s.execute(
-            select(row.batch_id, row.channel, func.count(), first, func.max(row.captured_at))
-            .where(row.owner_id == owner).group_by(row.batch_id, row.channel)
-            .order_by(first, row.batch_id))).all()
-        return ChannelCalibrationCollection(batches=[ChannelCalibrationBatch(
-            batch_id=batch_id, channel=channel, samples=samples,
-            first_captured_at=earliest, last_captured_at=latest)
-            for batch_id, channel, samples, earliest, latest in rows])
 
     @staticmethod
     def _audit(s, owner, profile_id, action, payload):
