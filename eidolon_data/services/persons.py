@@ -193,6 +193,9 @@ class Persons:
             await session.execute(
                 delete(SpeakerProfileRow).where(SpeakerProfileRow.person_id == person_id)
             )
+            from eidolon_data.services.voice_attributions import revoke_person
+
+            await revoke_person(session, owner_id, person_id)
             if face:
                 await session.delete(face)
             row.archived_at = datetime.now(UTC).isoformat()

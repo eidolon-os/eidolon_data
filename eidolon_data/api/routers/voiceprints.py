@@ -7,18 +7,19 @@ from eidolon_sdk.biz.candidate_evidence import (
 )
 from eidolon_sdk.biz.person import PersonView
 from eidolon_sdk.biz.speaker_identity import SpeakerCandidates
+from eidolon_sdk.biz.voice_attribution import VoiceAttribution, VoiceAttributionFeed, VoiceVerdict
 from eidolon_sdk.biz.voiceprint import (
     EnrollmentCompletion,
     EnrollmentCreate,
     EnrollmentEvidence,
-    EnrollmentView,
     EnrollmentSample,
+    EnrollmentView,
     PersonVoiceTemplates,
     SpeakerProfileView,
     VoiceAudioRequest,
     VoiceprintCollection,
 )
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
 from eidolon_data.api.service_auth import authorize_service
 from eidolon_data.services.voiceprints import VoiceprintConflict
@@ -44,9 +45,21 @@ def create_voiceprint_router(store, token):
         return await call(store.voiceprints.view, owner_id)
 
     @router.get(prefix + "/recognition-candidates", response_model=SpeakerCandidates)
-    async def candidates(owner_id: str, response: Response):
+    async def candidates(owner_id: str, response: Response,
+                         channel: str | None = Query(default=None, min_length=1, max_length=96),
+                         session_id: str | None = Query(default=None, min_length=1, max_length=128)):
         response.headers["Cache-Control"] = "no-store"
-        return await call(store.voiceprints.recognition_candidates, owner_id)
+        return await call(store.voiceprints.recognition_candidates, owner_id, channel, session_id)
+
+    @router.post(prefix + "/verdicts", response_model=VoiceAttribution)
+    async def verdict(owner_id: str, payload: VoiceVerdict):
+        return await call(store.voice_attributions.apply_verdict, owner_id, payload)
+
+    @router.get(prefix + "/attributions", response_model=VoiceAttributionFeed)
+    async def attributions(owner_id: str, response: Response, after: int = Query(default=0, ge=0),
+                           limit: int = Query(default=100, ge=1, le=100)):
+        response.headers["Cache-Control"] = "no-store"
+        return await call(store.voice_attributions.feed, owner_id, after, limit)
 
     @router.post(prefix + "/candidate-discovery", response_model=PersonView)
     async def candidate_discovery(owner_id: str, payload: CandidateDiscovery):

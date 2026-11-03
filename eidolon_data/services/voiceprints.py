@@ -105,8 +105,13 @@ class Voiceprints:
                 profiles=[_profile(p, p.profile_id in recorded) for p in rows]
             )
 
-    async def recognition_candidates(self, owner):
-        """One bounded, owner-scoped snapshot; no recordings or new authority."""
+    async def recognition_candidates(self, owner, channel=None, session_id=None):
+        """One bounded, owner-scoped snapshot; no recordings or new authority.
+
+        With a capture ``channel``, each Person's observation templates on that
+        channel come too, except those made in conversation ``session_id``
+        itself (design §3.2): a track is never compared with its own template.
+        """
         # Cheap indexed check first; healthy reads do not acquire a write lock.
         async with self._sessions() as s:
             await self._owner(s, owner)
@@ -122,14 +127,14 @@ class Voiceprints:
                     Persons._retain_candidate(s, row)
         async with self._sessions() as s:
             await self._owner(s, owner)
-            return await self._recognition_snapshot(s, owner)
+            return await self._recognition_snapshot(s, owner, channel=channel, session_id=session_id)
 
     def _expired_candidates(self, owner):
         return (PersonRow.owner_id == owner, PersonRow.maturity == "candidate",
             PersonRow.recognition_state == "active", PersonRow.deleted.is_(False),
             PersonRow.candidate_activity_at <= time.time() - self._candidate_pool_ttl_s)
 
-    async def _recognition_snapshot(self, s, owner):
+    async def _recognition_snapshot(self, s, owner, channel=None, session_id=None):
         import json
 
         from eidolon_sdk.biz.person import PersonProfile
@@ -155,6 +160,7 @@ class Voiceprints:
         )).all()
         if len(rows) > MAX_RECOGNITION_PERSONS:
             raise VoiceprintConflict("recognition candidate capacity exceeded")
+        observed = await _channel_templates(s, owner, channel, session_id, [r[0].person_id for r in rows])
         candidates = []
         for person, profile, enrollment, source in rows:
             supplied = PersonProfile.model_validate(person.profile_json)
@@ -165,7 +171,8 @@ class Voiceprints:
                 profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
                 templates=[VoiceTemplate(profile_id=profile.profile_id,
                     revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json),
-                    calibration=_calibration(profile, enrollment), channel=_channel(profile, source))]))
+                    calibration=_calibration(profile, enrollment), channel=_channel(profile, source)),
+                    *observed.get(person.person_id, [])]))
         payload = {"persons": [p.model_dump(mode="json") for p in candidates],
             "discovery_policy": self._discovery_policy.model_dump(mode="json") if self._discovery_policy else None}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -656,6 +663,30 @@ def _calibration(profile, enrollment):
         return None
     stored = (enrollment.samples_json.get("evaluation") or {}).get("calibration")
     return TemplateCalibration.model_validate(stored) if stored else None
+
+
+async def _channel_templates(s, owner, channel, session_id, person_ids):
+    """Per Person, the latest observation templates on ``channel`` made outside ``session_id``."""
+    from eidolon_data.schema.voiceprints import VoiceObservationTemplateRow
+    from eidolon_data.services.voice_attributions import MAX_CHANNEL_TEMPLATES
+
+    if channel is None or not person_ids:
+        return {}
+    query = select(VoiceObservationTemplateRow).where(
+        VoiceObservationTemplateRow.owner_id == owner, VoiceObservationTemplateRow.channel == channel,
+        VoiceObservationTemplateRow.person_id.in_(person_ids))
+    if session_id is not None:
+        query = query.where(VoiceObservationTemplateRow.session_id != session_id)
+    rows = (await s.scalars(query.order_by(VoiceObservationTemplateRow.updated_at.desc(),
+                                           VoiceObservationTemplateRow.template_id))).all()
+    out = {}
+    for row in rows:
+        kept = out.setdefault(row.person_id, [])
+        if len(kept) < MAX_CHANNEL_TEMPLATES:
+            kept.append(VoiceTemplate(profile_id=row.template_id, revision=row.revision,
+                                      sample=ExtractedSample.model_validate(row.sample_json),
+                                      channel=row.channel))
+    return out
 
 
 def _channel(profile, source):

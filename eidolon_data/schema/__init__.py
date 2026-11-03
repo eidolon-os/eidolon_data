@@ -27,7 +27,10 @@ from eidolon_data.schema.smarthome import (
 )
 from eidolon_data.schema.voiceprints import (  # noqa: F401
     SpeakerProfileRow,
+    VoiceAttributionRefRow,
+    VoiceAttributionRow,
     VoiceEnrollmentRow,
+    VoiceObservationTemplateRow,
 )
 
 __all__ = [

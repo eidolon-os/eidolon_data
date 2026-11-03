@@ -149,6 +149,11 @@ class DataStore:
             candidate_pool_ttl_s=self.settings.candidate_pool_ttl_s)
 
     @property
+    def voice_attributions(self):
+        from eidolon_data.services.voice_attributions import VoiceAttributions
+        return VoiceAttributions(self.voiceprints)
+
+    @property
     def person_faces(self):
         from eidolon_data.services.person_faces import PersonFaces
         return PersonFaces(self.persons, self.object_storage)
