@@ -18,6 +18,7 @@ from eidolon_sdk.biz.persona import (
     PersonaEditSnapshot,
     PersonaPresetCatalog,
 )
+from eidolon_sdk.biz.system_data.models import PersonMemoryDefaults
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -118,6 +119,7 @@ class MemoryRealmSnapshot(BaseModel):
 
     realm_id: str = Field(min_length=1, max_length=64)
     lifecycle_state: Literal["active"] = "active"
+    household_memory: bool = True
 
 
 class PersonaGenomeSnapshot(BaseModel):
@@ -884,7 +886,13 @@ async def _runtime_snapshot(
         owner_id=companion.owner_id,
         companion_id=companion.companion_id,
         runtime_config=runtime_config,
-        memory_realm=MemoryRealmSnapshot(realm_id=realm.realm_id),
+        memory_realm=MemoryRealmSnapshot(
+            realm_id=realm.realm_id,
+            # The Owner's default Realm is the household layer (design §3.6).
+            household_memory=PersonMemoryDefaults.model_validate(
+                (owner.settings_json or {}).get("person_memory_defaults", {})
+            ).household_memory,
+        ),
         persona_genome=PersonaGenomeSnapshot(
             genome_id=genome.genome_id,
             version=genome.version,

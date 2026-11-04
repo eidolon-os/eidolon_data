@@ -257,9 +257,28 @@ async def test_companion_authority_serves_runtime_snapshot_and_face(tmp_path) ->
         assert body["owner_id"] == "owner-1"
         assert body["companion_id"] == "companion-1"
         assert body["memory_realm"]["realm_id"] == "realm-1"
+        # The Owner's Realm is the household layer, on until switched off.
+        assert body["memory_realm"]["household_memory"] is True
         assert body["persona_genome"]["genome_id"] == "genome-1"
         assert body["persona_genome"]["genome"]["schema_version"] == "eidolon.persona_genome"
         Draft202012Validator(json.loads(RUNTIME_SCHEMA.read_text(encoding="utf-8"))).validate(body)
+        policy_path = "/api/companion-authority/v1/owners/owner-1/persons/memory-policy"
+        revision = (await client.get(policy_path, headers=headers)).json()["owner_revision"]
+        switched = await client.put(
+            policy_path, headers=headers, params={"expected_revision": revision},
+            json={"household_memory": False},
+        )
+        assert switched.status_code == 200
+        off = (await client.get(
+            "/api/companion-authority/v1/companions/companion-1/runtime-snapshot",
+            headers=headers,
+        )).json()
+        assert off["memory_realm"]["household_memory"] is False
+        restored = await client.put(
+            policy_path, headers=headers,
+            params={"expected_revision": switched.json()["owner_revision"]}, json={},
+        )
+        assert restored.json()["policy"]["household_memory"] is True
         assert CompanionRuntimeSnapshot.model_validate(body).companion_id == "companion-1"
 
         assert (

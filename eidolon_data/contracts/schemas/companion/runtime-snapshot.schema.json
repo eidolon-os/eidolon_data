@@ -27,7 +27,8 @@
       "required": ["realm_id", "lifecycle_state"],
       "properties": {
         "realm_id": {"type": "string", "minLength": 1, "maxLength": 64},
-        "lifecycle_state": {"const": "active"}
+        "lifecycle_state": {"const": "active"},
+        "household_memory": {"type": "boolean"}
       }
     },
     "persona_genome": {
