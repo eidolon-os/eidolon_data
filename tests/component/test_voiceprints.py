@@ -51,7 +51,7 @@ async def complete(v, owner, eid, trial, *, recording=None, calibration=None):
 async def enroll(store):
     v = store.voiceprints
     e = await v.create_enrollment(
-        "owner", EnrollmentCreate(person_id="a" * 32, operation_id="enroll-one", display_name="甲")
+        "owner", EnrollmentCreate(person_id="a" * 32, operation_id="enroll-one")
     )
     for i in range(3):
         await v.add_sample("owner", e.enrollment_id, str(i), sample(i))
@@ -79,7 +79,7 @@ async def test_idempotent_enrollment_and_failed_replace_preserve_template(store)
     assert again.profile_id == p.profile_id
     e = await v.create_enrollment(
         "owner",
-        EnrollmentCreate(person_id="a" * 32, operation_id="replace", display_name="甲", profile_id=p.profile_id),
+        EnrollmentCreate(person_id="a" * 32, operation_id="replace", profile_id=p.profile_id),
     )
     await v.add_sample("owner", e.enrollment_id, "0", sample())
     with pytest.raises(VoiceprintConflict):
@@ -114,7 +114,7 @@ async def test_expired_samples_are_purged_without_mobile_returning(store):
     await setup(store)
     v = store.voiceprints
     e = await v.create_enrollment(
-        "owner", EnrollmentCreate(person_id="a" * 32, operation_id="expire", display_name="甲")
+        "owner", EnrollmentCreate(person_id="a" * 32, operation_id="expire")
     )
     await v.add_sample("owner", e.enrollment_id, "0", sample())
     with patch("eidolon_data.services.voiceprints.time.time", return_value=e.expires_at + 1):
@@ -134,7 +134,7 @@ async def test_reference_recording_is_atomic_owner_scoped_and_deleted_with_profi
     await setup(store)
     v = store.voiceprints
     e = await v.create_enrollment(
-        "owner", EnrollmentCreate(person_id="a" * 32, operation_id="audio", display_name="甲")
+        "owner", EnrollmentCreate(person_id="a" * 32, operation_id="audio")
     )
     for i in range(3):
         await v.add_sample("owner", e.enrollment_id, str(i), sample(i))
@@ -149,7 +149,7 @@ async def test_reference_recording_is_atomic_owner_scoped_and_deleted_with_profi
     assert "pcm_base64" not in (await v.templates("owner", "a" * 32)).model_dump_json()
     replacement = await v.create_enrollment(
         "owner",
-        EnrollmentCreate(person_id="a" * 32, operation_id="replace-audio", display_name="甲", profile_id=p.profile_id),
+        EnrollmentCreate(person_id="a" * 32, operation_id="replace-audio", profile_id=p.profile_id),
     )
     with pytest.raises(VoiceprintConflict):
         await complete(
@@ -184,7 +184,6 @@ async def test_owned_profile_has_no_fabricated_recording(store):
                 profile_id="legacy",
                 owner_id="owner",
                 person_id="a" * 32,
-                display_name="旧档案",
                 revision=1,
                 enrollment_id="old",
                 template_json=sample().model_dump(),
@@ -225,13 +224,44 @@ async def test_recognition_snapshot_changes_on_lifecycle_and_excludes_other_owne
     assert (await store.voiceprints.recognition_candidates('owner')).persons==[]
 
 
+async def test_a_voice_candidate_is_addressed_as_the_person_asked_to_be_called(store):
+    """Heard or seen, one person has one name: the SDK's ``address_as``, which
+    face candidates carry too. The voiceprint keeps no name of its own."""
+    from eidolon_sdk.biz.person import PersonProfile, PersonUpdate
+    await setup(store)
+    profile = await enroll(store)
+    assert "display_name" not in profile.model_dump()
+
+    async def listed():
+        snapshot = await store.voiceprints.recognition_candidates("owner")
+        return snapshot.persons[0], snapshot.revision
+
+    async def rename(display_name, preferred_name):
+        person = await store.persons.get("owner", "a" * 32)
+        await store.persons.update("owner", "a" * 32, PersonUpdate(
+            expected_revision=person.revision, display_name=display_name, status="active",
+            profile=PersonProfile(preferred_name=preferred_name)))
+        return await listed()
+
+    candidate, revision = await listed()
+    assert candidate.address_as == "甲" and "display_name" not in candidate.model_dump()
+    called, after_preference = await rename("甲", "老甲")
+    assert called.address_as == "老甲" and called.profile.preferred_name == "老甲"
+    assert after_preference != revision
+    # Relisting leaves the spoken name alone; the snapshot still moves with the Person's revision.
+    relisted, after_listing = await rename("乙", "老甲")
+    assert relisted.address_as == "老甲" and after_listing != after_preference
+    fallback, after_clearing = await rename("乙", "  ")
+    assert fallback.address_as == "乙" and after_clearing != after_listing
+
+
 async def test_new_enrollment_replaces_single_profile_and_rejects_concurrent_stale_completion(store):
     await setup(store)
     original = await enroll(store)
     v = store.voiceprints
     sessions = []
     for op in ("replacement-a", "replacement-b"):
-        e = await v.create_enrollment("owner", EnrollmentCreate(person_id="a" * 32, operation_id=op, display_name="甲"))
+        e = await v.create_enrollment("owner", EnrollmentCreate(person_id="a" * 32, operation_id=op))
         assert e.profile_id == original.profile_id
         for i in range(3): await v.add_sample("owner", e.enrollment_id, str(i), sample(i))
         sessions.append(e)
@@ -540,7 +570,7 @@ async def test_recognition_snapshot_includes_all_bounded_people_and_never_trunca
         await store.persons.create('owner', PersonCreate(person_id=person_id, display_name=f'Person {n}'))
         async with store._session_factory() as session:
             session.add(SpeakerProfileRow(profile_id=f'v{n}', owner_id='owner', person_id=person_id,
-                display_name=f'Person {n}', revision=1, enrollment_id=f'e{n}', template_json=sample().model_dump()))
+                revision=1, enrollment_id=f'e{n}', template_json=sample().model_dump()))
             await session.commit()
         if n == MAX_RECOGNITION_PERSONS - 1:
             snapshot = await store.voiceprints.recognition_candidates('owner')
@@ -618,7 +648,7 @@ async def test_recognition_carries_the_windows_of_the_registration_that_made_the
 
     async def register(op, similarity):
         e = await v.create_enrollment(
-            "owner", EnrollmentCreate(person_id="a" * 32, operation_id=op, display_name="甲"))
+            "owner", EnrollmentCreate(person_id="a" * 32, operation_id=op))
         window = CalibrationCrop(speech_ms=900, vector=[1.0, 0.0])
         for i in range(3):
             await v.add_sample("owner", e.enrollment_id, str(i),

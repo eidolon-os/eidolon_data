@@ -20,7 +20,7 @@ async def pending(store):
     await store.persons.create("owner", PersonCreate(person_id="a" * 32, display_name="甲"))
     v = store.voiceprints
     e = await v.create_enrollment(
-        "owner", EnrollmentCreate(person_id="a" * 32, operation_id="one", display_name="我")
+        "owner", EnrollmentCreate(person_id="a" * 32, operation_id="one")
     )
     sample = ExtractedSample(
         model_id="test",
@@ -81,7 +81,7 @@ async def test_concurrent_rerecording_cannot_overwrite_a_newer_saved_profile(sto
         e = await v.create_enrollment(
             "owner",
             EnrollmentCreate(person_id="a" * 32,
-                operation_id=operation, display_name=operation, profile_id=profile.profile_id
+                operation_id=operation, profile_id=profile.profile_id
             ),
         )
         for i in range(3):

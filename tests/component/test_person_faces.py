@@ -260,7 +260,7 @@ async def test_candidates_list_only_enabled_active_persons_of_that_owner(store):
     assert [p.person_id for p in listed.persons] == [PID]
     assert listed.revision != empty.revision
     template = listed.persons[0].templates[0]
-    assert listed.persons[0].display_name == "A" and template.revision == 1
+    assert listed.persons[0].address_as == "A" and template.revision == 1
     assert template.features.vector == [0.25, 0.5, -0.125]
     assert (await store.person_faces.recognition_candidates("one")).revision == listed.revision
     theirs = await store.person_faces.recognition_candidates("two")
@@ -288,9 +288,9 @@ async def test_candidates_refuse_more_people_than_recognition_compares(store, mo
 
 
 async def test_a_candidate_is_named_as_the_person_asked_to_be_called(store):
-    """Seen or heard, one person has one name: voice recognition addresses a
-    speaker by the profile's preferred name before the listed one."""
-    from eidolon_sdk.biz.person import PersonProfile
+    """Seen or heard, one person has one name: the SDK's ``address_as``, which
+    voice candidates carry too."""
+    from eidolon_sdk.biz.person import PersonProfile, PersonUpdate
 
     await setup(store)
     other = "b" * 32
@@ -300,6 +300,23 @@ async def test_a_candidate_is_named_as_the_person_asked_to_be_called(store):
         await store.person_faces.replace(
             "one", person_id, PersonFaceUpdate(expected_revision=0, image_base64=photo()))
         await store.person_faces.enable_recognition("one", person_id, write())
-    names = {p.person_id: p.display_name
-             for p in (await store.person_faces.recognition_candidates("one")).persons}
+    async def listed():
+        candidates = await store.person_faces.recognition_candidates("one")
+        return {p.person_id: p.address_as for p in candidates.persons}, candidates.revision
+
+    names, revision = await listed()
     assert names == {PID: "A", other: "Called"}
+
+    async def rename(display_name, preferred_name):
+        person = await store.persons.get("one", other)
+        await store.persons.update("one", other, PersonUpdate(
+            expected_revision=person.revision, display_name=display_name, status="active",
+            profile=PersonProfile(preferred_name=preferred_name)))
+        return await listed()
+
+    # The listed name is not what they are called, so recognition has nothing to reload.
+    assert await rename("Relisted", "Called") == (names, revision)
+    renamed, changed = await rename("Relisted", "Renamed")
+    assert renamed[other] == "Renamed" and changed != revision
+    fallback, cleared = await rename("Relisted", "   ")
+    assert fallback[other] == "Relisted" and cleared != changed

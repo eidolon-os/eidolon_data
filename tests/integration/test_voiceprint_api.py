@@ -21,9 +21,12 @@ async def test_http_enrollment_secrecy_and_live_revocation(store):
         assert (await h.get(prefix)).status_code == 401
         h.headers["Authorization"] = "Bearer secret"
         assert (await h.get(prefix.replace("/owners/o/", "/owners/other/"))).status_code == 404
+        # A voiceprint has no name of its own; a client that still sends one is refused.
+        named = {"display_name": "甲", "operation_id": "named", "person_id": "a" * 32}
+        assert (await h.post(prefix + "/enrollments", json=named)).status_code == 422
         e = (
             await h.post(
-                prefix + "/enrollments", json={"display_name": "甲", "operation_id": "one", "person_id": "a" * 32}
+                prefix + "/enrollments", json={"operation_id": "one", "person_id": "a" * 32}
             )
         ).json()
         sample = {
@@ -68,5 +71,6 @@ async def test_http_enrollment_secrecy_and_live_revocation(store):
         view = (await h.get(prefix)).json()
         assert "vector" not in str(view)
         assert view["profiles"][0]["person_id"] == "a" * 32
+        assert "display_name" not in view["profiles"][0]
         assert (await h.put(prefix + "/policy", json={})).status_code == 404
         assert (await h.get("/api/companion-authority/v1/companions/c/voiceprint-snapshot")).status_code == 404

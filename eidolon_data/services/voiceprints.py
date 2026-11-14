@@ -137,7 +137,7 @@ class Voiceprints:
     async def _recognition_snapshot(self, s, owner, channel=None, session_id=None):
         import json
 
-        from eidolon_sdk.biz.person import PersonProfile
+        from eidolon_sdk.biz.person import PersonProfile, address_as
         from eidolon_sdk.biz.speaker_identity import (
             MAX_RECOGNITION_PERSONS,
             SpeakerCandidate,
@@ -167,7 +167,7 @@ class Voiceprints:
             candidates.append(SpeakerCandidate(
                 person_id=person.person_id, person_revision=person.revision,
                 maturity=person.maturity, is_named=person.is_named,
-                display_name=person.display_name,
+                address_as=address_as(person.display_name, supplied),
                 profile=supplied.model_copy(update={"description": "", "preferences": supplied.preferences[:8]}),
                 templates=[VoiceTemplate(profile_id=profile.profile_id,
                     revision=profile.revision, sample=ExtractedSample.model_validate(profile.template_json),
@@ -256,7 +256,7 @@ class Voiceprints:
                 request_digest=digest, observation_json=value.model_dump(mode="json")))
             await session.flush()
             session.add(SpeakerProfileRow(profile_id=profile_id, owner_id=owner, person_id=person_id,
-                display_name=person.display_name, revision=1, enrollment_id=None, origin="observation",
+                revision=1, enrollment_id=None, origin="observation",
                 source_observation_id=observation_id, template_json=request.sample.model_dump(mode="json")))
             return _view(person)
 
@@ -584,7 +584,6 @@ class Voiceprints:
                     profile_id=e.profile_id, owner_id=owner, person_id=e.person_id, revision=0
                 )
                 s.add(p)
-            p.display_name = e.request_json["display_name"]
             p.template_json = evaluation.template.model_dump(mode="json")
             p.revision += 1
             p.enrollment_id = eid
@@ -636,7 +635,6 @@ def _profile(p, recording_available=False, *, validated=False):
     return SpeakerProfileView(
         profile_id=p.profile_id,
         person_id=p.person_id,
-        display_name=p.display_name,
         revision=p.revision,
         enrollment_id=p.enrollment_id,
         origin=p.origin,

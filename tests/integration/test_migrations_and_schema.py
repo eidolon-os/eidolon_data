@@ -30,7 +30,7 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
         }
         assert tables == EXPECTED_TABLES | {"alembic_version"}
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0032_face_recognition_consent",
+            "0033_drop_voiceprint_name",
         )
         for table_name, table in Base.metadata.tables.items():
             actual_columns = {
@@ -394,3 +394,64 @@ def test_face_recognition_consent_downgrade_drops_unconsented_features(tmp_path,
     command.upgrade(config, "head")
     with closing(sqlite3.connect(path)) as connection:
         assert added <= columns(connection)
+
+
+def test_voiceprint_name_is_dropped_and_restored_from_the_person(tmp_path, monkeypatch):
+    import json
+
+    path = tmp_path / "voiceprint-name.sqlite3"
+    monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "0032_face_recognition_consent")
+    request = {"person_id": "p", "operation_id": "op", "display_name": "劲松", "profile_id": None,
+               "_target_revision": 1}
+
+    def profile_sql(connection):
+        return connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'speaker_profiles'").fetchone()[0]
+
+    def stored_request(connection, enrollment_id):
+        return json.loads(connection.execute(
+            "SELECT request_json FROM voice_enrollments WHERE enrollment_id = ?",
+            (enrollment_id,)).fetchone()[0])
+
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("INSERT INTO owners(owner_id) VALUES ('o')")
+        connection.execute(
+            "INSERT INTO persons(person_id, owner_id, display_name, status, revision, profile_json) "
+            "VALUES ('p', 'o', '劲松松', 'active', 1, '{}')"
+        )
+        connection.execute(
+            "INSERT INTO speaker_profiles(profile_id, owner_id, person_id, display_name, revision, "
+            "enrollment_id, origin, template_json) VALUES ('v', 'o', 'p', '劲松', 1, 'done', 'enrollment', '{}')"
+        )
+        for enrollment_id, state, body in (("done", "ready", request), ("open", "collecting", request),
+                                           ("bare", "expired", {})):
+            connection.execute(
+                "INSERT INTO voice_enrollments(enrollment_id, owner_id, person_id, profile_id, "
+                "request_json, samples_json, state, expires_at) VALUES (?, 'o', 'p', 'v', ?, '{}', ?, 0)",
+                (enrollment_id, json.dumps(body), state),
+            )
+        constraint = "ck_speaker_profiles_speaker_profile_origin"
+        assert constraint in profile_sql(connection)
+    command.upgrade(config, "head")
+    unnamed = {k: v for k, v in request.items() if k != "display_name"}
+    with closing(sqlite3.connect(path)) as connection:
+        columns = {row[1] for row in connection.execute('PRAGMA table_info("speaker_profiles")')}
+        assert "display_name" not in columns
+        # Dropped in place: the table keeps its constraint and its row.
+        assert constraint in profile_sql(connection)
+        assert connection.execute("SELECT profile_id, person_id, revision FROM speaker_profiles"
+                                  ).fetchall() == [("v", "p", 1)]
+        # A registration in flight loses the copy too, and keeps what completion reads.
+        assert stored_request(connection, "open") == unnamed == stored_request(connection, "done")
+        assert stored_request(connection, "bare") == {}
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    command.downgrade(config, "0032_face_recognition_consent")
+    with closing(sqlite3.connect(path)) as connection:
+        # The stale copy is gone for good; the Person's listed name stands in.
+        assert connection.execute("SELECT display_name FROM speaker_profiles").fetchone() == ("劲松松",)
+        assert stored_request(connection, "open") == unnamed | {"display_name": "劲松松"}
+        assert stored_request(connection, "bare") == {}
+        assert constraint in profile_sql(connection)
+    command.upgrade(config, "head")

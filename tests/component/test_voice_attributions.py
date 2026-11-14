@@ -34,8 +34,7 @@ async def enroll(store):
     await store.owner_commands.create_owner(owner_id="owner")
     await store.persons.create("owner", PersonCreate(person_id=PERSON, display_name="甲"))
     v = store.voiceprints
-    e = await v.create_enrollment("owner", EnrollmentCreate(person_id=PERSON, operation_id="enroll",
-                                                            display_name="甲"))
+    e = await v.create_enrollment("owner", EnrollmentCreate(person_id=PERSON, operation_id="enroll"))
     for i in range(3):
         await v.add_sample("owner", e.enrollment_id, str(i), sample(i))
     recording = VoiceAudioRequest(pcm_base64=base64.b64encode(b"\x01\x00" * 32000).decode())

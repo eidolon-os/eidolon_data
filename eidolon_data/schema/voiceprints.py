@@ -37,7 +37,6 @@ class SpeakerProfileRow(Base):
         ForeignKey("owners.owner_id", ondelete="CASCADE"), index=True
     )
     person_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    display_name: Mapped[str] = mapped_column(String(80))
     revision: Mapped[int] = mapped_column(Integer)
     enrollment_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     origin: Mapped[str] = mapped_column(String(16), default="enrollment", server_default="enrollment")
