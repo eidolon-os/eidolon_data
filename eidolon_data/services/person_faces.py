@@ -155,7 +155,13 @@ class PersonFaces:
         rows = [(person, face) for person, face in rows if self._enabled(face)]
         if len(rows) > MAX_FACE_RECOGNITION_PERSONS:
             raise PersonConflict("face recognition candidate capacity exceeded")
-        candidates = [FaceCandidate(person_id=person.person_id, display_name=person.display_name,
+        # The name to address them by: what the person asked to be called, else
+        # their listed name. Voice recognition names a speaker by the same rule
+        # (Channel), so one person is not called two things depending on whether
+        # they were heard or seen.
+        candidates = [FaceCandidate(person_id=person.person_id,
+            display_name=((person.profile_json or {}).get("preferred_name") or "").strip()
+            or person.display_name,
             templates=[FaceTemplate(revision=face.revision, features=FaceFeatures(
                 model_id=face.model_id, weights_hash=face.weights_hash,
                 preprocessing_version=face.preprocessing_version,

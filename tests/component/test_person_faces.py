@@ -285,3 +285,21 @@ async def test_candidates_refuse_more_people_than_recognition_compares(store, mo
     monkeypatch.setattr(person_faces, "MAX_FACE_RECOGNITION_PERSONS", 1)
     with pytest.raises(PersonConflict, match="capacity"):
         await store.person_faces.recognition_candidates("one")
+
+
+async def test_a_candidate_is_named_as_the_person_asked_to_be_called(store):
+    """Seen or heard, one person has one name: voice recognition addresses a
+    speaker by the profile's preferred name before the listed one."""
+    from eidolon_sdk.biz.person import PersonProfile
+
+    await setup(store)
+    other = "b" * 32
+    await store.persons.create("one", PersonCreate(
+        person_id=other, display_name="Listed", profile=PersonProfile(preferred_name="Called")))
+    for person_id in (PID, other):
+        await store.person_faces.replace(
+            "one", person_id, PersonFaceUpdate(expected_revision=0, image_base64=photo()))
+        await store.person_faces.enable_recognition("one", person_id, write())
+    names = {p.person_id: p.display_name
+             for p in (await store.person_faces.recognition_candidates("one")).persons}
+    assert names == {PID: "A", other: "Called"}
