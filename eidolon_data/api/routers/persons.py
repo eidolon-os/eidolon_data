@@ -3,7 +3,13 @@
 from typing import Literal
 
 from eidolon_sdk.biz.person import PersonCreate, PersonUpdate, PersonView
-from eidolon_sdk.biz.person_face import PersonFaceImage, PersonFaceState, PersonFaceUpdate
+from eidolon_sdk.biz.person_face import (
+    FaceCandidates,
+    PersonFaceFeaturesWrite,
+    PersonFaceImage,
+    PersonFaceState,
+    PersonFaceUpdate,
+)
 from eidolon_sdk.biz.system_data.models import (
     PersonalMemoryRealmSnapshot,
     PersonalMemoryState,
@@ -156,5 +162,41 @@ def create_person_router(store, token):
     @router.delete("/{person_id}/face-profile", response_model=PersonFaceState)
     async def face_delete(owner_id: str, person_id: str, expected_revision: int = Query(ge=0)):
         return await call(store.person_faces.delete, owner_id, person_id, expected_revision)
+
+    @router.put("/{person_id}/face-profile/recognition", response_model=PersonFaceState)
+    async def face_recognition_enable(owner_id: str, person_id: str,
+                                      payload: PersonFaceFeaturesWrite, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return await call(store.person_faces.enable_recognition, owner_id, person_id, payload)
+
+    @router.delete("/{person_id}/face-profile/recognition", response_model=PersonFaceState)
+    async def face_recognition_disable(owner_id: str, person_id: str, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return await call(store.person_faces.disable_recognition, owner_id, person_id)
+
+    return router
+
+
+def create_face_recognition_router(store, token):
+    """What the recognition runtime compares a camera frame against.
+
+    Separate from the Person router because it is read per Owner, not per
+    Person, and is the only route that carries face features.
+    """
+
+    async def auth(authorization: str | None = Header(default=None)):
+        authorize_service(authorization, token)
+
+    router = APIRouter(prefix="/api/companion-authority/v1", dependencies=[Depends(auth)])
+
+    @router.get("/owners/{owner_id}/faces/recognition-candidates", response_model=FaceCandidates)
+    async def candidates(owner_id: str, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await store.person_faces.recognition_candidates(owner_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except PersonConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     return router

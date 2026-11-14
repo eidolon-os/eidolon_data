@@ -30,7 +30,7 @@ def test_fresh_alembic_upgrade_matches_current_model_exactly(tmp_path, monkeypat
         }
         assert tables == EXPECTED_TABLES | {"alembic_version"}
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0031_voice_attributions",
+            "0032_face_recognition_consent",
         )
         for table_name, table in Base.metadata.tables.items():
             actual_columns = {
@@ -357,3 +357,40 @@ def test_withdrawn_channel_calibration_table_is_dropped_and_restorable_empty(
     command.downgrade(config, "0029_channel_calibration_samples")
     with closing(sqlite3.connect(path)) as db:
         assert db.execute("SELECT count(*) FROM channel_calibration_samples").fetchone() == (0,)
+
+
+def test_face_recognition_consent_downgrade_drops_unconsented_features(tmp_path, monkeypatch):
+    path = tmp_path / "face-consent.sqlite3"
+    monkeypatch.setenv("EIDOLON_DATA_DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "0032_face_recognition_consent")
+    added = {"weights_hash", "recognition_consent_version", "recognition_consent_statement",
+             "recognition_consent_at"}
+
+    def columns(connection):
+        return {row[1] for row in connection.execute('PRAGMA table_info("person_face_profiles")')}
+
+    with closing(sqlite3.connect(path)) as connection:
+        assert added <= columns(connection)
+        connection.execute("INSERT INTO owners(owner_id) VALUES ('o')")
+        connection.execute(
+            "INSERT INTO persons(person_id, owner_id, display_name, status, revision, profile_json) "
+            "VALUES ('p', 'o', 'P', 'active', 1, '{}')"
+        )
+        connection.execute(
+            "INSERT INTO person_face_profiles(person_id, owner_id, revision, storage_key, sha256, "
+            "model_id, features_json, weights_hash, recognition_consent_version, "
+            "recognition_consent_statement, recognition_consent_at) VALUES "
+            "('p', 'o', 1, 'person-faces/k.jpg', 'h', 'm', '[0.5, 0.25]', 'w', 'face-1', 's', 't')"
+        )
+        connection.commit()
+    command.downgrade(config, "0031_voice_attributions")
+    with closing(sqlite3.connect(path)) as connection:
+        assert not added & columns(connection)
+        # The photo survives; a feature nothing records consent for does not.
+        assert connection.execute(
+            "SELECT revision, storage_key, model_id, features_json FROM person_face_profiles"
+        ).fetchone() == (1, "person-faces/k.jpg", None, None)
+    command.upgrade(config, "head")
+    with closing(sqlite3.connect(path)) as connection:
+        assert added <= columns(connection)

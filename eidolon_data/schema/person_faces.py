@@ -1,5 +1,5 @@
 """One versioned photo slot per Person, independent of recognition runtime."""
-from sqlalchemy import ForeignKeyConstraint, String, Integer, JSON
+from sqlalchemy import ForeignKeyConstraint, String, Integer, JSON, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from eidolon_data.db.base import Base
 
@@ -14,6 +14,12 @@ class PersonFaceRow(Base):
     storage_key: Mapped[str | None] = mapped_column(String(256), unique=True)
     sha256: Mapped[str | None] = mapped_column(String(64))
     model_id: Mapped[str | None] = mapped_column(String(128))
+    weights_hash: Mapped[str | None] = mapped_column(String(64))
     preprocessing_version: Mapped[str | None] = mapped_column(String(128))
     feature_schema_version: Mapped[int | None] = mapped_column(Integer)
     features_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # The Owner's separate agreement to derive a feature from this photo: what
+    # was shown, which wording, and when the Host recorded it (ISO-8601 UTC).
+    recognition_consent_version: Mapped[str | None] = mapped_column(String(64))
+    recognition_consent_statement: Mapped[str | None] = mapped_column(Text)
+    recognition_consent_at: Mapped[str | None] = mapped_column(String(40))

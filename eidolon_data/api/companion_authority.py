@@ -286,9 +286,10 @@ def create_app(
     from .routers.voiceprints import create_voiceprint_router
 
     app.include_router(create_voiceprint_router(store, token))
-    from .routers.persons import create_person_router
+    from .routers.persons import create_face_recognition_router, create_person_router
 
     app.include_router(create_person_router(store, token))
+    app.include_router(create_face_recognition_router(store, token))
     from .routers.speech_voices import create_speech_voice_router
 
     app.include_router(create_speech_voice_router(store, token))
